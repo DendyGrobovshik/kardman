@@ -18,6 +18,7 @@ data class MethodInfo(
     val returnType: String,
     val parameters: List<ParameterInfo>,
     val nullableReturn: Boolean = false,
+    val isOpen: Boolean = false,
 )
 
 data class PropertyInfo(

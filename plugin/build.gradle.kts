@@ -18,7 +18,7 @@ kotlin {
 }
 
 val transformPluginSources = tasks.register("transformPluginSources") {
-    notCompatibleWithConfigurationCache("Script reference transformCode()")
+    notCompatibleWithConfigurationCache("Script reference")
     dependsOn(":kernel:kspKotlinJvm")
     val inputDir = file("src/jsMain/kotlin")
     val outputDir = layout.buildDirectory.dir("rdma/transformed")
@@ -35,7 +35,16 @@ val transformPluginSources = tasks.register("transformPluginSources") {
         outputDir.get().asFile.mkdirs()
 
         inputDir.walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { src ->
-            val transformed = transformCode(src.readText(), rdmaTypes)
+            val code = src.readText()
+            // 1. Handle inheritance first
+            var transformed = code
+            for (type in rdmaTypes) {
+                val parentName = type.simpleName
+                transformed = transformInheritance(transformed, parentName, rdmaTypes)
+            }
+            // 2. Regular constructor/property transforms
+            transformed = transformCode(transformed, rdmaTypes)
+            
             val relPath = src.relativeTo(inputDir).path
             val dst = outputDir.get().file(relPath).asFile
             dst.parentFile.mkdirs()
@@ -48,11 +57,11 @@ tasks.named("compileKotlinJs") {
     dependsOn(transformPluginSources)
 }
 
-tasks.matching { it.name.startsWith("ksp") || it.name.startsWith("compile") || it.name.startsWith("js") }.configureEach {
+tasks.matching { it.name.startsWith("compile") || it.name.startsWith("js") }.configureEach {
     outputs.upToDateWhen { false }
 }
 
-// ---------- inline transform logic (same as RdmaTransformer) ----------
+// ---------- inline transform logic ----------
 
 data class RdmaType(
     val simpleName: String,
@@ -81,17 +90,14 @@ fun parseClassesJson(json: String): List<RdmaType> {
                             params.add("arg" to tn.substringAfterLast("."))
                         }
                     }
-                    val props = mutableListOf<String>()
+                    val propNames = mutableListOf<String>()
                     Regex(""""properties":\[([^\]]*)\]""").find(block)?.let { pm ->
-                        nameValueRegex.findAll(pm.groupValues[1]).forEach { props.add(it.groupValues[1]) }
+                        nameValueRegex.findAll(pm.groupValues[1]).forEach { propNames.add(it.groupValues[1]) }
                     }
                     val mutableFlags = mutableListOf<Boolean>()
                     val propsBlock = Regex(""""properties":\[([^\]]*)\]""").find(block)?.groupValues?.get(1) ?: ""
                     mutableRegex.findAll(propsBlock).forEach { mutableFlags.add(it.groupValues[1] == "true") }
-                    val propsWithMutable = props.mapIndexed { idx, name ->
-                        name to (mutableFlags.getOrElse(idx) { false })
-                    }
-                    result.add(RdmaType(name, params, propsWithMutable))
+                    result.add(RdmaType(name, params, propNames.mapIndexed { idx, n -> n to (mutableFlags.getOrElse(idx) { false }) }))
                 }
             }
         }
@@ -123,4 +129,48 @@ fun transformCode(code: String, rdmaTypes: List<RdmaType>): String {
         }
     }
     return result
+}
+
+fun transformInheritance(code: String, parentName: String, rdmaTypes: List<RdmaType>): String {
+    // Find class Child(...) : Parent(...) { ... override fun greet() = "body" }
+    val classRegex = Regex("""class\s+(\w+)\s*\(([^)]*)\)\s*:\s*$parentName\s*\(([^)]*)\)\s*\{""")
+    val match = classRegex.find(code) ?: return code
+    
+    val childName = match.groupValues[1]
+    
+    // Find matching closing brace for class body
+    var depth = 1
+    var bodyEnd = match.range.last + 1
+    for (i in bodyEnd until code.length) {
+        if (code[i] == '{') depth++
+        else if (code[i] == '}') {
+            depth--
+            if (depth == 0) { bodyEnd = i; break }
+        }
+    }
+    
+    val classBody = code.substring(match.range.last + 1, bodyEnd)
+    
+    // Extract override methods
+    val overrides = mutableListOf<Pair<String, String>>()
+    val overrideRegex = Regex("""override\s+fun\s+(\w+)\s*\(([^)]*)\)\s*:\s*\w+\s*=\s*(.+?)\s*$""", RegexOption.MULTILINE)
+    overrideRegex.findAll(classBody).forEach { m ->
+        val methodName = m.groupValues[1]
+        val body = m.groupValues[3].trim().trim('"')
+        overrides.add(methodName to body)
+    }
+    
+    // Remove the class from code
+    val result = code.substring(0, match.range.first) + code.substring(bodyEnd + 1)
+    
+    // Replace Child(...) calls with createWithOverrides
+    val ctorRegex = Regex("""$childName\s*\(([^)]*)\)""")
+    return result.replace(ctorRegex) { ctorMatch ->
+        val args = ctorMatch.groupValues[1]
+        val overridesJs = overrides.joinToString(", ") { (name, body) ->
+            "${name}: function() { return \"$body\"; }"
+        }
+        val jsCode = """RDMA.createWithOverrides('$parentName', [$args], { $overridesJs })"""
+        "js(\"\"\"$jsCode\"\"\")"
+    }
 }

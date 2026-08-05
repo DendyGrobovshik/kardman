@@ -45,6 +45,10 @@ kotlin {
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
             implementation(libs.compose.uiTooling)
+            implementation(project(":kernel"))
+        }
+        jvmMain.dependencies {
+            implementation(project(":kernel"))
         }
         commonMain.dependencies {
             implementation(libs.compose.runtime)
@@ -56,7 +60,6 @@ kotlin {
             implementation(libs.androidx.lifecycle.viewmodelCompose)
             implementation(libs.androidx.lifecycle.runtimeCompose)
             implementation(project(":rdma-annotation"))
-            implementation(project(":kernel"))
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)

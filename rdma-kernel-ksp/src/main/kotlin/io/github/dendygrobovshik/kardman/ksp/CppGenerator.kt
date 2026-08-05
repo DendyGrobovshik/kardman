@@ -108,6 +108,7 @@ void initJniCache(JNIEnv* env) {
 #include <jni.h>
 #include <memory>
 #include <string>
+#include "RdmaVtable.h"
 
 namespace facebook {
 namespace rdma {
@@ -118,6 +119,7 @@ public:
     ~${info.className}NativeState() override;
     jobject getObject() const { return globalRef_; }
     JavaVM* getJvm() const { return jvm_; }
+    RdmaVtable* vtable_ = nullptr;
 
 private:
     JavaVM* jvm_;
@@ -191,8 +193,8 @@ ${info.className}NativeState::~${info.className}NativeState() {
         }
         if (isAttached) jvm_->DetachCurrentThread();
     }
+    delete vtable_;
 }
-
 """)
 
         for (prop in info.properties) {
@@ -254,6 +256,13 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
     if (!env) return jsi::Value::undefined();
     auto thisObj = thisVal.asObject(r);
     auto state = std::static_pointer_cast<${info.className}NativeState>(thisObj.getNativeState(r));
+    if (state->vtable_) {
+        auto vtIt = state->vtable_->entries.find("${method.name}");
+        if (vtIt != state->vtable_->entries.end()) {
+            auto& irt = *(jsi::IRuntime*)&r;
+            return vtIt->second->call(irt, args, count);
+        }
+    }
 """)
             for (param in method.parameters) {
                 val type = JniTypeMapper.forType(param.type)
@@ -497,6 +506,7 @@ void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env);
         val cpp = output("RdmaBridge.cpp", "RdmaBridge.cpp").bufferedWriter()
         cpp.write("""#include "RdmaBridge.h"
 #include "RdmaJniCache.h"
+#include "RdmaVtable.h"
 """)
         for (info in infos) {
             cpp.write("#include \"${info.className}HostObject.h\"\n")
@@ -509,6 +519,8 @@ void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env);
 
 namespace facebook {
 namespace rdma {
+
+static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides);
 
 void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env) {
     g_rdmaCache.jvm = jvm;
@@ -539,8 +551,55 @@ void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env) {
 """)
         }
         cpp.write("""
+    {
+        auto createOverridesFn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "createWithOverrides"), 3,
+            [jvm](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 3) return jsi::Value::undefined();
+                std::string className = args[0].getString(r).utf8(r);
+                jsi::Array ctorArgs = args[1].asObject(r).asArray(r);
+                jsi::Object overrides = args[2].asObject(r);
+                return createWithOverrides(r, jvm, className, ctorArgs, overrides);
+            }
+        );
+        rdmaNamespace.setProperty(rt, "createWithOverrides", std::move(createOverridesFn));
+    }
     rt.global().setProperty(rt, "RDMA", std::move(rdmaNamespace));
     LOGI("RDMA bridge installed successfully");
+}
+
+static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides) {
+    size_t argCount = ctorArgs.size(rt);
+    std::vector<jsi::Value> argsVec;
+    argsVec.reserve(argCount);
+    for (size_t i = 0; i < argCount; i++) {
+        argsVec.push_back(ctorArgs.getValueAtIndex(rt, i));
+    }
+""")
+        for (info in infos) {
+            cpp.write("""
+    if (className == "${info.className}") {
+        const jsi::Value* argsPtr = argsVec.empty() ? nullptr : argsVec.data();
+        auto jsObj = create${info.className}Instance(rt, jvm, argsPtr, argCount);
+        auto* vt = new RdmaVtable(&rt, jvm);
+        auto objNames = overrides.getPropertyNames(rt);
+        for (size_t i = 0; i < objNames.size(rt); i++) {
+            auto name = objNames.getValueAtIndex(rt, i).getString(rt).utf8(rt);
+            auto func = overrides.getProperty(rt, name.c_str()).asObject(rt).asFunction(rt);
+            vt->entries[name] = std::make_shared<jsi::Function>(std::move(func));
+        }
+        JNIEnv* env = nullptr;
+        jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+        auto state = std::static_pointer_cast<${info.className}NativeState>(jsObj.getNativeState(rt));
+        jfieldID vtableField = env->GetFieldID(g_rdmaCache.${info.className.lowercase()}_cache.clazz, "__vtable", "J");
+        env->SetLongField(state->getObject(), vtableField, (jlong)vt);
+        state->vtable_ = vt;
+        return jsObj;
+    }
+""")
+        }
+        cpp.write("""
+    return jsi::Object(rt);
 }
 
 } // namespace rdma

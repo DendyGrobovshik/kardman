@@ -5,15 +5,13 @@ plugins {
 
 kotlin {
     jvm()
-    js(IR) {
-        browser()
-    }
-    iosArm64()
-    iosSimulatorArm64()
 
     sourceSets {
         commonMain.dependencies {
             implementation(project(":rdma-annotation"))
+        }
+        commonMain {
+            kotlin.exclude("**/Person.kt", "**/Person2.kt")
         }
     }
 }
