@@ -4,13 +4,14 @@ object RdmaTransformer {
     data class RdmaType(
         val simpleName: String,
         val constructorParams: List<Pair<String, String>>,
-        val properties: List<String>,
+        val properties: List<Pair<String, Boolean>>,
     )
 
     fun parseClassesJson(json: String): List<RdmaType> {
         val result = mutableListOf<RdmaType>()
         val nameValueRegex = Regex(""""name":"([^"]+)"""")
         val typeValueRegex = Regex(""""type":"([^"]+)"""")
+        val mutableRegex = Regex(""""isMutable":(true|false)""")
 
         var depth = 0
         var start = -1
@@ -35,16 +36,18 @@ object RdmaTransformer {
                             }
                         }
 
-                        val props = mutableListOf<String>()
-                        val propsMatch = Regex(""""properties":\[([^\]]*)\]""").find(block)
-                        if (propsMatch != null) {
-                            val propsBlock = propsMatch.groupValues[1]
-                            nameValueRegex.findAll(propsBlock).forEach { nm ->
-                                props.add(nm.groupValues[1])
-                            }
+                        val propNames = mutableListOf<String>()
+                        Regex(""""properties":\[([^\]]*)\]""").find(block)?.let { pm ->
+                            nameValueRegex.findAll(pm.groupValues[1]).forEach { propNames.add(it.groupValues[1]) }
+                        }
+                        val mutableFlags = mutableListOf<Boolean>()
+                        val propsBlock = Regex(""""properties":\[([^\]]*)\]""").find(block)?.groupValues?.get(1) ?: ""
+                        mutableRegex.findAll(propsBlock).forEach { mutableFlags.add(it.groupValues[1] == "true") }
+                        val propsWithMutable = propNames.mapIndexed { idx, name ->
+                            name to (mutableFlags.getOrElse(idx) { false })
                         }
 
-                        result.add(RdmaType(name, params, props))
+                        result.add(RdmaType(name, params, propsWithMutable))
                     }
                 }
             }
@@ -79,8 +82,12 @@ object RdmaTransformer {
             }
 
             for (prop in type.properties) {
-                val getter = "get${prop.replaceFirstChar { it.uppercase() }}"
-                result = result.replace(Regex("""\.$prop\b(?!\()""")) { ".$getter()" }
+                if (prop.second) {
+                    val setter = "set${prop.first.replaceFirstChar { it.uppercase() }}"
+                    result = result.replace(Regex("""\.${prop.first}\s*=\s*([^\n]+)""")) { ".$setter(${it.groupValues[1]})" }
+                }
+                val getter = "get${prop.first.replaceFirstChar { it.uppercase() }}"
+                result = result.replace(Regex("""\.${prop.first}\b(?!\()""")) { ".$getter()" }
             }
         }
         return result

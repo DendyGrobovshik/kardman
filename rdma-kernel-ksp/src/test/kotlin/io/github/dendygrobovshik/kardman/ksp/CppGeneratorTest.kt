@@ -55,13 +55,55 @@ class CppGeneratorTest {
             )
         )
 
-        val generated = generate(classes)
+        val generated = generate(*classes.toTypedArray())
 
-        assertTrue("PersonHostObject.h" in generated, "Missing Person")
-        assertTrue("VampierHostObject.h" in generated, "Missing Vampier")
+        assertTrue("PersonHostObject.h" in generated, "Missing Person files")
+        assertTrue("VampierHostObject.h" in generated, "Missing Vampier files")
         val bridgeCpp = generated["RdmaBridge.cpp"] ?: error("Bridge not generated")
         assertContains(bridgeCpp, "createPerson")
         assertContains(bridgeCpp, "createVampier")
+    }
+
+    @Test
+    fun `generates setter for mutable property`() {
+        val mutable = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Device",
+            qualifiedName = "com.example.kernel.Device",
+            constructors = emptyList(),
+            methods = emptyList(),
+            properties = listOf(PropertyInfo("status", "kotlin.String", isMutable = true))
+        )
+
+        val generated = generate(mutable)
+        val cpp = generated["DeviceHostObject.cpp"] ?: error("Not generated")
+        assertContains(cpp, "setStatus")
+        assertContains(cpp, "PropNameID::forAscii(rt, \"setStatus\")")
+        assertContains(cpp, "setProperty(rt, \"setStatus\"")
+    }
+
+    @Test
+    fun `generates null check for nullable param`() {
+        val info = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Person",
+            qualifiedName = "com.example.kernel.Person",
+            constructors = listOf(ConstructorInfo(listOf(ParameterInfo("name", "kotlin.String")))),
+            methods = listOf(MethodInfo("greetMaybe", "kotlin.String", listOf(
+                ParameterInfo("vampier", "com.example.kernel.Vampier", nullable = true)
+            ), nullableReturn = true)),
+            properties = emptyList()
+        )
+
+        val classes = listOf(info, RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Vampier",
+            qualifiedName = "com.example.kernel.Vampier",
+            constructors = emptyList(), methods = emptyList(), properties = emptyList()
+        ))
+
+        val generated = generate(classes)
+        val cpp = generated["PersonHostObject.cpp"] ?: error("Not generated")
+        assertContains(cpp, "= nullptr")
+        assertContains(cpp, "isNull()")
+        assertContains(cpp, "return jsi::Value::null()")
     }
 
     private fun createPerson() = RdmaClassInfo(

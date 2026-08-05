@@ -4,12 +4,18 @@ import io.github.dendygrobovshik.kardman.RDMA
 
 @RDMA
 class Person(val name: String, val age: Int) {
+    var status: String = "alive"
+
     override fun toString(): String {
-        return "Person(name='$name', age=$age)"
+        return "Person(name='$name', age=$age, status=$status)"
     }
 
     fun greetVampier(vampier: SuperVeryOldVampier): String {
         return "$name greets ${vampier.grhhh()}"
+    }
+
+    fun greetMaybe(vampier: SuperVeryOldVampier?): String? {
+        return vampier?.let { "$name greets ${it.grhhh()}" }
     }
 
     fun getFriend(): Person {

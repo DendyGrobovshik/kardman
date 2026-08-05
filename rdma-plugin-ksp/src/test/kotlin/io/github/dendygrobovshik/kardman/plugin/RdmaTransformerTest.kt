@@ -35,7 +35,7 @@ class RdmaTransformerTest {
     fun `parses Person with correct properties`() {
         val types = RdmaTransformer.parseClassesJson(sampleJson)
         val person = types.find { it.simpleName == "Person" }!!
-        assertEquals(listOf("name", "age"), person.properties)
+        assertEquals(listOf("name" to false, "age" to false), person.properties)
     }
 
     @Test
@@ -94,24 +94,39 @@ class RdmaTransformerTest {
     }
 
     @Test
-    fun `adding new class to JSON includes it in transform`() {
-        val before = RdmaTransformer.parseClassesJson(sampleJson).size
-        assertEquals(3, before)
+    fun `transforms setter for mutable property`() {
+        // JSON with isMutable:true on status
+        val json = """[{"name":"Person","constructors":[{"parameters":[{"name":"name","type":"kotlin.String","nullable":false}]}],"methods":[],"properties":[{"name":"name","type":"kotlin.String","isMutable":false,"nullable":false},{"name":"status","type":"kotlin.String","isMutable":true,"nullable":false}]}]"""
+        val types = RdmaTransformer.parseClassesJson(json).filter { it.simpleName == "Person" }
+        val code = """
+            val p = Person("test", 42)
+            p.status = "alive"
+            println(p.status)
+        """.trimIndent()
 
-        val extendedJson = sampleJson.trimEnd().dropLast(1) + """
-,
-  {"name":"NewType","constructors":[{"parameters":[{"name":"value","type":"kotlin.Int"}]}],"properties":[{"name":"value","type":"kotlin.Int"}]}
-]
-""".trimIndent()
+        val transformed = RdmaTransformer.transformCode(code, types)
+        assertContains(transformed, """p.setStatus("alive")""")
+        assertContains(transformed, "p.getStatus()")
+    }
 
-        val after = RdmaTransformer.parseClassesJson(extendedJson)
-        assertEquals(4, after.size)
-        val newType = after.find { it.simpleName == "NewType" }!!
-        assertEquals(1, newType.constructorParams.size)
-        assertEquals("Int", newType.constructorParams[0].second)
+    @Test
+    fun `mutable false does not generate setter`() {
+        val json = """[{"name":"Person","constructors":[],"methods":[],"properties":[{"name":"name","type":"kotlin.String","isMutable":false,"nullable":false}]}]"""
+        val types = RdmaTransformer.parseClassesJson(json).filter { it.simpleName == "Person" }
+        val code = "p.name = \"test\""
 
-        val code = "val n = NewType(42)"
-        val transformed = RdmaTransformer.transformCode(code, after.filter { it.simpleName == "NewType" })
-        assertContains(transformed, """js("RDMA.createNewType(42)")""")
+        val transformed = RdmaTransformer.transformCode(code, types)
+        assertContains(transformed, """p.getName() = "test"""") // only getter, no setter
+        assertFalse(transformed.contains("setName"))
+    }
+
+    @Test
+    fun `parses isMutable from JSON`() {
+        val json = """[{"name":"Device","constructors":[],"methods":[],"properties":[{"name":"x","type":"kotlin.Int","isMutable":true,"nullable":false},{"name":"y","type":"kotlin.Int","isMutable":false,"nullable":false}]}]"""
+        val types = RdmaTransformer.parseClassesJson(json)
+        val props = types[0].properties
+        assertEquals(2, props.size)
+        assertEquals(true, props[0].second) // x isMutable
+        assertEquals(false, props[1].second) // y is not mutable
     }
 }

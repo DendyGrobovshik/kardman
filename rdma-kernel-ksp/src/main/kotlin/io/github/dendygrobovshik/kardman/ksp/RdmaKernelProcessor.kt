@@ -47,16 +47,27 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
             info.constructors.forEachIndexed { ci, ctor ->
                 sb.append("{\"parameters\":[")
                 ctor.parameters.forEachIndexed { pi, param ->
-                    sb.append("{\"name\":\"${param.name}\",\"type\":\"${param.type}\"}")
+                    sb.append("{\"name\":\"${param.name}\",\"type\":\"${param.type}\",\"nullable\":${param.nullable}}")
                     if (pi < ctor.parameters.size - 1) sb.append(",")
                 }
                 sb.append("]}")
                 if (ci < info.constructors.size - 1) sb.append(",")
             }
             sb.append("],")
+            sb.append("\"methods\":[")
+            info.methods.forEachIndexed { mi, method ->
+                sb.append("{\"name\":\"${method.name}\",\"returnType\":\"${method.returnType}\",\"nullableReturn\":${method.nullableReturn},\"parameters\":[")
+                method.parameters.forEachIndexed { pi, param ->
+                    sb.append("{\"name\":\"${param.name}\",\"type\":\"${param.type}\",\"nullable\":${param.nullable}}")
+                    if (pi < method.parameters.size - 1) sb.append(",")
+                }
+                sb.append("]}")
+                if (mi < info.methods.size - 1) sb.append(",")
+            }
+            sb.append("],")
             sb.append("\"properties\":[")
             info.properties.forEachIndexed { j, prop ->
-                sb.append("{\"name\":\"${prop.name}\",\"type\":\"${prop.type}\"}")
+                sb.append("{\"name\":\"${prop.name}\",\"type\":\"${prop.type}\",\"isMutable\":${prop.isMutable},\"nullable\":${prop.nullable}}")
                 if (j < info.properties.size - 1) sb.append(",")
             }
             sb.append("]}")
@@ -76,8 +87,13 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
 
         val constructors = cls.primaryConstructor?.let { ctor ->
             val params = ctor.parameters.map { param ->
-                val typeName = param.type.resolve().declaration.qualifiedName?.asString() ?: "kotlin.Any"
-                ParameterInfo(name = param.name?.asString() ?: "arg", type = typeName)
+                val resolved = param.type.resolve()
+                val typeName = resolved.declaration.qualifiedName?.asString() ?: "kotlin.Any"
+                ParameterInfo(
+                    name = param.name?.asString() ?: "arg",
+                    type = typeName,
+                    nullable = resolved.isMarkedNullable
+                )
             }
             listOf(ConstructorInfo(params))
         } ?: emptyList()
@@ -87,19 +103,28 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
             name !in setOf("<init>", "equals", "hashCode") &&
                 !name.startsWith("component") && !name.startsWith("copy")
         }.map { func ->
-            val returnType = func.returnType?.resolve()?.declaration?.qualifiedName?.asString() ?: "kotlin.Unit"
+            val resolvedReturn = func.returnType?.resolve()
+            val returnType = resolvedReturn?.declaration?.qualifiedName?.asString() ?: "kotlin.Unit"
             val params = func.parameters.map { param ->
-                val typeName = param.type.resolve().declaration.qualifiedName?.asString() ?: "kotlin.Any"
-                ParameterInfo(name = param.name?.asString() ?: "arg", type = typeName)
+                val resolved = param.type.resolve()
+                val typeName = resolved.declaration.qualifiedName?.asString() ?: "kotlin.Any"
+                ParameterInfo(
+                    name = param.name?.asString() ?: "arg",
+                    type = typeName,
+                    nullable = resolved.isMarkedNullable
+                )
             }
-            MethodInfo(func.simpleName.asString(), returnType, params)
+            MethodInfo(func.simpleName.asString(), returnType, params,
+                nullableReturn = resolvedReturn?.isMarkedNullable ?: false)
         }.toList()
 
         val properties = cls.getAllProperties().map { prop ->
+            val resolved = prop.type.resolve()
             PropertyInfo(
                 name = prop.simpleName.asString(),
-                type = prop.type.resolve().declaration.qualifiedName?.asString() ?: "kotlin.Any",
-                isMutable = prop.isMutable
+                type = resolved.declaration.qualifiedName?.asString() ?: "kotlin.Any",
+                isMutable = prop.isMutable,
+                nullable = resolved.isMarkedNullable
             )
         }.toList()
 

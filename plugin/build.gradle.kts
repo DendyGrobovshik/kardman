@@ -57,13 +57,14 @@ tasks.matching { it.name.startsWith("ksp") || it.name.startsWith("compile") || i
 data class RdmaType(
     val simpleName: String,
     val constructorParams: List<Pair<String, String>>,
-    val properties: List<String>,
+    val properties: List<Pair<String, Boolean>>,
 )
 
 fun parseClassesJson(json: String): List<RdmaType> {
     val result = mutableListOf<RdmaType>()
     val nameValueRegex = Regex(""""name":"([^"]+)"""")
     val typeValueRegex = Regex(""""type":"([^"]+)"""")
+    val mutableRegex = Regex(""""isMutable":(true|false)""")
     var depth = 0; var start = -1
     for (i in json.indices) {
         when (json[i]) {
@@ -84,7 +85,13 @@ fun parseClassesJson(json: String): List<RdmaType> {
                     Regex(""""properties":\[([^\]]*)\]""").find(block)?.let { pm ->
                         nameValueRegex.findAll(pm.groupValues[1]).forEach { props.add(it.groupValues[1]) }
                     }
-                    result.add(RdmaType(name, params, props))
+                    val mutableFlags = mutableListOf<Boolean>()
+                    val propsBlock = Regex(""""properties":\[([^\]]*)\]""").find(block)?.groupValues?.get(1) ?: ""
+                    mutableRegex.findAll(propsBlock).forEach { mutableFlags.add(it.groupValues[1] == "true") }
+                    val propsWithMutable = props.mapIndexed { idx, name ->
+                        name to (mutableFlags.getOrElse(idx) { false })
+                    }
+                    result.add(RdmaType(name, params, propsWithMutable))
                 }
             }
         }
@@ -107,8 +114,12 @@ fun transformCode(code: String, rdmaTypes: List<RdmaType>): String {
             "js(\"RDMA.create${type.simpleName}(${args.joinToString(", ")})\")"
         }
         for (prop in type.properties) {
-            val getter = "get${prop.replaceFirstChar { it.uppercase() }}"
-            result = result.replace(Regex("""\.$prop\b(?!\()""")) { ".$getter()" }
+            if (prop.second) {
+                val setter = "set${prop.first.replaceFirstChar { it.uppercase() }}"
+                result = result.replace(Regex("""\.${prop.first}\s*=\s*([^\n]+)""")) { ".$setter(${it.groupValues[1]})" }
+            }
+            val getter = "get${prop.first.replaceFirstChar { it.uppercase() }}"
+            result = result.replace(Regex("""\.${prop.first}\b(?!\()""")) { ".$getter()" }
         }
     }
     return result

@@ -17,15 +17,18 @@ data class MethodInfo(
     val name: String,
     val returnType: String,
     val parameters: List<ParameterInfo>,
+    val nullableReturn: Boolean = false,
 )
 
 data class PropertyInfo(
     val name: String,
     val type: String,
     val isMutable: Boolean,
+    val nullable: Boolean = false,
 )
 
 data class ParameterInfo(
     val name: String,
     val type: String,
+    val nullable: Boolean = false,
 )

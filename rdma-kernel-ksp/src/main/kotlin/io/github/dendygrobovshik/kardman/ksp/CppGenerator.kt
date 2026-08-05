@@ -259,18 +259,35 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                 val type = JniTypeMapper.forType(param.type)
                 val idx = method.parameters.indexOf(param)
                 if (type != null) {
-                    val extractExpr = type.fromJsi.replace("%d", idx.toString())
-                    out.write("    ${type.cppType} cpp_${param.name} = $extractExpr;\n")
+                    if (param.nullable) {
+                        out.write("    ${type.cppType} cpp_${param.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.fromJsi.replace("%d", idx.toString())});\n")
+                    } else {
+                        val extractExpr = type.fromJsi.replace("%d", idx.toString())
+                        out.write("    ${type.cppType} cpp_${param.name} = $extractExpr;\n")
+                    }
                 } else if (isRdmaClass(param.type, allClasses)) {
                     val rdmaName = rdmaClassByName(param.type, allClasses)!!.className
-                    out.write("    auto argObj_${param.name} = args[$idx].asObject(r);\n")
-                    out.write("    auto argState_${param.name} = std::static_pointer_cast<${rdmaName}NativeState>(argObj_${param.name}.getNativeState(r));\n")
-                    out.write("    jobject arg_${param.name} = argState_${param.name}->getObject();\n")
+                    if (param.nullable) {
+                        out.write("    jobject arg_${param.name} = nullptr;\n")
+                        out.write("    if (!args[$idx].isNull()) {\n")
+                        out.write("        auto argObj_${param.name} = args[$idx].asObject(r);\n")
+                        out.write("        auto argState_${param.name} = std::static_pointer_cast<${rdmaName}NativeState>(argObj_${param.name}.getNativeState(r));\n")
+                        out.write("        arg_${param.name} = argState_${param.name}->getObject();\n")
+                        out.write("    }\n")
+                    } else {
+                        out.write("    auto argObj_${param.name} = args[$idx].asObject(r);\n")
+                        out.write("    auto argState_${param.name} = std::static_pointer_cast<${rdmaName}NativeState>(argObj_${param.name}.getNativeState(r));\n")
+                        out.write("    jobject arg_${param.name} = argState_${param.name}->getObject();\n")
+                    }
                 }
             }
             for (param in method.parameters) {
                 if (param.type == "kotlin.String") {
-                    out.write("    jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
+                    if (param.nullable) {
+                        out.write("    jstring j_${param.name} = args[${method.parameters.indexOf(param)}].isNull() ? nullptr : env->NewStringUTF(cpp_${param.name}.c_str());\n")
+                    } else {
+                        out.write("    jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
+                    }
                 }
             }
 
@@ -307,6 +324,9 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     } else ""
                 }
                 out.write("    $callExpr\n")
+                if (method.nullableReturn) {
+                    out.write("    if (jret == nullptr) return jsi::Value::null();\n")
+                }
                 for (param in method.parameters) {
                     if (param.type == "kotlin.String") {
                         out.write("    env->DeleteLocalRef(j_${param.name});\n")
