@@ -17,3 +17,8 @@ captures
 !*.xcworkspace/contents.xcworkspacedata
 **/xcshareddata/WorkspaceSettings.xcsettings
 node_modules/
+kotlin-js-store/
+rdma-runtime-android/src/main/cpp/generated/*.cpp
+rdma-runtime-android/src/main/cpp/generated/*.h
+!rdma-runtime-android/src/main/cpp/generated/.gitkeep
+androidApp/src/main/assets/kotlin/

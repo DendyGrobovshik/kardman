@@ -1,5 +1,3 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeCompiler)
@@ -7,11 +5,13 @@ plugins {
 
 kotlin {
     compilerOptions {
-        jvmTarget = JvmTarget.JVM_11
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11
     }
 }
+
 dependencies {
     implementation(project(":shared"))
+    implementation(project(":rdma-runtime-android"))
 
     implementation(libs.androidx.activity.compose)
 
@@ -34,6 +34,11 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            useLegacyPackaging = true
+            pickFirsts.add("**/libhermesvm.so")
+            pickFirsts.add("**/libc++_shared.so")
+        }
     }
     buildTypes {
         release {
@@ -51,4 +56,23 @@ android {
     buildFeatures {
         compose = true
     }
+}
+
+afterEvaluate {
+    tasks.named("mergeDebugAssets") {
+        dependsOn(":plugin:jsBrowserDevelopmentExecutableDistribution")
+    }
+    tasks.named("mergeReleaseAssets") {
+        dependsOn(":plugin:jsBrowserProductionExecutableDistribution")
+    }
+}
+
+val copyPluginJs = tasks.register<Copy>("copyPluginJs") {
+    dependsOn(":plugin:jsBrowserDevelopmentExecutableDistribution")
+    from("${rootProject.projectDir}/plugin/build/compileSync/js/main/developmentExecutable/kotlin")
+    into("${projectDir}/src/main/assets/kotlin")
+}
+
+tasks.named("preBuild") {
+    dependsOn(copyPluginJs)
 }

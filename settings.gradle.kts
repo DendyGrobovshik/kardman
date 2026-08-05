@@ -16,6 +16,7 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositories {
+        mavenLocal()
         google {
             mavenContent {
                 includeGroupAndSubgroups("androidx")
@@ -34,3 +35,10 @@ plugins {
 include(":androidApp")
 include(":desktopApp")
 include(":shared")
+include(":kernel")
+include(":rdma-annotation")
+include(":rdma-kernel-ksp")
+include(":rdma-plugin-ksp")
+include(":rdma-runtime-android")
+include(":plugin")
+include(":rdma-tests")
