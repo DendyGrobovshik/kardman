@@ -8,25 +8,20 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import io.github.dendygrobovshik.kardman.runtime.RdmaBridge
-import io.github.dendygrobovshik.kardman.runtime.RdmaPluginLoader
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
-        RdmaBridge.nativeInit()
+        RdmaBridge.nativeInit(assets)
         Log.i("RDMA", "Bridge initialized")
 
         try {
-            val kotlinStdlib = assets.open("kotlin/kotlin-kotlin-stdlib.js")
-                .bufferedReader().readText()
-            RdmaPluginLoader.loadAndEval(kotlinStdlib)
+            RdmaBridge.nativeEvalAsset("kotlin/kotlin-kotlin-stdlib.js")
             Log.i("RDMA", "Kotlin stdlib loaded")
 
-            val pluginCode = assets.open("kotlin/RDMAHermes-plugin.js")
-                .bufferedReader().readText()
-            val pluginResult = RdmaPluginLoader.loadAndEval(pluginCode)
+            val pluginResult = RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin.js")
             Log.i("RDMA", "Plugin: $pluginResult")
         } catch (e: Exception) {
             Log.e("RDMA", "Plugin load failed: ${e.message}")

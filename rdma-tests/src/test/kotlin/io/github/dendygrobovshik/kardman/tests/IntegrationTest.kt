@@ -24,6 +24,7 @@ class IntegrationTest {
             ParameterInfo("age", "kotlin.Int")
         ))),
         methods = listOf(
+            MethodInfo("greet", "kotlin.String", emptyList(), isOpen = true, vtableId = 0),
             MethodInfo("toString", "kotlin.String", emptyList()),
             MethodInfo("greetVampier", "kotlin.String", listOf(
                 ParameterInfo("vampier", "com.example.kernel.VeryOldVampier")

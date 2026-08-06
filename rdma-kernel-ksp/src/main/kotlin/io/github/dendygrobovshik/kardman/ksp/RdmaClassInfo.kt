@@ -21,6 +21,7 @@ data class MethodInfo(
     val isOpen: Boolean = false,
     val isList: Boolean = false,
     val listElementType: String? = null,
+    val vtableId: Int = -1,
 )
 
 data class PropertyInfo(

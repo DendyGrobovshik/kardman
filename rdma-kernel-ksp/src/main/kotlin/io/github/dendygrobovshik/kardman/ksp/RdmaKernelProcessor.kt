@@ -96,7 +96,7 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
             sb.append("],")
             sb.append("\"methods\":[")
             info.methods.forEachIndexed { mi, method ->
-                sb.append("{\"name\":\"${method.name}\",\"returnType\":\"${method.returnType}\",\"nullableReturn\":${method.nullableReturn},\"isList\":${method.isList},\"listElementType\":\"${method.listElementType ?: ""}\",\"parameters\":[")
+                sb.append("{\"name\":\"${method.name}\",\"returnType\":\"${method.returnType}\",\"nullableReturn\":${method.nullableReturn},\"isList\":${method.isList},\"listElementType\":\"${method.listElementType ?: ""}\",\"vtableId\":${method.vtableId},\"parameters\":[")
                 method.parameters.forEachIndexed { pi, param ->
                     sb.append("{\"name\":\"${param.name}\",\"type\":\"${param.type}\",\"nullable\":${param.nullable},\"isList\":${param.isList},\"listElementType\":\"${param.listElementType ?: ""}\"}")
                     if (pi < method.parameters.size - 1) sb.append(",")
@@ -162,7 +162,7 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
             val name = func.simpleName.asString()
             name !in setOf("<init>", "equals", "hashCode") &&
                 !name.startsWith("component") && !name.startsWith("copy")
-        }.map { func ->
+        }.mapIndexed { index, func ->
             val resolvedReturn = func.returnType?.resolve()
             val returnType = resolvedReturn?.declaration?.qualifiedName?.asString() ?: "kotlin.Unit"
             val (retIsList, retElementType) = resolvedReturn?.let { detectList(it) } ?: (false to null)
@@ -178,11 +178,16 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
                     listElementType = elementType
                 )
             }
+            val isOpen = Modifier.OPEN in func.modifiers
             MethodInfo(func.simpleName.asString(), returnType, params,
                 nullableReturn = resolvedReturn?.isMarkedNullable ?: false,
-                isOpen = Modifier.OPEN in func.modifiers,
+                isOpen = isOpen,
                 isList = retIsList,
-                listElementType = retElementType)
+                listElementType = retElementType,
+                vtableId = if (isOpen) index else -1)
+        }.let { methods ->
+            var nextId = 0
+            methods.map { if (it.isOpen) it.copy(vtableId = nextId++) else it }
         }.toList()
 
         val properties = cls.getAllProperties()
@@ -204,7 +209,7 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
         val code = """
 package com.example.kernel
 
-external fun rdmaVtableDispatch(vtablePtr: Long, method: String): Any?
+external fun rdmaVtableDispatch(vtablePtr: Long, vtableId: Int): Any?
 """.trimIndent()
         try {
             val out = codeGenerator.createNewFile(Dependencies(true), "kotlin", "RdmaVtable", "kt")
@@ -264,7 +269,7 @@ external fun rdmaVtableDispatch(vtablePtr: Long, method: String): Any?
 
         val indent = lines[methodOpenIdx].takeWhile { it == ' ' } + "    "
         val params = method.parameters.joinToString(", ") { it.name }
-        val paramCall = if (params.isEmpty()) "" else ", $params"
+        val paramCallSuffix = if (params.isEmpty()) "" else ", $params"
 
         val returnCast = when (method.returnType) {
             "kotlin.Unit" -> ""
@@ -280,7 +285,7 @@ external fun rdmaVtableDispatch(vtablePtr: Long, method: String): Any?
 
         val vtableLines = listOf(
             "$indent if (__vtable != 0L) {",
-            "$indent     val __r = rdmaVtableDispatch(__vtable, \"${method.name}\"$paramCall)",
+            "$indent     val __r = rdmaVtableDispatch(__vtable, ${method.vtableId}$paramCallSuffix)",
             "$indent     if (__r != null) ${returnKeyword}__r$returnCast",
             "$indent }",
         )

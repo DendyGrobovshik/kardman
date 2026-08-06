@@ -257,13 +257,15 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
     if (!env) return jsi::Value::undefined();
     auto thisObj = thisVal.asObject(r);
     auto state = std::static_pointer_cast<${info.className}NativeState>(thisObj.getNativeState(r));
-    if (state->vtable_) {
-        auto vtIt = state->vtable_->entries.find("${method.name}");
-        if (vtIt != state->vtable_->entries.end()) {
-            auto& irt = *(jsi::IRuntime*)&r;
-            return vtIt->second->call(irt, args, count);
-        }
+""")
+            if (method.isOpen && method.vtableId >= 0) {
+                out.write("""    if (state->vtable_ && (size_t)${method.vtableId} < state->vtable_->entries.size() && state->vtable_->entries[${method.vtableId}]) {
+        auto& irt = *(jsi::IRuntime*)&r;
+        return state->vtable_->entries[${method.vtableId}]->call(irt, args, count);
     }
+""")
+            }
+            out.write("""
 """)
             for (param in method.parameters) {
                 val type = JniTypeMapper.forType(param.type)
@@ -606,17 +608,22 @@ static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std:
     }
 """)
         for (info in infos) {
+            val openMethodCount = info.methods.count { it.isOpen }
             cpp.write("""
     if (className == "${info.className}") {
         const jsi::Value* argsPtr = argsVec.empty() ? nullptr : argsVec.data();
         auto jsObj = create${info.className}Instance(rt, jvm, argsPtr, argCount);
-        auto* vt = new RdmaVtable(&rt, jvm);
+        auto* vt = new RdmaVtable(&rt, ${openMethodCount});
         auto objNames = overrides.getPropertyNames(rt);
         for (size_t i = 0; i < objNames.size(rt); i++) {
             auto name = objNames.getValueAtIndex(rt, i).getString(rt).utf8(rt);
             auto func = overrides.getProperty(rt, name.c_str()).asObject(rt).asFunction(rt);
-            vt->entries[name] = std::make_shared<jsi::Function>(std::move(func));
-        }
+""")
+            for (method in info.methods.filter { it.isOpen }) {
+                cpp.write("""            if (name == "${method.name}") vt->entries[${method.vtableId}] = std::make_shared<jsi::Function>(std::move(func));
+""")
+            }
+            cpp.write("""        }
         JNIEnv* env = nullptr;
         jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
         auto state = std::static_pointer_cast<${info.className}NativeState>(jsObj.getNativeState(rt));

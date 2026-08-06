@@ -1,6 +1,8 @@
 #include <jni.h>
 #include <string>
 #include <android/log.h>
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
 #include <jsi/jsi.h>
 #include "RdmaVtable.h"
 
@@ -11,101 +13,63 @@ extern void initRdmaRuntime(JavaVM* jvm);
 extern void evalJavaScript(const std::string& code, std::string& result);
 
 static JavaVM* g_jvm = nullptr;
+static AAssetManager* g_assetMgr = nullptr;
 
 extern "C" JNIEXPORT void JNICALL
-Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeInit(JNIEnv* env, jclass) {
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeInit(JNIEnv* env, jclass, jobject assetManager) {
     env->GetJavaVM(&g_jvm);
+    g_assetMgr = AAssetManager_fromJava(env, assetManager);
     initRdmaRuntime(g_jvm);
     LOGI("RDMA runtime initialized");
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEval(JNIEnv* env, jclass, jstring jsCode) {
-    const char* code = env->GetStringUTFChars(jsCode, nullptr);
-    std::string cppCode(code);
-    env->ReleaseStringUTFChars(jsCode, code);
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalAsset(JNIEnv* env, jclass, jstring assetPath) {
+    if (!g_assetMgr) {
+        return env->NewStringUTF("Error: AssetManager not initialized");
+    }
+    const char* path = env->GetStringUTFChars(assetPath, nullptr);
+    AAsset* asset = AAssetManager_open(g_assetMgr, path, AASSET_MODE_BUFFER);
+    env->ReleaseStringUTFChars(assetPath, path);
+    if (!asset) {
+        return env->NewStringUTF("Error: failed to open asset");
+    }
+    const void* data = AAsset_getBuffer(asset);
+    off_t length = AAsset_getLength(asset);
     std::string result;
-    evalJavaScript(cppCode, result);
+    if (data && length > 0) {
+        std::string code(static_cast<const char*>(data), static_cast<size_t>(length));
+        evalJavaScript(code, result);
+    } else if (length > 0) {
+        std::string code(static_cast<size_t>(length), '\0');
+        int read = AAsset_read(asset, &code[0], static_cast<size_t>(length));
+        if (read == length) {
+            evalJavaScript(code, result);
+        } else {
+            result = "Error: failed to read asset";
+        }
+    } else if (length == 0) {
+        result = "";
+    } else {
+        result = "Error: failed to read asset";
+    }
+    AAsset_close(asset);
     return env->NewStringUTF(result.c_str());
-}
-
-// Vtable dispatch: called from Kotlin open methods to check for JS overrides
-extern "C" JNIEXPORT jobject JNICALL
-Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeDispatch(JNIEnv* env, jclass, jlong vtablePtr, jstring methodName, jobjectArray args) {
-    if (vtablePtr == 0) return nullptr;
-
-    auto* vt = reinterpret_cast<RdmaVtable*>(vtablePtr);
-    const char* methodCstr = env->GetStringUTFChars(methodName, nullptr);
-    std::string methodStr(methodCstr);
-    env->ReleaseStringUTFChars(methodName, methodCstr);
-
-    auto it = vt->entries.find(methodStr);
-    if (it == vt->entries.end()) return nullptr;
-
-    facebook::jsi::Runtime& rt = *vt->rt;
-    jsize argCount = args ? env->GetArrayLength(args) : 0;
-    std::vector<facebook::jsi::Value> jsiArgs;
-    jsiArgs.reserve(argCount);
-    for (jsize i = 0; i < argCount; i++) {
-        jobject arg = env->GetObjectArrayElement(args, i);
-        facebook::jsi::Value jsiVal = facebook::jsi::Value::null();
-        if (arg != nullptr) {
-            jclass stringCls = env->FindClass("java/lang/String");
-            if (env->IsInstanceOf(arg, stringCls)) {
-                const char* cstr = env->GetStringUTFChars((jstring)arg, nullptr);
-                jsiVal = facebook::jsi::String::createFromUtf8(rt, cstr);
-                env->ReleaseStringUTFChars((jstring)arg, cstr);
-            } else {
-                jclass intCls = env->FindClass("java/lang/Integer");
-                if (env->IsInstanceOf(arg, intCls)) {
-                    jmethodID intValue = env->GetMethodID(intCls, "intValue", "()I");
-                    jint iv = env->CallIntMethod(arg, intValue);
-                    jsiVal = facebook::jsi::Value((double)iv);
-                } else {
-                    jclass boolCls = env->FindClass("java/lang/Boolean");
-                    if (env->IsInstanceOf(arg, boolCls)) {
-                        jmethodID boolValue = env->GetMethodID(boolCls, "booleanValue", "()Z");
-                        jsiVal = facebook::jsi::Value(env->CallBooleanMethod(arg, boolValue));
-                    }
-                }
-            }
-        }
-        jsiArgs.push_back(std::move(jsiVal));
-        env->DeleteLocalRef(arg);
-    }
-
-    try {
-        const facebook::jsi::Value* argsPtr = jsiArgs.empty() ? nullptr : jsiArgs.data();
-        size_t jsArgCount = jsiArgs.size();
-        auto& irt = *(facebook::jsi::IRuntime*)&rt;
-        facebook::jsi::Value result = it->second->call(irt, argsPtr, jsArgCount);
-        if (result.isString()) {
-            std::string s = result.getString(rt).utf8(rt);
-            return env->NewStringUTF(s.c_str());
-        }
-    } catch (const std::exception& e) {
-        LOGI("nativeDispatch error: %s", e.what());
-    }
-    return nullptr;
 }
 
 // Kernel-side vtable dispatch: called from Kotlin open methods
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_example_kernel_RdmaVtableKt_rdmaVtableDispatch(JNIEnv* env, jclass, jlong vtablePtr, jstring methodName) {
+Java_com_example_kernel_RdmaVtableKt_rdmaVtableDispatch(JNIEnv* env, jclass, jlong vtablePtr, jint vtableId) {
     if (vtablePtr == 0) return nullptr;
 
     auto* vt = reinterpret_cast<RdmaVtable*>(vtablePtr);
-    const char* methodCstr = env->GetStringUTFChars(methodName, nullptr);
-    std::string methodStr(methodCstr);
-    env->ReleaseStringUTFChars(methodName, methodCstr);
-
-    auto it = vt->entries.find(methodStr);
-    if (it == vt->entries.end()) return nullptr;
+    if (vtableId < 0 || (size_t)vtableId >= vt->entries.size()) return nullptr;
+    auto& entry = vt->entries[vtableId];
+    if (!entry) return nullptr;
 
     try {
-        // Call with no args and undefined this
         auto& irt = *(facebook::jsi::IRuntime*)vt->rt;
-        facebook::jsi::Value result = it->second->call(irt, nullptr, 0);
+        facebook::jsi::Value result = entry->call(irt, nullptr, 0);
         if (result.isString()) {
             std::string s = result.getString(*vt->rt).utf8(*vt->rt);
             return env->NewStringUTF(s.c_str());
