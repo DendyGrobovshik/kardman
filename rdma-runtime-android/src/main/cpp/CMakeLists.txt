@@ -9,6 +9,7 @@ file(GLOB GENERATED_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/generated/*.cpp")
 add_library(rdma_runtime SHARED
         RdmaJni.cpp
         RdmaRuntime.cpp
+        ListHandle.cpp
         ${GENERATED_SOURCES}
 )
 

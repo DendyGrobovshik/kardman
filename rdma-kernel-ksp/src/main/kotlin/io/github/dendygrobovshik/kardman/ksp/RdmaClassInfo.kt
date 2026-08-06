@@ -19,6 +19,8 @@ data class MethodInfo(
     val parameters: List<ParameterInfo>,
     val nullableReturn: Boolean = false,
     val isOpen: Boolean = false,
+    val isList: Boolean = false,
+    val listElementType: String? = null,
 )
 
 data class PropertyInfo(
@@ -32,4 +34,6 @@ data class ParameterInfo(
     val name: String,
     val type: String,
     val nullable: Boolean = false,
+    val isList: Boolean = false,
+    val listElementType: String? = null,
 )

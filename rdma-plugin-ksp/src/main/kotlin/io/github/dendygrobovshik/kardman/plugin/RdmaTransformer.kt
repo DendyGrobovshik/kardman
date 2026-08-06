@@ -86,10 +86,11 @@ object RdmaTransformer {
                     val setter = "set${prop.first.replaceFirstChar { it.uppercase() }}"
                     result = result.replace(Regex("""\.${prop.first}\s*=\s*([^\n]+)""")) { ".$setter(${it.groupValues[1]})" }
                 }
-                val getter = "get${prop.first.replaceFirstChar { it.uppercase() }}"
-                result = result.replace(Regex("""\.${prop.first}\b(?!\()""")) { ".$getter()" }
-            }
+            val getter = "get${prop.first.replaceFirstChar { it.uppercase() }}"
+            result = result.replace(Regex("""\.${prop.first}\b(?!\()""")) { ".$getter()" }
         }
-        return result
+        result = result.replace(Regex("""listOf\s*\(([^)]+)\)""")) { "[${it.groupValues[1]}]" }
+    }
+    return result
     }
 }

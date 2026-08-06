@@ -17,4 +17,13 @@ fun main() {
     println(griev.toString())
 
     obi.fight(griev)
+
+    val friends = obi.getFriends()
+    println("Friends count: ${friends.size}")
+
+    val grievFriends = listOf(Person("dart", 100), Cyborg("tony", 7))
+    griev.nameFriends(grievFriends)
+    println("plugin: ${grievFriends[0].name} ${grievFriends[0].status}")
+    grievFriends.forEach { it.status = "boomer" }
+    griev.nameFriends(grievFriends)
 }

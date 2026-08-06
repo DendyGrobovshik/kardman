@@ -63,8 +63,18 @@ void initRdmaRuntime(JavaVM* jvm) {
         auto logFn = facebook::jsi::Function::createFromHostFunction(
             rt, facebook::jsi::PropNameID::forAscii(rt, "log"), 0,
             [](facebook::jsi::Runtime& r, const facebook::jsi::Value&, const facebook::jsi::Value* args, size_t count) {
-                if (count > 0 && args[0].isString()) {
-                    LOGI("JS: %s", args[0].getString(r).utf8(r).c_str());
+                if (count > 0) {
+                    if (args[0].isString()) {
+                        LOGI("JS: %s", args[0].getString(r).utf8(r).c_str());
+                    } else if (args[0].isObject() && args[0].asObject(r).isFunction(r)) {
+                        auto& irt = *(facebook::jsi::IRuntime*)&r;
+                        auto result = args[0].asObject(r).asFunction(r).call(irt, nullptr, 0);
+                        if (result.isString()) {
+                            LOGI("JS: %s", result.getString(r).utf8(r).c_str());
+                        } else if (result.isNumber()) {
+                            LOGI("JS: %d", (int)result.getNumber());
+                        }
+                    }
                 }
                 return facebook::jsi::Value::undefined();
             });

@@ -99,6 +99,13 @@ object JniTypeMapper {
 
     fun jniSignature(qualifiedName: String): String {
         forType(qualifiedName)?.let { return it.jniSignature }
-        return "L${qualifiedName.replace('.', '/')};"
+        // Kotlin types that map to JVM interfaces
+        val jvmType = when (qualifiedName) {
+            "kotlin.collections.List" -> "java.util.List"
+            "kotlin.collections.MutableList" -> "java.util.List"
+            "kotlin.collections.ArrayList" -> "java.util.ArrayList"
+            else -> qualifiedName
+        }
+        return "L${jvmType.replace('.', '/')};"
     }
 }

@@ -141,6 +141,7 @@ jsi::Object create${info.className}Instance(jsi::Runtime& rt, JavaVM* jvm, const
 
         out.write("""#include "${info.className}HostObject.h"
 #include "RdmaJniCache.h"
+#include "ListHandle.h"
 """)
         // Include headers for @RDMA types used as parameters or return values
         val referencedRdmaTypes = mutableSetOf<String>()
@@ -274,6 +275,17 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                         val extractExpr = type.fromJsi.replace("%d", idx.toString())
                         out.write("    ${type.cppType} cpp_${param.name} = $extractExpr;\n")
                     }
+                } else if (param.isList) {
+                    out.write("    jobject arg_${param.name} = nullptr;\n")
+                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("        auto listObj = args[$idx].asObject(r);\n")
+                    out.write("        if (listObj.hasNativeState(r)) {\n")
+                    out.write("            auto ns = listObj.getNativeState(r);\n")
+                    out.write("            if (ns) arg_${param.name} = *(jobject*)((char*)ns.get() + 16);\n")
+                    out.write("        } else {\n")
+                    out.write("            arg_${param.name} = materializeArray(env, r, jvm, listObj, \"${param.listElementType ?: ""}\");\n")
+                    out.write("        }\n")
+                    out.write("    }\n")
                 } else if (isRdmaClass(param.type, allClasses)) {
                     val rdmaName = rdmaClassByName(param.type, allClasses)!!.className
                     if (param.nullable) {
@@ -307,7 +319,11 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     "kotlin.Boolean" -> "(jboolean)cpp_${param.name}"
                     "kotlin.Double", "kotlin.Float" -> "(jdouble)cpp_${param.name}"
                     "kotlin.Long" -> "(jlong)cpp_${param.name}"
-                    else -> if (isRdmaClass(param.type, allClasses)) "arg_${param.name}" else "nullptr"
+                    else -> when {
+                        param.isList -> "arg_${param.name}"
+                        isRdmaClass(param.type, allClasses) -> "arg_${param.name}"
+                        else -> "nullptr"
+                    }
                 }
             }
             val paramsCall = if (paramsStr.isNotEmpty()) ", $paramsStr" else ""
@@ -327,8 +343,8 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     "kotlin.Boolean" -> "auto result = env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
                     "kotlin.Double", "kotlin.Float" -> "auto result = env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
                     "kotlin.Long" -> "auto result = env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
-                    else -> if (isRdmaClass(method.returnType, allClasses)) {
-                        val rdma = rdmaClassByName(method.returnType, allClasses)!!
+                    else -> if (isRdmaClass(method.returnType, allClasses) || method.isList) {
+                        val rdma = rdmaClassByName(method.returnType, allClasses)
                         "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
                     } else ""
                 }
@@ -348,13 +364,22 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     "kotlin.Double", "kotlin.Float" -> out.write("    return jsi::Value(result);\n")
                     "kotlin.Long" -> out.write("    return jsi::Value((double)result);\n")
                     else -> {
-                        val rdma = rdmaClassByName(method.returnType, allClasses)
-                        if (rdma != null) {
-                            out.write("    jobject globalRet = env->NewGlobalRef(jret);\n")
-                            out.write("    env->DeleteLocalRef(jret);\n")
-                            out.write("    return create${rdma.className}Wrapper(r, jvm, globalRet);\n")
+                        if (method.isList) {
+                            out.write("    if (jret != nullptr) {\n")
+                            out.write("        jobject globalRet = env->NewGlobalRef(jret);\n")
+                            out.write("        env->DeleteLocalRef(jret);\n")
+                            out.write("        return createListHandle(r, jvm, globalRet, \"${method.listElementType ?: ""}\");\n")
+                            out.write("    }\n")
+                            out.write("    return jsi::Value::null();\n")
                         } else {
-                            out.write("    return jsi::Value::undefined();\n")
+                            val rdma = rdmaClassByName(method.returnType, allClasses)
+                            if (rdma != null) {
+                                out.write("    jobject globalRet = env->NewGlobalRef(jret);\n")
+                                out.write("    env->DeleteLocalRef(jret);\n")
+                                out.write("    return create${rdma.className}Wrapper(r, jvm, globalRet);\n")
+                            } else {
+                                out.write("    return jsi::Value::undefined();\n")
+                            }
                         }
                     }
                 }
@@ -507,6 +532,7 @@ void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env);
         cpp.write("""#include "RdmaBridge.h"
 #include "RdmaJniCache.h"
 #include "RdmaVtable.h"
+#include "ListHandle.h"
 """)
         for (info in infos) {
             cpp.write("#include \"${info.className}HostObject.h\"\n")
@@ -521,6 +547,9 @@ namespace facebook {
 namespace rdma {
 
 static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides);
+
+jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType);
+jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object& jsObj, const std::string& elementType);
 
 void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env) {
     g_rdmaCache.jvm = jvm;

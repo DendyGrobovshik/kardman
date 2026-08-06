@@ -28,21 +28,6 @@ class MainActivity : ComponentActivity() {
                 .bufferedReader().readText()
             val pluginResult = RdmaPluginLoader.loadAndEval(pluginCode)
             Log.i("RDMA", "Plugin: $pluginResult")
-
-            // Runtime vtable demo
-            val vtableDemo = """
-                var normal = RDMA.createPerson("Normal", 30);
-                var g1 = normal.greet();
-                
-                var child = RDMA.createWithOverrides("Person", ["Child", 7], {
-                    greet: function() { return "Overridden: I am a child!"; }
-                });
-                var g2 = child.greet();
-                var name = child.getName();
-                'normal=' + g1 + ' | child=' + g2 + ' | name=' + name;
-            """.trimIndent()
-            val vtableResult = RdmaPluginLoader.loadAndEval(vtableDemo)
-            Log.i("RDMA", "Vtable: $vtableResult")
         } catch (e: Exception) {
             Log.e("RDMA", "Plugin load failed: ${e.message}")
         }

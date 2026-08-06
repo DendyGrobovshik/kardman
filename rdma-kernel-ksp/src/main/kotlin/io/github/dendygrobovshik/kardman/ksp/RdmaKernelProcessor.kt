@@ -87,7 +87,7 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
             info.constructors.forEachIndexed { ci, ctor ->
                 sb.append("{\"parameters\":[")
                 ctor.parameters.forEachIndexed { pi, param ->
-                    sb.append("{\"name\":\"${param.name}\",\"type\":\"${param.type}\",\"nullable\":${param.nullable}}")
+                    sb.append("{\"name\":\"${param.name}\",\"type\":\"${param.type}\",\"nullable\":${param.nullable},\"isList\":${param.isList},\"listElementType\":\"${param.listElementType ?: ""}\"}")
                     if (pi < ctor.parameters.size - 1) sb.append(",")
                 }
                 sb.append("]}")
@@ -96,9 +96,9 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
             sb.append("],")
             sb.append("\"methods\":[")
             info.methods.forEachIndexed { mi, method ->
-                sb.append("{\"name\":\"${method.name}\",\"returnType\":\"${method.returnType}\",\"nullableReturn\":${method.nullableReturn},\"parameters\":[")
+                sb.append("{\"name\":\"${method.name}\",\"returnType\":\"${method.returnType}\",\"nullableReturn\":${method.nullableReturn},\"isList\":${method.isList},\"listElementType\":\"${method.listElementType ?: ""}\",\"parameters\":[")
                 method.parameters.forEachIndexed { pi, param ->
-                    sb.append("{\"name\":\"${param.name}\",\"type\":\"${param.type}\",\"nullable\":${param.nullable}}")
+                    sb.append("{\"name\":\"${param.name}\",\"type\":\"${param.type}\",\"nullable\":${param.nullable},\"isList\":${param.isList},\"listElementType\":\"${param.listElementType ?: ""}\"}")
                     if (pi < method.parameters.size - 1) sb.append(",")
                 }
                 sb.append("]}")
@@ -125,6 +125,18 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
         out.bufferedWriter().use { it.write(sb.toString()) }
     }
 
+    private fun detectList(type: com.google.devtools.ksp.symbol.KSType): Pair<Boolean, String?> {
+        val fqn = type.declaration.qualifiedName?.asString() ?: ""
+        if (fqn == "kotlin.collections.List" || fqn == "kotlin.collections.MutableList") {
+            val args = type.arguments
+            if (args.isNotEmpty()) {
+                val elemType = args[0].type?.resolve()?.declaration?.qualifiedName?.asString() ?: "kotlin.Any"
+                return true to elemType
+            }
+        }
+        return false to null
+    }
+
     private fun extractClassInfo(cls: KSClassDeclaration): RdmaClassInfo {
         val packageName = cls.packageName.asString()
         val className = cls.simpleName.asString()
@@ -134,10 +146,13 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
             val params = ctor.parameters.map { param ->
                 val resolved = param.type.resolve()
                 val typeName = resolved.declaration.qualifiedName?.asString() ?: "kotlin.Any"
+                val (isList, elementType) = detectList(resolved)
                 ParameterInfo(
                     name = param.name?.asString() ?: "arg",
                     type = typeName,
-                    nullable = resolved.isMarkedNullable
+                    nullable = resolved.isMarkedNullable,
+                    isList = isList,
+                    listElementType = elementType
                 )
             }
             listOf(ConstructorInfo(params))
@@ -150,18 +165,24 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
         }.map { func ->
             val resolvedReturn = func.returnType?.resolve()
             val returnType = resolvedReturn?.declaration?.qualifiedName?.asString() ?: "kotlin.Unit"
+            val (retIsList, retElementType) = resolvedReturn?.let { detectList(it) } ?: (false to null)
             val params = func.parameters.map { param ->
                 val resolved = param.type.resolve()
                 val typeName = resolved.declaration.qualifiedName?.asString() ?: "kotlin.Any"
+                val (isList, elementType) = detectList(resolved)
                 ParameterInfo(
                     name = param.name?.asString() ?: "arg",
                     type = typeName,
-                    nullable = resolved.isMarkedNullable
+                    nullable = resolved.isMarkedNullable,
+                    isList = isList,
+                    listElementType = elementType
                 )
             }
             MethodInfo(func.simpleName.asString(), returnType, params,
                 nullableReturn = resolvedReturn?.isMarkedNullable ?: false,
-                isOpen = Modifier.OPEN in func.modifiers)
+                isOpen = Modifier.OPEN in func.modifiers,
+                isList = retIsList,
+                listElementType = retElementType)
         }.toList()
 
         val properties = cls.getAllProperties()

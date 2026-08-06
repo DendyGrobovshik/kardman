@@ -122,12 +122,13 @@ fun transformCode(code: String, rdmaTypes: List<RdmaType>): String {
         for (prop in type.properties) {
             if (prop.second) {
                 val setter = "set${prop.first.replaceFirstChar { it.uppercase() }}"
-                result = result.replace(Regex("""\.${prop.first}\s*=\s*([^\n]+)""")) { ".$setter(${it.groupValues[1]})" }
+                result = result.replace(Regex("""\.${prop.first}\s*=\s*([^,})\n]+)""")) { ".$setter(${it.groupValues[1]})" }
             }
             val getter = "get${prop.first.replaceFirstChar { it.uppercase() }}"
             result = result.replace(Regex("""\.${prop.first}\b(?!\()""")) { ".$getter()" }
         }
     }
+    return result
     return result
 }
 
