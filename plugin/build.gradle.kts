@@ -2,32 +2,36 @@
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.ksp)
+    id("io.github.dendygrobovshik.kardman.rdma-compiler") version "1.0"
 }
 
 kotlin {
+    jvm()
+
     js {
         browser()
         binaries.executable()
     }
 
     sourceSets {
+        jvmMain {
+            kotlin.setSrcDirs(listOf("src/kotlin"))
+            dependencies {
+                implementation(project(":kernel"))
+            }
+        }
         jsMain {
-            kotlin.setSrcDirs(listOf("build/generated/ksp/js/jsMain/kotlin"))
+            kotlin.setSrcDirs(listOf("build/generated/rdma"))
         }
     }
 }
 
-dependencies {
-    add("kspJs", project(":rdma-plugin-ksp"))
-}
-
-ksp {
-    arg("rdmaClassesJson", "${rootProject.projectDir}/kernel/build/generated/ksp/jvm/jvmMain/resources/cpp/rdma_classes.json")
-}
-
-tasks.matching { it.name == "kspKotlinJs" }.configureEach {
+tasks.matching { it.name == "compileKotlinJvm" }.configureEach {
     dependsOn(":kernel:kspKotlinJvm")
+}
+
+tasks.matching { it.name == "compileKotlinJs" }.configureEach {
+    dependsOn("compileKotlinJvm")
 }
 
 tasks.matching { it.name.startsWith("compile") || it.name.startsWith("js") }.configureEach {

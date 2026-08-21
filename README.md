@@ -4,7 +4,7 @@ Cross-runtime object sharing between JVM (Android) and Hermes (JavaScript engine
 Annotate a Kotlin class with `@RDMA` — it becomes available on both runtimes.  
 Plugin code looks like plain Kotlin, but executes in Hermes via JSI/JNI bridge.
 
-**Pipeline:** `Kotlin plugin code` → KSP transformation → `Kotlin/JS` → `Hermes` → JNI → `JVM objects`
+**Pipeline:** `Kotlin plugin code` → FIR compiler plugin transformation → `Kotlin/JS` → `Hermes` → JNI → `JVM objects`
 
 ## Quick Start
 
@@ -24,14 +24,14 @@ Plugin code looks like plain Kotlin, but executes in Hermes via JSI/JNI bridge.
    class MyType(val name: String, val value: Int)
    ```
 
-2. Use it in `plugin/src/jsMain/kotlin/com/example/plugin/Main.kt`:
+2. Use it in `plugin/src/kotlin/com/example/plugin/Main.kt`:
    ```kotlin
    import com.example.kernel.MyType
    val x = MyType("hello", 42)
    println(x.name)
    ```
 
-3. Build. KSP generates C++ bridge + JS proxy automatically.
+3. Build. Kernel KSP generates C++ bridge; the FIR compiler plugin rewrites plugin Kotlin into JS proxy calls automatically.
 
 ## Project modules
 
@@ -39,8 +39,9 @@ Plugin code looks like plain Kotlin, but executes in Hermes via JSI/JNI bridge.
 |--------|------|
 | `:rdma-annotation` | `@RDMA` annotation (KMP) |
 | `:kernel` | @RDMA annotated classes (KMP: JVM + JS) |
-| `:rdma-kernel-ksp` | KSP processor → generates C++ JNI/JSI glue |
-| `:rdma-plugin-ksp` | KSP processor → transforms plugin Kotlin to JS proxy |
+| `:rdma-kernel-ksp` | KSP processor → generates C++ JNI/JSI glue + `rdma_classes.json` |
+| `:rdma-compiler-plugin` | FIR compiler plugin → resolves @RDMA usages and rewrites plugin source to JS proxy calls |
+| `:rdma-gradle-plugin` | Gradle wrapper that wires `:rdma-compiler-plugin` into the plugin module's JVM resolve compilation |
 | `:rdma-runtime-android` | Android AAR: Hermes runtime + JNI bridge + C++ glue |
 | `:plugin` | Demo plugin (Kotlin/JS), compiles to JS executed in Hermes |
 | `:shared` | Shared KMP code (Compose UI) |

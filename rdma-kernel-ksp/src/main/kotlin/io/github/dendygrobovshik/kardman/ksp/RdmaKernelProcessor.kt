@@ -83,6 +83,7 @@ class RdmaKernelProcessor(private val environment: SymbolProcessorEnvironment) :
         classInfos.forEachIndexed { i, info ->
             sb.append("  {")
             sb.append("\"name\":\"${info.className}\",")
+            sb.append("\"qualifiedName\":\"${info.qualifiedName}\",")
             sb.append("\"constructors\":[")
             info.constructors.forEachIndexed { ci, ctor ->
                 sb.append("{\"parameters\":[")

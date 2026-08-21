@@ -42,9 +42,11 @@
 
 ### Plugin transformation
 
-- Auto-detects @RDMA types via `rdma_classes.json` manifest
+- Auto-detects @RDMA types via `rdma_classes.json` manifest (qualified names)
+- Resolve-based rewriting via FIR compiler plugin: knows the concrete class/method at each call site
 - Transforms constructor calls: `Person("str", 42)` → `js("RDMA.createPerson('str', 42)")`
-- Transforms property access: `.name` → `.getName()`
+- Transforms property access: `.name` → `.getName()`, `.status = v` → `.setStatus(v)`
+- Transforms inheritance: `class Cyborg : Person` + overrides → `RDMA.createWithOverrides(...)`
 - Method calls pass through unchanged (dynamic dispatch)
 
 ## Not yet supported
@@ -72,9 +74,10 @@
 - Default parameter values
 
 ### Plugin transformation
-- Regex-based (not AST-based) — may fail on complex expressions
-- Does not distinguish @RDMA type from local class with same name in non-kernel packages
+- Inherited properties/methods on deeper subclass hierarchies (resolved via supertype chain, but not yet tested end-to-end)
+- Block-body override functions in subclasses (only expression bodies `= expr` are handled)
 - Inline string interpolation in constructor args
+- Overloaded / secondary constructors
 
 ### Runtime
 - Circular references across runtimes (JVM ↔ Hermes)

@@ -2,6 +2,7 @@ rootProject.name = "RDMAHermes"
 
 pluginManagement {
     repositories {
+        mavenLocal()
         google {
             mavenContent {
                 includeGroupAndSubgroups("androidx")
@@ -38,7 +39,8 @@ include(":shared")
 include(":kernel")
 include(":rdma-annotation")
 include(":rdma-kernel-ksp")
-include(":rdma-plugin-ksp")
 include(":rdma-runtime-android")
 include(":plugin")
+include(":rdma-compiler-plugin")
+include(":rdma-gradle-plugin")
 include(":rdma-tests")

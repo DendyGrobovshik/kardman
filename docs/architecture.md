@@ -10,7 +10,7 @@ RDMAHermes enables sharing Kotlin objects between two runtimes — **JVM (Androi
 │  import com.example.kernel.Person                           │
 │  val p = Person("Иван", 30)                                 │
 │  println(p.name)                                            │
-│         ↓ KSP transforms to                                 │
+│         ↓ FIR compiler plugin (resolve + rewrite)           │
 │  val p = js("RDMA.createPerson('Иван', 30)")                │
 │  println(p.getName())                                       │
 └──────────────────────────┬──────────────────────────────────┘
@@ -76,15 +76,22 @@ Generated C++ follows the JNI caching pattern:
 - Subsequent calls use cached `jmethodID` (O(1) lookup)
 - `NewGlobalRef` ensures JVM object survives across native boundaries
 
-### `:rdma-plugin-ksp`
+### `:rdma-compiler-plugin`
 
-KSP SymbolProcessor that transforms plugin source code. Reads `rdma_classes.json` from kernel build to get @RDMA type information. For each plugin source file:
+A Kotlin FIR compiler plugin that resolves and rewrites plugin source code. It runs as a "resolve" pass over the plugin's original source (compiled against `:kernel` on the JVM) and emits rewritten `.kt` files into `build/generated/rdma/`.
 
-1. Removes `import com.example.kernel.X` lines
-2. Replaces `Person("str", 42)` → `js("RDMA.createPerson('str', 42)")` using regex with type-aware patterns from JSON
-3. Replaces `.name` property access → `.getName()` method call
+It uses `FirAdditionalCheckersExtension` to inspect the fully-resolved FIR tree and `IrGenerationExtension` as the flush point:
 
-The processor uses `codeGenerator.createNewFile()` to output `*_rdma.kt` files in `build/generated/ksp/`. Original files are excluded from compilation via `kotlin.exclude("**/Main.kt")`.
+1. Removes `import com.example.kernel.X` lines (matched by qualified name from `rdma_classes.json`).
+2. Replaces `Person("str", 42)` → `js("RDMA.createPerson('str', 42)")` using the resolved constructor's class.
+3. Replaces `.name` → `.getName()`, `.status = v` → `.setStatus(v)` using the resolved property's containing class (works for subclasses too).
+4. Replaces `class Cyborg(...) : Person(...) { override fun ... }` with `js("""RDMA.createWithOverrides('Person', [...], { ... })""")` and removes the class declaration.
+
+Method calls on `@RDMA` receivers pass through unchanged (dynamic dispatch on the JS proxy).
+
+### `:rdma-gradle-plugin`
+
+Gradle wrapper (`KotlinCompilerPluginSupportPlugin`) that applies `:rdma-compiler-plugin` only to the plugin module's JVM resolve compilation and passes `rdmaClassesJson` / `rdmaOutputDir` options.
 
 ### `:rdma-runtime-android`
 
@@ -119,12 +126,12 @@ fun main() {
 }
 ```
 
-This original code is **not compiled directly**. Instead:
-1. `Main.kt` is excluded via `kotlin.exclude("**/Main.kt")`
-2. Plugin KSP reads it, generates `Main_rdma.kt` with transformed code
-3. Only the transformed file is compiled to JavaScript
+This original code is compiled in two passes:
 
-Output: `RDMAHermes-plugin.js` (webpack bundle ~980 KB, includes Kotlin stdlib).
+1. **Resolve pass** (JVM): `src/kotlin` compiles the original source against `:kernel`; the FIR plugin resolves `@RDMA` usages and emits `Main_rdma.kt` into `build/generated/rdma/`.
+2. **JS pass**: `jsMain` points at `build/generated/rdma/` (original excluded), compiles the rewritten code to JavaScript.
+
+Output: `RDMAHermes-plugin.js` (webpack bundle).
 
 ### `:shared`
 
@@ -188,4 +195,4 @@ When Hermes GC collects the JS proxy object:
 
 **Property → getter**: Instead of JS property getters (which require `Object.defineProperty`), properties are exposed as `getName()`/`getAge()` methods. KSP transforms `.name` → `.getName()` in plugin source.
 
-**KSP cross-module**: Kernel KSP generates `rdma_classes.json` because KSP cannot reliably resolve annotations across module boundaries in KMP JS targets. Plugin KSP reads this JSON instead of using `resolver.getSymbolsWithAnnotation()`.
+**KSP cross-module**: Kernel KSP generates `rdma_classes.json` because KSP cannot reliably resolve annotations across module boundaries in KMP JS targets. The FIR plugin reads this JSON as the list of `@RDMA` types and uses full FIR resolution (across module boundaries) to determine which concrete class/method each call site refers to.
