@@ -1,35 +1,26 @@
-# RDMAHermes
+# Kardman
 
-Cross-runtime object sharing between JVM (Android) and Hermes (JavaScript engine).  
+Cross-runtime object sharing between kernel JVM (Android) and plugin Hermes (JavaScript engine).  
 Annotate a Kotlin class with `@RDMA` — it becomes available on both runtimes.  
 Plugin code looks like plain Kotlin, but executes in Hermes via JSI/JNI bridge.
 
-**Pipeline:** `Kotlin plugin code` → FIR compiler plugin transformation → `Kotlin/JS` → `Hermes` → JNI → `JVM objects`
+## How to use
 
-## Quick Start
-
-```bash
-# Build Android APK (all code generation runs automatically)
-./gradlew :androidApp:assembleDebug
-
-# Build plugin JS only
-./gradlew :plugin:jsBrowserDevelopmentExecutableDistribution
-```
-
-## Adding a new @RDMA type
-
-1. Create a class in `kernel/src/commonMain/kotlin/com/example/kernel/`:
+1. Create a class in `kernel` (compiled to JVM):
    ```kotlin
    @RDMA
    class MyType(val name: String, val value: Int)
    ```
 
-2. Use it in `plugin/src/kotlin/com/example/plugin/Main.kt`:
+2. Use it in `plugin` (Compiled to js):
    ```kotlin
    import com.example.kernel.MyType
+
    val x = MyType("hello", 42)
    println(x.name)
    ```
+
+Regular kotlin code, no need for manual serialization/deserialization. It creates `MyType` object in JVM memory and call its methods via proxies by JSI and JNI.
 
 3. Build. kernel compiler plugin generates C++ bridge; the FIR compiler plugin rewrites plugin Kotlin into JS proxy calls automatically.
 
