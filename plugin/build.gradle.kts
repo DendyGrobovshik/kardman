@@ -2,7 +2,7 @@
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    id("io.github.dendygrobovshik.kardman.rdma-compiler") version "1.0"
+    id("io.github.dendygrobovshik.kardman.rdma-plugin-compiler") version "1.0"
 }
 
 kotlin {
@@ -27,7 +27,7 @@ kotlin {
 }
 
 tasks.matching { it.name == "compileKotlinJvm" }.configureEach {
-    dependsOn(":kernel:kspKotlinJvm")
+    dependsOn(":kernel:compileKotlinJvm")
 }
 
 tasks.matching { it.name == "compileKotlinJs" }.configureEach {

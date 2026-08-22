@@ -1,11 +1,11 @@
 package io.github.dendygrobovshik.kardman.tests
 
-import io.github.dendygrobovshik.kardman.ksp.CppGenerator
-import io.github.dendygrobovshik.kardman.ksp.ConstructorInfo
-import io.github.dendygrobovshik.kardman.ksp.MethodInfo
-import io.github.dendygrobovshik.kardman.ksp.ParameterInfo
-import io.github.dendygrobovshik.kardman.ksp.PropertyInfo
-import io.github.dendygrobovshik.kardman.ksp.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.kernel.CppGenerator
+import io.github.dendygrobovshik.kardman.kernel.ConstructorInfo
+import io.github.dendygrobovshik.kardman.kernel.MethodInfo
+import io.github.dendygrobovshik.kardman.kernel.ParameterInfo
+import io.github.dendygrobovshik.kardman.kernel.PropertyInfo
+import io.github.dendygrobovshik.kardman.kernel.RdmaClassInfo
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains

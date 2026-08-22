@@ -31,17 +31,18 @@ Plugin code looks like plain Kotlin, but executes in Hermes via JSI/JNI bridge.
    println(x.name)
    ```
 
-3. Build. Kernel KSP generates C++ bridge; the FIR compiler plugin rewrites plugin Kotlin into JS proxy calls automatically.
+3. Build. kernel compiler plugin generates C++ bridge; the FIR compiler plugin rewrites plugin Kotlin into JS proxy calls automatically.
 
 ## Project modules
 
 | Module | Role |
 |--------|------|
 | `:rdma-annotation` | `@RDMA` annotation (KMP) |
-| `:kernel` | @RDMA annotated classes (KMP: JVM + JS) |
-| `:rdma-kernel-ksp` | KSP processor → generates C++ JNI/JSI glue + `rdma_classes.json` |
-| `:rdma-compiler-plugin` | FIR compiler plugin → resolves @RDMA usages and rewrites plugin source to JS proxy calls |
-| `:rdma-gradle-plugin` | Gradle wrapper that wires `:rdma-compiler-plugin` into the plugin module's JVM resolve compilation |
+| `:kernel` | @RDMA annotated classes (JVM) |
+| `:rdma-kernel-compiler-plugin` | IR compiler plugin → generates C++ JNI/JSI glue + `rdma_classes.json` + vtable injection |
+| `:rdma-kernel-gradle-plugin` | Gradle wrapper that wires `:rdma-kernel-compiler-plugin` into the kernel module |
+| `:rdma-plugin-compiler-plugin` | FIR compiler plugin → resolves @RDMA usages and rewrites plugin source to JS proxy calls |
+| `:rdma-plugin-gradle-plugin` | Gradle wrapper that wires `:rdma-plugin-compiler-plugin` into the plugin module's JVM resolve compilation |
 | `:rdma-runtime-android` | Android AAR: Hermes runtime + JNI bridge + C++ glue |
 | `:plugin` | Demo plugin (Kotlin/JS), compiles to JS executed in Hermes |
 | `:shared` | Shared KMP code (Compose UI) |

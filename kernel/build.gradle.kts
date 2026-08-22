@@ -1,25 +1,21 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.ksp)
+    id("io.github.dendygrobovshik.kardman.rdma-kernel-compiler") version "1.0"
 }
 
 kotlin {
     jvm()
 
     sourceSets {
-        commonMain.dependencies {
-            implementation(project(":rdma-annotation"))
-        }
         commonMain {
-            kotlin.exclude("**/Person.kt", "**/Person2.kt")
+            kotlin.srcDir("build/generated/rdma/kotlin")
+            dependencies {
+                implementation(project(":rdma-annotation"))
+            }
         }
     }
 }
 
-dependencies {
-    add("kspJvm", project(":rdma-kernel-ksp"))
-}
-
-tasks.matching { it.name.startsWith("ksp") }.configureEach {
+tasks.matching { it.name == "compileKotlinJvm" }.configureEach {
     outputs.upToDateWhen { false }
 }

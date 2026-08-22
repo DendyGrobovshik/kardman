@@ -35,7 +35,7 @@
 
 ### Code generation
 
-- C++ bridge generated automatically via KSP
+- C++ bridge generated automatically via the kernel compiler plugin
 - JNI methodID caching — `FindClass`/`GetMethodID` called once at init
 - JVM object lifetime managed via `NativeState` destructor (`DeleteGlobalRef`)
 - Multiple @RDMA classes in any files — detected automatically

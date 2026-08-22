@@ -40,8 +40,8 @@ val cleanGeneratedCpp = tasks.register<Delete>("cleanGeneratedCpp") {
 }
 
 val copyGeneratedCpp = tasks.register<Copy>("copyGeneratedCpp") {
-    dependsOn(":kernel:kspKotlinJvm", cleanGeneratedCpp)
-    from("${rootProject.projectDir}/kernel/build/generated/ksp/jvm/jvmMain/resources/cpp")
+    dependsOn(":kernel:compileKotlinJvm", cleanGeneratedCpp)
+    from("${rootProject.projectDir}/kernel/build/generated/rdma/cpp")
     into("src/main/cpp/generated")
     include("*.h", "*.cpp")
 }
