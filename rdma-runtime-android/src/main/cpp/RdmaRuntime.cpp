@@ -83,6 +83,27 @@ void initRdmaRuntime(JavaVM* jvm) {
         rt.global().setProperty(rt, "globalThis", rt.global());
     }
 
+    // Provide a global `println` so inlined JS event bodies (e.g. `println("clicked")`)
+    // emitted by the plugin transform have a callable symbol in Hermes.
+    {
+        auto& rt = *g_runtime;
+        auto printlnFn = facebook::jsi::Function::createFromHostFunction(
+            rt, facebook::jsi::PropNameID::forAscii(rt, "println"), 1,
+            [](facebook::jsi::Runtime& r, const facebook::jsi::Value&, const facebook::jsi::Value* args, size_t count) {
+                for (size_t i = 0; i < count; i++) {
+                    if (args[i].isString()) {
+                        LOGI("println: %s", args[i].getString(r).utf8(r).c_str());
+                    } else if (args[i].isNumber()) {
+                        LOGI("println: %d", (int)args[i].getNumber());
+                    } else if (args[i].isBool()) {
+                        LOGI("println: %s", args[i].getBool() ? "true" : "false");
+                    }
+                }
+                return facebook::jsi::Value::undefined();
+            });
+        rt.global().setProperty(rt, "println", std::move(printlnFn));
+    }
+
     LOGI("RDMA runtime initialized with bridge");
 }
 

@@ -148,6 +148,57 @@ Android entry point. `MainActivity`:
 3. Loads `RDMAHermes-plugin.js` (compiled plugin)
 4. `main()` in plugin JS calls `RDMA.createX(...)` → JNI → JVM
 
+## UI Widget Layer (Redwood-like)
+
+`@RDMA` classes also serve as a **UI widget protocol**: each widget is a kernel object with type, props, events and children. The plugin builds the tree by creating `@RDMA` widgets and mutating them through the existing JSI/JNI proxy; the kernel hosts the Compose runtime and diffs the widget tree into native views.
+
+### Protocol
+
+```kotlin
+@RDMA
+open class Widget {                 // container: renders children
+    fun add(child: Widget)          // children mutation (Compose SnapshotStateList → diff)
+    fun remove(child: Widget)
+    fun mount()                     // register this subtree as the app root
+}
+
+@RDMA
+class Text(val text: String) : Widget()
+
+@RDMA
+class Button(val text: String) : Widget() {
+    open fun onClick() {}           // event: plugin overrides it via vtable
+}
+```
+
+- **props** = constructor params / properties (already proxied as getters/setters).
+- **events** = `open fun` methods. The plugin's lambda/override is stored in the C++ `RdmaVtable` (keyed by vtableId), reachable from the kernel object's `__vtable` field. When the renderer invokes the open method, the injected IR dispatch calls `rdmaVtableDispatch` → JNI → the JS function in the plugin.
+- **children** = `add`/`remove` methods (RDMA-typed parameters, already supported).
+
+### Renderer (host, Compose)
+
+`shared/src/androidMain/.../RdmaUi.kt` maps widgets to composables:
+
+```kotlin
+@Composable fun WidgetHost(widget: Widget) = when (widget) {
+    is Button -> Button(onClick = { widget.onClick() }) { Text(widget.text) }
+    is Text   -> Text(widget.text)
+    else      -> Column { widget.children.forEach { WidgetHost(it) } }
+}
+```
+
+Widget state is Compose-observable (`mutableStateListOf` children), so `add`/`remove`/prop setters drive Compose recomposition and diffing. Node identity is the widget object itself (the `jobject`), which Compose uses as a stable key.
+
+### Flow
+
+```
+plugin main(): Widget().add(Text(...)).add(Button(...)).mount()
+  → JSI/JNI proxy mutates kernel widget graph
+  → mount() stores root in RdmaUiRoot
+  → MainActivity reads RdmaUiRoot.root and composes WidgetHost(root)
+  → tap → widget.onClick() → __vtable dispatch → JS callback in Hermes
+```
+
 ## Data Flow
 
 ### Constructor call

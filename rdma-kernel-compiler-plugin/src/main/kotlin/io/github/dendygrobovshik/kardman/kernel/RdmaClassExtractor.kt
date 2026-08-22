@@ -1,5 +1,6 @@
 package io.github.dendygrobovshik.kardman.kernel
 
+import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
 import org.jetbrains.kotlin.descriptors.Modality
 import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
@@ -47,6 +48,7 @@ object RdmaClassExtractor {
         }
 
         val methods = cls.functions
+            .filter { it.visibility == DescriptorVisibilities.PUBLIC }
             .filter { it.correspondingPropertySymbol == null }
             .filter { fn ->
                 val n = fn.name.asString()
@@ -71,6 +73,7 @@ object RdmaClassExtractor {
             }
 
         val properties = cls.properties
+            .filter { it.visibility == DescriptorVisibilities.PUBLIC }
             .filter { !it.name.asString().startsWith("__") }
             .map { prop ->
                 val type = prop.type()

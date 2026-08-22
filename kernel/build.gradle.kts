@@ -11,6 +11,7 @@ kotlin {
             kotlin.srcDir("build/generated/rdma/kotlin")
             dependencies {
                 implementation(project(":rdma-annotation"))
+                implementation(libs.compose.runtime)
             }
         }
     }

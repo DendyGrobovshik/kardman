@@ -26,4 +26,6 @@ fun main() {
     println("plugin: ${grievFriends[0].name} ${grievFriends[0].status}")
     grievFriends.forEach { it.status = "boomer" }
     griev.nameFriends(grievFriends)
+
+    buildUi()
 }
