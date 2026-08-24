@@ -53,6 +53,15 @@ class RdmaKernelGenerationExtension(
 
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
         val classes = RdmaClassExtractor.extractWithClasses(moduleFragment)
+
+        // Clean stale generated C++ files so removing an @RDMA class doesn't leave
+        // dangling HostObject sources referencing a no-longer-existing JNI cache entry.
+        cppOutputDir?.let { dir ->
+            File(dir).listFiles { f ->
+                f.isFile && (f.extension == "h" || f.extension == "cpp")
+            }?.forEach { it.delete() }
+        }
+
         if (classes.isEmpty()) return
         val classInfos = classes.map { it.info }
 
@@ -66,6 +75,10 @@ class RdmaKernelGenerationExtension(
             val json = RdmaJsonWriter.write(classInfos)
             val out = File(dir, "rdma_classes.json").also { it.parentFile.mkdirs() }
             out.writeText(json)
+
+            val widgets = RdmaWidgetExtractor.extract(moduleFragment)
+            val widgetsJson = widgets.joinToString(prefix = "[", postfix = "]", separator = ",") { "\"$it\"" }
+            File(dir, "rdma_widgets.json").also { it.parentFile.mkdirs() }.writeText(widgetsJson)
         }
 
         val transformer = RdmaVtableTransformer(pluginContext)

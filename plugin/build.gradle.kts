@@ -2,6 +2,7 @@
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.composeCompiler)
     id("io.github.dendygrobovshik.kardman.rdma-plugin-compiler") version "1.0"
 }
 
@@ -18,10 +19,14 @@ kotlin {
             kotlin.setSrcDirs(listOf("src/kotlin"))
             dependencies {
                 implementation(project(":kernel"))
+                implementation(libs.compose.runtime)
             }
         }
         jsMain {
             kotlin.setSrcDirs(listOf("build/generated/rdma"))
+            dependencies {
+                implementation(libs.compose.runtime)
+            }
         }
     }
 }

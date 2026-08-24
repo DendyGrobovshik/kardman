@@ -8,6 +8,11 @@ data class RdmaPluginType(
 )
 
 object RdmaPluginConfig {
+    fun parseWidgetsJson(json: String): List<String> {
+        val root = JsonParser(json).parse() ?: return emptyList()
+        return (root as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+    }
+
     fun parseClassesJson(json: String): List<RdmaPluginType> {
         val root = JsonParser(json).parse() ?: return emptyList()
         val array = root as? List<*> ?: return emptyList()

@@ -8,6 +8,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import io.github.dendygrobovshik.kardman.runtime.RdmaBridge
+import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -18,8 +19,17 @@ class MainActivity : ComponentActivity() {
         Log.i("RDMA", "Bridge initialized")
 
         try {
-            RdmaBridge.nativeEvalAsset("kotlin/kotlin-kotlin-stdlib.js")
-            Log.i("RDMA", "Kotlin stdlib loaded")
+            val dependencies = listOf(
+                "kotlin/kotlin-kotlin-stdlib.js",
+                "kotlin/kotlinx-atomicfu.js",
+                "kotlin/kotlinx-coroutines-core.js",
+                "kotlin/androidx-collection-collection.js",
+                "kotlin/androidx-compose-runtime-runtime.js",
+            )
+            for (dep in dependencies) {
+                RdmaBridge.nativeEvalAsset(dep)
+            }
+            Log.i("RDMA", "Dependencies loaded")
 
             val pluginResult = RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin.js")
             Log.i("RDMA", "Plugin: $pluginResult")
@@ -28,7 +38,7 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            RdmaUi()
+            RdmaComposeHost.Content()
         }
     }
 }

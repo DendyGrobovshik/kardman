@@ -75,6 +75,7 @@ object RdmaClassExtractor {
         val properties = cls.properties
             .filter { it.visibility == DescriptorVisibilities.PUBLIC }
             .filter { !it.name.asString().startsWith("__") }
+            .filter { !it.name.asString().startsWith("$") }
             .map { prop ->
                 val type = prop.type()
                 PropertyInfo(

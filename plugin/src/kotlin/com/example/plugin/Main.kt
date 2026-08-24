@@ -6,7 +6,7 @@ class Cyborg(name: String, age: Int) : Person(name, age) {
     override fun greet(): String = "I am a cyborg!"
 }
 
-fun main() {
+fun runPersonDemo() {
     val obi = Person("Оби-Ван Кеноби", 38)
     println(obi.greet())
     println(obi.toString())
@@ -26,6 +26,4 @@ fun main() {
     println("plugin: ${grievFriends[0].name} ${grievFriends[0].status}")
     grievFriends.forEach { it.status = "boomer" }
     griev.nameFriends(grievFriends)
-
-    buildUi()
 }

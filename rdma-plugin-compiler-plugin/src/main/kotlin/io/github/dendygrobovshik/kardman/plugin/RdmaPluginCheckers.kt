@@ -15,6 +15,7 @@ import org.jetbrains.kotlin.fir.expressions.FirPropertyAccessExpression
 import org.jetbrains.kotlin.fir.expressions.FirVariableAssignment
 import org.jetbrains.kotlin.fir.references.toResolvedSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirConstructorSymbol
+import org.jetbrains.kotlin.fir.symbols.impl.FirNamedFunctionSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirPropertySymbol
 import org.jetbrains.kotlin.fir.types.ConeClassLikeType
 import org.jetbrains.kotlin.fir.types.coneTypeSafe
@@ -29,7 +30,7 @@ class RdmaPluginAdditionalCheckersExtension(session: FirSession) : FirAdditional
     }
 
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
-        override val functionCallCheckers = setOf(RdmaPluginFunctionCallChecker)
+        override val functionCallCheckers = setOf(RdmaPluginFunctionCallChecker, RdmaPluginWidgetCallChecker)
         override val propertyAccessExpressionCheckers = setOf(RdmaPluginPropertyAccessChecker)
         override val variableAssignmentCheckers = setOf(RdmaPluginVariableAssignmentChecker)
     }
@@ -56,7 +57,9 @@ object RdmaPluginFileChecker : FirDeclarationChecker<FirFile>(MppCheckerKind.Com
 
         for (imp in declaration.imports) {
             val fqn = imp.importedFqName?.asString() ?: continue
-            if (!RdmaPluginTransformState.isRdmaQualifiedName(fqn)) continue
+            if (!RdmaPluginTransformState.isRdmaQualifiedName(fqn) &&
+                !RdmaPluginTransformState.isWidgetQualifiedName(fqn)
+            ) continue
             val src = imp.source ?: continue
             RdmaPluginTransformState.addEdit(path, src.startOffset, endWithNewline(text, src.endOffset), "")
         }
@@ -147,6 +150,20 @@ object RdmaPluginFunctionCallChecker : FirExpressionChecker<FirFunctionCall>(Mpp
 
         val replacement = "js(\"RDMA.create${type.simpleName}(${args.escapeForJs()})\")"
         RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, replacement)
+    }
+}
+
+object RdmaPluginWidgetCallChecker : FirExpressionChecker<FirFunctionCall>(MppCheckerKind.Common) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(expression: FirFunctionCall) {
+        val symbol = expression.calleeReference.toResolvedSymbol<FirNamedFunctionSymbol>() ?: return
+        val callableId = symbol.callableId ?: return
+        val fqn = callableId.asSingleFqName().asString()
+        if (!RdmaPluginTransformState.isWidgetQualifiedName(fqn)) return
+        val nameSrc = expression.calleeReference.source ?: return
+        val path = filePathOf(context) ?: return
+        val bridgeName = RdmaPluginTransformState.bridgeNameFor(fqn)
+        RdmaPluginTransformState.addEdit(path, nameSrc.startOffset, nameSrc.endOffset, bridgeName)
     }
 }
 

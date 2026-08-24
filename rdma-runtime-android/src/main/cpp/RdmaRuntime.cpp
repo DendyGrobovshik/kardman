@@ -7,12 +7,18 @@
 #include <android/log.h>
 
 #include "RdmaBridge.h"
+#include "RdmaRuntime.h"
+#include "RdmaCompose.h"
 
 #define LOG_TAG "RdmaRuntime"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 
 static std::unique_ptr<facebook::jsi::Runtime> g_runtime;
+
+facebook::jsi::Runtime* getRdmaRuntime() {
+    return g_runtime.get();
+}
 
 static std::string jsiValueToString(facebook::jsi::Runtime& rt, const facebook::jsi::Value& val) {
     if (val.isString()) {
@@ -49,12 +55,15 @@ static std::string jsiValueToString(facebook::jsi::Runtime& rt, const facebook::
 }
 
 void initRdmaRuntime(JavaVM* jvm) {
+    if (g_runtime) return; // already initialized
+
     g_runtime = facebook::hermes::makeHermesRuntime();
 
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
 
     facebook::rdma::installRdmaBridge(*g_runtime, jvm, env);
+    facebook::rdma::installRdmaComposeBridge(*g_runtime, jvm);
 
     // Hermes doesn't have console, globalThis — provide stubs
     {

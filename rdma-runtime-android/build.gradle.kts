@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.androidLibrary)
+    alias(libs.plugins.composeCompiler)
 }
 
 kotlin {
@@ -62,4 +63,9 @@ dependencies {
     implementation(libs.hermes.android)
     implementation(libs.soloader)
     implementation(project(":rdma-annotation"))
+    implementation(project(":kernel"))
+    implementation(libs.compose.runtime)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.material3)
+    implementation(libs.kotlinx.coroutines.android)
 }

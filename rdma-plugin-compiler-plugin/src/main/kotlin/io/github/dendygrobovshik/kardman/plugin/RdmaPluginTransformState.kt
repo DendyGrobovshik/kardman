@@ -15,23 +15,45 @@ object RdmaPluginTransformState {
     var outputDir: String = ""
     var types: List<RdmaPluginType> = emptyList()
         private set
+    var widgets: Set<String> = emptySet()
+        private set
 
     private val fileTexts = mutableMapOf<String, String>()
     private val edits = mutableMapOf<String, MutableList<SourceEdit>>()
     private val subclasses = mutableMapOf<String, RdmaSubclass>()
 
-    fun configure(jsonPath: String?, outputDir: String?) {
+    private val extraBridgeable = setOf(
+        "com.example.kernel.runRdmaApp",
+        "androidx.compose.runtime.mutableStateOf",
+    )
+
+    fun configure(jsonPath: String?, widgetsJsonPath: String?, outputDir: String?) {
         outputDir?.let { this.outputDir = it }
-        val path = jsonPath ?: return
-        val file = File(path)
-        if (file.exists()) {
-            types = RdmaPluginConfig.parseClassesJson(file.readText())
+        jsonPath?.let { path ->
+            val file = File(path)
+            if (file.exists()) {
+                types = RdmaPluginConfig.parseClassesJson(file.readText())
+            }
+        }
+        widgetsJsonPath?.let { path ->
+            val file = File(path)
+            if (file.exists()) {
+                widgets = RdmaPluginConfig.parseWidgetsJson(file.readText()).toSet()
+            }
         }
     }
 
     fun typeByQualifiedName(fqn: String): RdmaPluginType? = types.find { it.qualifiedName == fqn }
 
     fun isRdmaQualifiedName(fqn: String): Boolean = types.any { it.qualifiedName == fqn }
+
+    fun isWidgetQualifiedName(fqn: String): Boolean = fqn in widgets || fqn in extraBridgeable
+
+    fun bridgeNameFor(fqn: String): String = when (fqn) {
+        "com.example.kernel.runRdmaApp" -> "rdmaRunApp"
+        "androidx.compose.runtime.mutableStateOf" -> "rdmaMutableStateOf"
+        else -> "rdma" + fqn.substringAfterLast('.').replaceFirstChar { it.uppercase() }
+    }
 
     fun registerSubclass(qualifiedName: String, subclass: RdmaSubclass) {
         subclasses[qualifiedName] = subclass
@@ -56,6 +78,10 @@ object RdmaPluginTransformState {
 
     fun flush() {
         if (outputDir.isBlank()) return
+        val outDir = File(outputDir)
+        // Remove stale rewritten sources so deleting a plugin file does not leave
+        // a dangling `*_rdma.kt` that still references removed kernel symbols.
+        outDir.listFiles { f -> f.isFile && f.name.endsWith("_rdma.kt") }?.forEach { it.delete() }
         for ((path, fileEdits) in edits) {
             if (fileEdits.isEmpty()) continue
             val sourceFile = File(path)
@@ -68,7 +94,6 @@ object RdmaPluginTransformState {
                 sb.replace(edit.start, edit.end, edit.replacement)
             }
             val outName = sourceFile.nameWithoutExtension + "_rdma.kt"
-            val outDir = File(outputDir)
             outDir.mkdirs()
             File(outDir, outName).writeText(sb.toString())
         }
