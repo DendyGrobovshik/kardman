@@ -1,5 +1,9 @@
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
+import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
+import io.github.dendygrobovshik.kardman.types.RdmaType
+import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
@@ -7,20 +11,6 @@ import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
 import org.jetbrains.kotlin.ir.util.hasAnnotation
 import org.jetbrains.kotlin.name.FqName
 import java.io.File
-
-data class RdmaFunctionInfo(
-    val name: String,
-    val qualifiedName: String,
-    val facadeClass: String,
-    val composable: Boolean,
-    val parameters: List<RdmaParameterInfo>,
-    val returnType: RdmaTypeRef,
-)
-
-data class RdmaParameterInfo(
-    val name: String,
-    val type: RdmaTypeRef,
-)
 
 object RdmaFunctionExtractor {
     private val RDMA_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RDMA")

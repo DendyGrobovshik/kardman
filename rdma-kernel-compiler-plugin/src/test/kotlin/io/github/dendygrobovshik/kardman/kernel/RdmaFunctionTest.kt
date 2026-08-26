@@ -1,5 +1,15 @@
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.ConstructorInfo
+import io.github.dendygrobovshik.kardman.types.ParameterInfo
+import io.github.dendygrobovshik.kardman.types.PropertyInfo
+import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
+import io.github.dendygrobovshik.kardman.types.RdmaManifest
+import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
+import io.github.dendygrobovshik.kardman.types.RdmaType
+import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
+import kotlinx.serialization.json.Json
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains
@@ -155,39 +165,62 @@ class RdmaFunctionCodegenTest {
     }
 }
 
-class RdmaManifestTest {
+class RdmaManifestSerializationTest {
 
     @Test
-    fun `unified manifest contains classes and functions with kinds`() {
-        val classes = listOf(RdmaClassInfo(
-            packageName = "com.example.kernel", className = "Person",
-            qualifiedName = "com.example.kernel.Person",
-            constructors = listOf(ConstructorInfo(listOf(ParameterInfo("name", "kotlin.String")))),
-            methods = emptyList(), properties = emptyList(),
-        ))
-        val functions = listOf(
-            RdmaFunctionInfo(
-                name = "Text",
-                qualifiedName = "com.example.kernel.Text",
-                facadeClass = "com.example.kernel.WidgetsKt",
-                composable = true,
-                parameters = emptyList(),
-                returnType = RdmaTypeRef(RdmaType.UnitType),
-            ),
-            RdmaFunctionInfo(
-                name = "greet",
-                qualifiedName = "com.example.kernel.greet",
-                facadeClass = "com.example.kernel.WidgetsKt",
-                composable = false,
-                parameters = listOf(RdmaParameterInfo("p", RdmaTypeRef(RdmaType.Ref("com.example.kernel.Person")))),
-                returnType = RdmaTypeRef(RdmaType.Primitive("kotlin.String")),
+    fun `manifest round-trips through kotlinx`() {
+        val manifest = RdmaManifest(
+            classes = listOf(RdmaClassInfo(
+                packageName = "com.example.kernel", className = "Person",
+                qualifiedName = "com.example.kernel.Person",
+                constructors = listOf(ConstructorInfo(listOf(ParameterInfo("name", "kotlin.String")))),
+                methods = emptyList(), properties = emptyList(),
+            )),
+            functions = listOf(
+                RdmaFunctionInfo(
+                    name = "Text",
+                    qualifiedName = "com.example.kernel.Text",
+                    facadeClass = "com.example.kernel.WidgetsKt",
+                    composable = true,
+                    parameters = emptyList(),
+                    returnType = RdmaTypeRef(RdmaType.UnitType),
+                ),
+                RdmaFunctionInfo(
+                    name = "forEach",
+                    qualifiedName = "com.example.kernel.forEach",
+                    facadeClass = "com.example.kernel.WidgetsKt",
+                    composable = false,
+                    parameters = listOf(
+                        RdmaParameterInfo("items", RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.Ref("com.example.kernel.Person"))))),
+                        RdmaParameterInfo("action", RdmaTypeRef(RdmaType.FunctionType(
+                            listOf(RdmaTypeRef(RdmaType.Ref("com.example.kernel.Person"))),
+                            RdmaTypeRef(RdmaType.UnitType),
+                        ))),
+                    ),
+                    returnType = RdmaTypeRef(RdmaType.UnitType),
+                ),
             ),
         )
-        val json = RdmaJsonWriter.writeManifest(classes, functions)
-        assertContains(json, "\"kind\":\"class\"")
+
+        val json = Json.encodeToString(RdmaManifest.serializer(), manifest)
+        val decoded = Json.decodeFromString(RdmaManifest.serializer(), json)
+
+        assertEquals(manifest, decoded)
+        assertContains(json, "Person")
+        assertContains(json, "forEach")
         assertContains(json, "\"kind\":\"function\"")
-        assertContains(json, "\"composable\":true")
-        assertContains(json, "\"kind\":\"ref\"")
-        assertContains(json, "com.example.kernel.Person")
+    }
+
+    @Test
+    fun `rdma type tree round-trips`() {
+        val type = RdmaTypeRef(
+            RdmaType.FunctionType(
+                listOf(RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.Primitive("kotlin.String"))))),
+                RdmaTypeRef(RdmaType.Ref("com.example.kernel.Person")),
+            )
+        )
+        val json = Json.encodeToString(RdmaTypeRef.serializer(), type)
+        val decoded = Json.decodeFromString(RdmaTypeRef.serializer(), json)
+        assertEquals(type, decoded)
     }
 }

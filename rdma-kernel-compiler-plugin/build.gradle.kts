@@ -15,6 +15,8 @@ kotlin {
 
 dependencies {
     compileOnly(libs.kotlin.compiler.embeddable)
+    implementation(project(":rdma-types"))
+    implementation(libs.kotlinx.serialization.json)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlin.testJunit)
     testImplementation(libs.junit)

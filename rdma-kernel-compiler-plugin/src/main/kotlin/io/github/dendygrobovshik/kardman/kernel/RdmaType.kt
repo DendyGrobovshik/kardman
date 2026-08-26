@@ -1,35 +1,13 @@
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
+import io.github.dendygrobovshik.kardman.types.RdmaType
+import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import org.jetbrains.kotlin.ir.types.IrSimpleType
 import org.jetbrains.kotlin.ir.types.IrType
 import org.jetbrains.kotlin.ir.types.classFqName
 import org.jetbrains.kotlin.ir.types.isNullable
 import org.jetbrains.kotlin.ir.types.typeOrNull
-
-/**
- * A type that may cross the runtime boundary.
- *
- * The boundary admits only:
- *  - primitives + String (copied by value)
- *  - @RDMA classes (reference / handle)
- *  - functions / lambdas (registered + invoked back)
- *  - List (special-cased)
- *  - Unit (return-only)
- *
- * No composite value types (data classes, enums, arrays) are supported yet.
- */
-sealed class RdmaType {
-    data class Primitive(val fqn: String) : RdmaType()
-    data class Ref(val fqn: String) : RdmaType()
-    data class FunctionType(val parameters: List<RdmaTypeRef>, val returnType: RdmaTypeRef) : RdmaType()
-    data class ListType(val element: RdmaTypeRef) : RdmaType()
-    object UnitType : RdmaType()
-}
-
-data class RdmaTypeRef(
-    val type: RdmaType,
-    val nullable: Boolean = false,
-)
 
 object RdmaTypeParser {
     val primitiveFqns = setOf(

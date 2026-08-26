@@ -1,22 +1,13 @@
 plugins {
     alias(libs.plugins.kotlinJvm)
+    alias(libs.plugins.kotlinSerialization)
     `maven-publish`
 }
 
 group = "io.github.dendygrobovshik.kardman"
 version = "1.0"
 
-kotlin {
-    compilerOptions {
-        optIn.add("org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi")
-        optIn.add("org.jetbrains.kotlin.fir.symbols.SymbolInternals")
-        optIn.add("org.jetbrains.kotlin.fir.declarations.DirectDeclarationsAccess")
-    }
-}
-
 dependencies {
-    compileOnly(libs.kotlin.compiler.embeddable)
-    implementation(project(":rdma-types"))
     implementation(libs.kotlinx.serialization.json)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlin.testJunit)

@@ -1,5 +1,10 @@
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
+import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
+import io.github.dendygrobovshik.kardman.types.RdmaType
+import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import java.io.OutputStream
 
 class CppGenerator(private val output: (String, String) -> OutputStream) {

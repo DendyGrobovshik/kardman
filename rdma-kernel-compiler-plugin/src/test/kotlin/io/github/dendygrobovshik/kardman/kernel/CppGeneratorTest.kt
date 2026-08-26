@@ -1,5 +1,10 @@
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.ConstructorInfo
+import io.github.dendygrobovshik.kardman.types.MethodInfo
+import io.github.dendygrobovshik.kardman.types.ParameterInfo
+import io.github.dendygrobovshik.kardman.types.PropertyInfo
+import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains

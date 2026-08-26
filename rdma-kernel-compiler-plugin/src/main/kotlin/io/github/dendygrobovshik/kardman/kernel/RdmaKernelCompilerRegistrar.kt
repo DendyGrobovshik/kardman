@@ -1,5 +1,7 @@
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.RdmaManifest
+import kotlinx.serialization.json.Json
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.compiler.plugin.AbstractCliOption
@@ -79,7 +81,7 @@ class RdmaKernelGenerationExtension(
         }
 
         jsonOutputDir?.let { dir ->
-            val json = RdmaJsonWriter.writeManifest(classInfos, functions)
+            val json = Json.encodeToString(RdmaManifest.serializer(), RdmaManifest(classInfos, functions))
             File(dir, "rdma_manifest.json").also { it.parentFile.mkdirs() }.writeText(json)
         }
 
