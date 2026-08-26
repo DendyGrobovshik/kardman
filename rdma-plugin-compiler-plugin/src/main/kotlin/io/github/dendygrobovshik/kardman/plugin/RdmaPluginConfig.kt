@@ -7,42 +7,81 @@ data class RdmaPluginType(
     val properties: List<Pair<String, Boolean>>,
 )
 
+data class RdmaPluginFunction(
+    val name: String,
+    val qualifiedName: String,
+    val composable: Boolean,
+    val parameters: List<RdmaPluginParameter>,
+)
+
+data class RdmaPluginParameter(
+    val lambdaArity: Int?,
+)
+
+data class RdmaManifest(
+    val classes: List<RdmaPluginType>,
+    val functions: List<RdmaPluginFunction>,
+)
+
 object RdmaPluginConfig {
-    fun parseWidgetsJson(json: String): List<String> {
-        val root = JsonParser(json).parse() ?: return emptyList()
-        return (root as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+    fun parseManifest(json: String): RdmaManifest {
+        val root = JsonParser(json).parse() ?: return RdmaManifest(emptyList(), emptyList())
+        val array = root as? List<*> ?: return RdmaManifest(emptyList(), emptyList())
+        val classes = mutableListOf<RdmaPluginType>()
+        val functions = mutableListOf<RdmaPluginFunction>()
+        for (raw in array) {
+            val obj = raw as? Map<*, *> ?: continue
+            when (obj["kind"] as? String) {
+                "class" -> parseClass(obj)?.let { classes += it }
+                "function" -> parseFunction(obj)?.let { functions += it }
+            }
+        }
+        return RdmaManifest(classes, functions)
     }
 
-    fun parseClassesJson(json: String): List<RdmaPluginType> {
-        val root = JsonParser(json).parse() ?: return emptyList()
-        val array = root as? List<*> ?: return emptyList()
-        return array.mapNotNull { raw ->
-            val obj = raw as? Map<*, *> ?: return@mapNotNull null
-            val name = obj["name"] as? String ?: return@mapNotNull null
-            val qualifiedName = obj["qualifiedName"] as? String ?: name
+    private fun parseClass(obj: Map<*, *>): RdmaPluginType? {
+        val name = obj["name"] as? String ?: return null
+        val qualifiedName = obj["qualifiedName"] as? String ?: name
 
-            val constructorParams = (obj["constructors"] as? List<*>)
-                ?.firstOrNull()
-                ?.let { ctor -> (ctor as? Map<*, *>)?.get("parameters") as? List<*> }
-                ?.mapNotNull { param ->
-                    val p = param as? Map<*, *> ?: return@mapNotNull null
-                    val pName = p["name"] as? String ?: "arg"
-                    val pType = p["type"] as? String ?: "kotlin.Any"
-                    pName to pType
-                }
-                ?: emptyList()
+        val constructorParams = (obj["constructors"] as? List<*>)
+            ?.firstOrNull()
+            ?.let { ctor -> (ctor as? Map<*, *>)?.get("parameters") as? List<*> }
+            ?.mapNotNull { param ->
+                val p = param as? Map<*, *> ?: return@mapNotNull null
+                val pName = p["name"] as? String ?: "arg"
+                val pType = p["type"] as? String ?: "kotlin.Any"
+                pName to pType
+            }
+            ?: emptyList()
 
-            val properties = (obj["properties"] as? List<*>)
-                ?.mapNotNull { prop ->
-                    val p = prop as? Map<*, *> ?: return@mapNotNull null
-                    val pName = p["name"] as? String ?: return@mapNotNull null
-                    val isMutable = (p["isMutable"] as? Boolean) ?: false
-                    pName to isMutable
-                }
-                ?: emptyList()
+        val properties = (obj["properties"] as? List<*>)
+            ?.mapNotNull { prop ->
+                val p = prop as? Map<*, *> ?: return@mapNotNull null
+                val pName = p["name"] as? String ?: return@mapNotNull null
+                val isMutable = (p["isMutable"] as? Boolean) ?: false
+                pName to isMutable
+            }
+            ?: emptyList()
 
-            RdmaPluginType(name, qualifiedName, constructorParams, properties)
+        return RdmaPluginType(name, qualifiedName, constructorParams, properties)
+    }
+
+    private fun parseFunction(obj: Map<*, *>): RdmaPluginFunction? {
+        val name = obj["name"] as? String ?: return null
+        val qualifiedName = obj["qualifiedName"] as? String ?: name
+        val composable = obj["composable"] as? Boolean ?: false
+        val params = obj["parameters"] as? List<*> ?: emptyList<Any?>()
+        val parameters = params.map { p ->
+            val pm = p as? Map<*, *>
+            val type = pm?.get("type") as? Map<*, *>
+            val arity = if (type?.get("kind") == "function") {
+                (type["parameters"] as? List<*>)?.size ?: 0
+            } else {
+                null
+            }
+            RdmaPluginParameter(arity)
         }
+        return RdmaPluginFunction(name, qualifiedName, composable, parameters)
     }
 
     private class JsonParser(private val json: String) {

@@ -56,9 +56,9 @@ class Person(val name: String, val age: Int) {
 
 The **kernel compiler plugin** (`:rdma-kernel-compiler-plugin`) runs on this module to:
 1. Extract class metadata (name, constructors, methods, properties) from the module IR
-2. Generate C++ JNI/JSI glue code + `rdma_classes.json` manifest
+2. Generate C++ JNI/JSI glue code + `rdma_manifest.json` manifest
 3. Inject the vtable dispatch (`__vtable` field + dispatch in `open` methods) directly into IR
-4. Extract `@RDMAWidget` functions into `rdma_widgets.json` (the widget manifest)
+4. Extract `@RDMA` top-level functions (widgets and plain functions) into `rdma_manifest.json`
 
 ### `:rdma-kernel-compiler-plugin`
 
@@ -70,8 +70,7 @@ An IR compiler plugin (`IrGenerationExtension`) that scans `@RDMA` classes and g
 | `{Class}HostObject.h/cpp` | JSI `HostFunction` wrappers for properties and methods |
 | `{Class}NativeState` | Extends `jsi::NativeState` — holds JVM `jobject` global ref, releases on GC |
 | `RdmaBridge.h/cpp` | `installRdmaBridge()` — registers all factories in `global.RDMA` |
-| `rdma_classes.json` | JSON manifest of all @RDMA types (for the plugin compiler plugin) |
-| `rdma_widgets.json` | JSON list of `@RDMAWidget` function FQNs (for the plugin compiler plugin) |
+| `rdma_manifest.json` | Unified JSON manifest of all `@RDMA` types (classes + functions) |
 | `__vtable` field + dispatch | Injected into each @RDMA class's `open` methods (in-place IR) |
 
 Generated C++ follows the JNI caching pattern:
@@ -87,7 +86,7 @@ A Kotlin FIR compiler plugin that resolves and rewrites plugin source code. It r
 
 It uses `FirAdditionalCheckersExtension` to inspect the fully-resolved FIR tree and `IrGenerationExtension` as the flush point:
 
-1. Removes `import com.example.kernel.X` lines (matched by qualified name from `rdma_classes.json` or `rdma_widgets.json`).
+1. Removes `import com.example.kernel.X` lines (matched by qualified name from `rdma_manifest.json`).
 2. Replaces `Person("str", 42)` → `js("RDMA.createPerson('str', 42)")` using the resolved constructor's class.
 3. Replaces `.name` → `.getName()`, `.status = v` → `.setStatus(v)` using the resolved property's containing class (works for subclasses too).
 4. Replaces `class Cyborg(...) : Person(...) { override fun ... }` with `js("""RDMA.createWithOverrides('Person', [...], { ... })""")` and removes the class declaration.
@@ -187,7 +186,7 @@ fun Column(content: @Composable () -> Unit) { M3Column { content() } }
 ```
 
 The kernel compiler plugin extracts every `@RDMAWidget` function into
-`rdma_widgets.json` (the widget manifest consumed by the plugin compiler plugin).
+`rdma_manifest.json` (the unified manifest consumed by the plugin compiler plugin).
 
 The host renderer (`rdma-runtime-android/.../RdmaWidgets.kt`) is the single
 dispatch point. It receives `(name, args)` from JNI and calls the kernel
@@ -301,4 +300,4 @@ When Hermes GC collects the JS proxy object:
 
 **Property → getter**: Instead of JS property getters (which require `Object.defineProperty`), properties are exposed as `getName()`/`getAge()` methods. FIR plugin transforms `.name` → `.getName()` in plugin source.
 
-**Cross-module manifest**: The kernel compiler plugin generates `rdma_classes.json` so the plugin compiler plugin has an explicit list of `@RDMA` types. The FIR plugin reads this JSON and uses full FIR resolution (across module boundaries) to determine which concrete class/method each call site refers to.
+**Cross-module manifest**: The kernel compiler plugin generates `rdma_manifest.json` so the plugin compiler plugin has an explicit list of `@RDMA` types. The FIR plugin reads this JSON and uses full FIR resolution (across module boundaries) to determine which concrete class/method each call site refers to.

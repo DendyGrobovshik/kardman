@@ -15,6 +15,7 @@ object RdmaComposeHost {
     private external fun nativeInvokeContent(composer: Composer)
     external fun nativeInvokeScopeBlock(blockId: Long, composer: Composer, changed: Int)
     external fun nativeInvokeCallback(blockId: Long, args: Array<Any?>)
+    external fun nativeInvokeLambda(id: Long, args: Array<Any?>): Any?
 }
 
 class ComposerScopeBlock(private val blockId: Long) : Function2<Composer, Int, Unit> {

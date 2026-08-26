@@ -654,3 +654,26 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeCallb
     const facebook::jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
     it->second->call(*rt, callArgs, jsArgs.size());
 }
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeLambda(
+    JNIEnv* env, jclass, jlong blockId, jobjectArray args) {
+    using namespace facebook::rdma;
+    facebook::jsi::Runtime* rt = getRdmaRuntime();
+    if (!rt) return nullptr;
+    auto it = g_scopeBlocks.find(blockId);
+    if (it == g_scopeBlocks.end()) return nullptr;
+    std::vector<facebook::jsi::Value> jsArgs;
+    if (args) {
+        jsize n = env->GetArrayLength(args);
+        jsArgs.reserve(n);
+        for (jsize i = 0; i < n; i++) {
+            jobject elem = env->GetObjectArrayElement(args, i);
+            jsArgs.push_back(unboxJni(env, *rt, elem));
+            if (elem) env->DeleteLocalRef(elem);
+        }
+    }
+    const facebook::jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
+    facebook::jsi::Value result = it->second->call(*rt, callArgs, jsArgs.size());
+    return boxJsi(env, *rt, result);
+}

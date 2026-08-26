@@ -4,15 +4,16 @@ import java.io.OutputStream
 
 class CppGenerator(private val output: (String, String) -> OutputStream) {
 
-    fun generate(classInfos: List<RdmaClassInfo>) {
-        if (classInfos.isEmpty()) return
-        generateJniCacheHeader(classInfos)
-        generateJniCacheCpp(classInfos)
+    fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo> = emptyList()) {
+        val plainFunctions = functions.filter { !it.composable }
+        if (classInfos.isEmpty() && plainFunctions.isEmpty()) return
+        generateJniCacheHeader(classInfos, plainFunctions)
+        generateJniCacheCpp(classInfos, plainFunctions)
         for (info in classInfos) {
             generateHostObjectHeader(info)
             generateHostObjectCpp(info, classInfos)
         }
-        generateBridge(classInfos)
+        generateBridge(classInfos, plainFunctions)
     }
 
     private fun isRdmaClass(typeName: String, allClasses: List<RdmaClassInfo>): Boolean {
@@ -23,7 +24,17 @@ class CppGenerator(private val output: (String, String) -> OutputStream) {
         return allClasses.find { it.qualifiedName == typeName }
     }
 
-    private fun generateJniCacheHeader(infos: List<RdmaClassInfo>) {
+    private fun jniSignature(type: RdmaTypeRef): String = when (val t = type.type) {
+        is RdmaType.UnitType -> "V"
+        is RdmaType.Primitive -> JniTypeMapper.jniSignature(t.fqn)
+        is RdmaType.Ref -> "L${t.fqn.replace('.', '/')};"
+        is RdmaType.ListType -> "Ljava/util/List;"
+        is RdmaType.FunctionType -> "Lkotlin/jvm/functions/Function${t.parameters.size};"
+    }
+
+    private fun jniReturnSignature(type: RdmaTypeRef): String = jniSignature(type)
+
+    private fun generateJniCacheHeader(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
         val out = output("RdmaJniCache.h", "RdmaJniCache.h").bufferedWriter()
         out.write("""#pragma once
 #include <jni.h>
@@ -51,11 +62,15 @@ struct RdmaJniCache {
             out.write("    };\n")
             out.write("    ${info.className}Cache ${info.className.lowercase()}_cache;\n")
         }
+        for (fn in functions) {
+            out.write("    jclass fn_${fn.name}_clazz = nullptr;\n")
+            out.write("    jmethodID fn_${fn.name}_method = nullptr;\n")
+        }
         out.write("};\n\nextern RdmaJniCache g_rdmaCache;\n\nvoid initJniCache(JNIEnv* env);\n")
         out.close()
     }
 
-    private fun generateJniCacheCpp(infos: List<RdmaClassInfo>) {
+    private fun generateJniCacheCpp(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
         val out = output("RdmaJniCache.cpp", "RdmaJniCache.cpp").bufferedWriter()
         out.write("""#include "RdmaJniCache.h"
 
@@ -97,6 +112,19 @@ void initJniCache(JNIEnv* env) {
             }
             out.write("    }\n")
         }
+        for (fn in functions) {
+            val facade = fn.facadeClass.replace('.', '/')
+            val paramSig = fn.parameters.joinToString("") { jniSignature(it.type) }
+            val retSig = jniReturnSignature(fn.returnType)
+            out.write("""
+    {
+        jclass localCls = env->FindClass("$facade");
+        g_rdmaCache.fn_${fn.name}_clazz = (jclass)env->NewGlobalRef(localCls);
+        env->DeleteLocalRef(localCls);
+        g_rdmaCache.fn_${fn.name}_method = env->GetStaticMethodID(g_rdmaCache.fn_${fn.name}_clazz, "${fn.name}", "($paramSig)$retSig");
+    }
+""")
+        }
         out.write("}\n")
         out.close()
     }
@@ -128,6 +156,7 @@ private:
 
 void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm);
 jsi::Object create${info.className}Instance(jsi::Runtime& rt, JavaVM* jvm, const jsi::Value* args, size_t count);
+jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobject globalObj);
 
 } // namespace rdma
 } // namespace facebook
@@ -172,7 +201,7 @@ namespace rdma {
         for (method in info.methods) {
             if (isRdmaClass(method.returnType, allClasses)) {
                 val rdma = rdmaClassByName(method.returnType, allClasses)!!
-                out.write("static jsi::Object create${rdma.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobject globalObj);\n")
+                out.write("jsi::Object create${rdma.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobject globalObj);\n")
             }
         }
 
@@ -514,7 +543,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
         out.close()
     }
 
-    private fun generateBridge(infos: List<RdmaClassInfo>) {
+    private fun generateBridge(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
         val out = output("RdmaBridge.h", "RdmaBridge.h").bufferedWriter()
         out.write("""#pragma once
 #include <jsi/jsi.h>
@@ -552,7 +581,11 @@ static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std:
 
 jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType);
 jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object& jsObj, const std::string& elementType);
-
+""")
+        for (fn in functions) {
+            cpp.write(functionImpl(fn, infos))
+        }
+        cpp.write("""
 void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env) {
     g_rdmaCache.jvm = jvm;
     initJniCache(env);
@@ -580,6 +613,9 @@ void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env) {
         rdmaNamespace.setProperty(rt, "$createFnName", std::move(createFn));
     }
 """)
+        }
+        for (fn in functions) {
+            cpp.write(functionRegistration(fn))
         }
         cpp.write("""
     {
@@ -642,5 +678,141 @@ static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std:
 } // namespace facebook
 """)
         cpp.close()
+    }
+
+    private fun functionImpl(fn: RdmaFunctionInfo, allClasses: List<RdmaClassInfo>): String {
+        val sb = StringBuilder()
+        sb.append("""
+static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
+    JNIEnv* env = nullptr;
+    jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (!env) return jsi::Value::undefined();
+""")
+        fn.parameters.forEachIndexed { i, p ->
+            sb.append(functionParamExtraction(p, i, allClasses))
+        }
+        val argsStr = fn.parameters.joinToString(", ") { callArg(it) }
+        val callSuffix = if (argsStr.isEmpty()) "" else ", $argsStr"
+        sb.append(functionReturnMarshaling(fn, allClasses, callSuffix))
+        sb.append("}\n\n")
+        return sb.toString()
+    }
+
+    private fun functionRegistration(fn: RdmaFunctionInfo): String = """
+    {
+        auto fn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "${fn.name}"), ${fn.parameters.size},
+            [jvm](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                return rdma_fn_${fn.name}(r, jvm, args, count);
+            }
+        );
+        rdmaNamespace.setProperty(rt, "${fn.name}", std::move(fn));
+    }
+"""
+
+    private fun functionParamExtraction(p: RdmaParameterInfo, i: Int, allClasses: List<RdmaClassInfo>): String =
+        when (val t = p.type.type) {
+            is RdmaType.Primitive -> {
+                if (t.fqn == "kotlin.String") {
+                    if (p.type.nullable) {
+                        "    std::string cpp_${p.name} = args[$i].isNull() ? \"\" : args[$i].getString(r).utf8(r);\n    jstring j_${p.name} = args[$i].isNull() ? nullptr : env->NewStringUTF(cpp_${p.name}.c_str());\n"
+                    } else {
+                        "    std::string cpp_${p.name} = args[$i].getString(r).utf8(r);\n    jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n"
+                    }
+                } else {
+                    val jt = JniTypeMapper.forType(t.fqn) ?: return ""
+                    "    ${jt.cppType} cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())};\n"
+                }
+            }
+            is RdmaType.Ref -> {
+                val cls = allClasses.find { it.qualifiedName == t.fqn }?.className ?: return ""
+                "    jobject arg_${p.name} = nullptr;\n" +
+                    "    if (!args[$i].isNull()) {\n" +
+                    "        auto argObj_${p.name} = args[$i].asObject(r);\n" +
+                    "        auto argState_${p.name} = std::static_pointer_cast<${cls}NativeState>(argObj_${p.name}.getNativeState(r));\n" +
+                    "        arg_${p.name} = argState_${p.name}->getObject();\n" +
+                    "    }\n"
+            }
+            is RdmaType.ListType -> {
+                val elem = typeName(t.element)
+                "    jobject arg_${p.name} = nullptr;\n" +
+                    "    if (!args[$i].isNull()) {\n" +
+                    "        auto listObj_${p.name} = args[$i].asObject(r);\n" +
+                    "        if (listObj_${p.name}.hasNativeState(r)) {\n" +
+                    "            auto ns_${p.name} = listObj_${p.name}.getNativeState(r);\n" +
+                    "            if (ns_${p.name}) arg_${p.name} = *(jobject*)((char*)ns_${p.name}.get() + 16);\n" +
+                    "        } else {\n" +
+                    "            arg_${p.name} = materializeArray(env, r, jvm, listObj_${p.name}, \"$elem\");\n" +
+                    "        }\n" +
+                    "    }\n"
+            }
+            is RdmaType.FunctionType -> {
+                val arity = t.parameters.size
+                "    jlong id_${p.name} = (jlong)args[$i].getNumber();\n" +
+                    "    jclass lambdaCls_${p.name} = env->FindClass(\"io/github/dendygrobovshik/kardman/runtime/RdmaFunction$arity\");\n" +
+                    "    jmethodID lambdaCtor_${p.name} = env->GetMethodID(lambdaCls_${p.name}, \"<init>\", \"(J)V\");\n" +
+                    "    jobject arg_${p.name} = env->NewObject(lambdaCls_${p.name}, lambdaCtor_${p.name}, id_${p.name});\n" +
+                    "    env->DeleteLocalRef(lambdaCls_${p.name});\n"
+            }
+            is RdmaType.UnitType -> ""
+        }
+
+    private fun callArg(p: RdmaParameterInfo): String = when (val t = p.type.type) {
+        is RdmaType.Primitive -> when (t.fqn) {
+            "kotlin.String" -> "j_${p.name}"
+            "kotlin.Int" -> "(jint)cpp_${p.name}"
+            "kotlin.Boolean" -> "(jboolean)cpp_${p.name}"
+            "kotlin.Double", "kotlin.Float" -> "(jdouble)cpp_${p.name}"
+            "kotlin.Long" -> "(jlong)cpp_${p.name}"
+            else -> "nullptr"
+        }
+        is RdmaType.Ref, is RdmaType.ListType, is RdmaType.FunctionType -> "arg_${p.name}"
+        is RdmaType.UnitType -> ""
+    }
+
+    private fun typeName(type: RdmaTypeRef): String = when (val t = type.type) {
+        is RdmaType.Primitive -> t.fqn
+        is RdmaType.Ref -> t.fqn
+        is RdmaType.ListType -> typeName(t.element)
+        else -> "kotlin.Any"
+    }
+
+    private fun functionReturnMarshaling(fn: RdmaFunctionInfo, allClasses: List<RdmaClassInfo>, callSuffix: String): String {
+        val ret = fn.returnType
+        val deleteJStrings = fn.parameters
+            .filter { (it.type.type as? RdmaType.Primitive)?.fqn == "kotlin.String" }
+            .joinToString("") { "    env->DeleteLocalRef(j_${it.name});\n" }
+        return when (val t = ret.type) {
+            is RdmaType.UnitType ->
+                "    env->CallStaticVoidMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                    "$deleteJStrings    return jsi::Value::undefined();\n"
+            is RdmaType.Primitive -> when (t.fqn) {
+                "kotlin.String" ->
+                    "    auto jret = (jstring)env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                        (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
+                        "    auto cstr = env->GetStringUTFChars(jret, nullptr); auto ret = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jret, cstr); env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
+                "kotlin.Int" -> "    auto result = env->CallStaticIntMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n$deleteJStrings    return jsi::Value((double)result);\n"
+                "kotlin.Boolean" -> "    auto result = env->CallStaticBooleanMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n$deleteJStrings    return jsi::Value(result);\n"
+                "kotlin.Double", "kotlin.Float" -> "    auto result = env->CallStaticDoubleMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n$deleteJStrings    return jsi::Value(result);\n"
+                "kotlin.Long" -> "    auto result = env->CallStaticLongMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n$deleteJStrings    return jsi::Value((double)result);\n"
+                else -> "    return jsi::Value::undefined();\n"
+            }
+            is RdmaType.Ref -> {
+                val cls = allClasses.find { it.qualifiedName == t.fqn }?.className
+                if (cls == null) {
+                    "    return jsi::Value::undefined();\n"
+                } else {
+                    "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                        (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
+                        "    jobject globalRet = env->NewGlobalRef(jret);\n    env->DeleteLocalRef(jret);\n$deleteJStrings    return create${cls}Wrapper(r, jvm, globalRet);\n"
+                }
+            }
+            is RdmaType.ListType -> {
+                val elem = typeName(t.element)
+                "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                    "    if (jret != nullptr) {\n        jobject globalRet = env->NewGlobalRef(jret);\n        env->DeleteLocalRef(jret);\n        return createListHandle(r, jvm, globalRet, \"$elem\");\n    }\n$deleteJStrings    return jsi::Value::null();\n"
+            }
+            is RdmaType.FunctionType -> "    return jsi::Value::undefined();\n"
+        }
     }
 }

@@ -5,16 +5,16 @@ import androidx.compose.material3.Button as M3Button
 import androidx.compose.material3.Text as M3Text
 import androidx.compose.material3.TextField as M3TextField
 import androidx.compose.runtime.Composable
-import io.github.dendygrobovshik.kardman.RDMAWidget
+import io.github.dendygrobovshik.kardman.RDMA
 
 @Composable
-@RDMAWidget
+@RDMA
 fun Text(text: String) {
     M3Text(text)
 }
 
 @Composable
-@RDMAWidget
+@RDMA
 fun Column(content: @Composable () -> Unit) {
     M3Column {
         content()
@@ -22,7 +22,7 @@ fun Column(content: @Composable () -> Unit) {
 }
 
 @Composable
-@RDMAWidget
+@RDMA
 fun Button(text: String, onClick: () -> Unit) {
     M3Button(onClick = onClick) {
         Text(text)
@@ -30,7 +30,7 @@ fun Button(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-@RDMAWidget
+@RDMA
 fun TextField(value: String, onValueChange: (String) -> Unit) {
     M3TextField(value = value, onValueChange = onValueChange)
 }

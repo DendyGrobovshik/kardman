@@ -15,7 +15,7 @@ object RdmaPluginTransformState {
     var outputDir: String = ""
     var types: List<RdmaPluginType> = emptyList()
         private set
-    var widgets: Set<String> = emptySet()
+    var functions: List<RdmaPluginFunction> = emptyList()
         private set
 
     private val fileTexts = mutableMapOf<String, String>()
@@ -27,27 +27,27 @@ object RdmaPluginTransformState {
         "androidx.compose.runtime.mutableStateOf",
     )
 
-    fun configure(jsonPath: String?, widgetsJsonPath: String?, outputDir: String?) {
+    fun configure(manifestPath: String?, outputDir: String?) {
         outputDir?.let { this.outputDir = it }
-        jsonPath?.let { path ->
+        manifestPath?.let { path ->
             val file = File(path)
             if (file.exists()) {
-                types = RdmaPluginConfig.parseClassesJson(file.readText())
-            }
-        }
-        widgetsJsonPath?.let { path ->
-            val file = File(path)
-            if (file.exists()) {
-                widgets = RdmaPluginConfig.parseWidgetsJson(file.readText()).toSet()
+                val manifest = RdmaPluginConfig.parseManifest(file.readText())
+                types = manifest.classes
+                functions = manifest.functions
             }
         }
     }
 
     fun typeByQualifiedName(fqn: String): RdmaPluginType? = types.find { it.qualifiedName == fqn }
 
-    fun isRdmaQualifiedName(fqn: String): Boolean = types.any { it.qualifiedName == fqn }
+    fun isClassQualifiedName(fqn: String): Boolean = types.any { it.qualifiedName == fqn }
 
-    fun isWidgetQualifiedName(fqn: String): Boolean = fqn in widgets || fqn in extraBridgeable
+    fun isFunctionQualifiedName(fqn: String): Boolean =
+        functions.any { it.qualifiedName == fqn } || fqn in extraBridgeable
+
+    fun isBridgeableQualifiedName(fqn: String): Boolean =
+        isClassQualifiedName(fqn) || isFunctionQualifiedName(fqn)
 
     fun bridgeNameFor(fqn: String): String = when (fqn) {
         "com.example.kernel.runRdmaApp" -> "rdmaRunApp"
@@ -97,6 +97,42 @@ object RdmaPluginTransformState {
             outDir.mkdirs()
             File(outDir, outName).writeText(sb.toString())
         }
+        writeFunctionBridge(outDir)
+    }
+
+    private fun writeFunctionBridge(outDir: File) {
+        val bridgeFile = File(outDir, "RdmaFunctionBridge.kt")
+        val plain = functions.filter { !it.composable }
+        if (plain.isEmpty()) {
+            bridgeFile.delete()
+            return
+        }
+        outDir.mkdirs()
+        bridgeFile.writeText(buildFunctionBridge(plain))
+    }
+
+    internal fun buildFunctionBridge(plainFunctions: List<RdmaPluginFunction>): String {
+        val sb = StringBuilder()
+        sb.appendLine("package com.example.plugin")
+        sb.appendLine()
+        for (fn in plainFunctions) {
+            if (fn.composable) continue
+            val bridgeName = bridgeNameFor(fn.qualifiedName)
+            val params = fn.parameters.mapIndexed { i, p ->
+                if (p.lambdaArity == null) {
+                    "p$i: dynamic"
+                } else {
+                    val inner = (0 until p.lambdaArity).joinToString(", ") { "dynamic" }
+                    "p$i: ($inner) -> dynamic"
+                }
+            }.joinToString(", ")
+            val args = fn.parameters.mapIndexed { i, p ->
+                if (p.lambdaArity == null) "p$i" else "js(\"RDMA\").registerBlock(p$i)"
+            }.joinToString(", ")
+            sb.appendLine("fun $bridgeName($params): dynamic = js(\"RDMA\").${fn.name}($args)")
+            sb.appendLine()
+        }
+        return sb.toString()
     }
 
     fun reset() {

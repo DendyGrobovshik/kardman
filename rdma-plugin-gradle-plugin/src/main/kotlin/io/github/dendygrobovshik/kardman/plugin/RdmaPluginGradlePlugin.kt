@@ -84,14 +84,11 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
     override fun applyToCompilation(kotlinCompilation: KotlinCompilation<*>): Provider<List<SubpluginOption>> {
         val project = kotlinCompilation.project
         return project.provider {
-            val jsonPath = (project.findProperty("rdmaClassesJson") as? String)
-                ?: "${project.rootProject.projectDir}/kernel/build/generated/rdma/rdma_classes.json"
-            val widgetsPath = (project.findProperty("rdmaWidgetsJson") as? String)
-                ?: "${project.rootProject.projectDir}/kernel/build/generated/rdma/rdma_widgets.json"
+            val manifestPath = (project.findProperty("rdmaManifest") as? String)
+                ?: "${project.rootProject.projectDir}/kernel/build/generated/rdma/rdma_manifest.json"
             val outputDir = "${project.buildDir}/generated/rdma"
             listOf(
-                SubpluginOption("rdmaClassesJson", jsonPath),
-                SubpluginOption("rdmaWidgetsJson", widgetsPath),
+                SubpluginOption("rdmaManifest", manifestPath),
                 SubpluginOption("rdmaOutputDir", outputDir),
             )
         }

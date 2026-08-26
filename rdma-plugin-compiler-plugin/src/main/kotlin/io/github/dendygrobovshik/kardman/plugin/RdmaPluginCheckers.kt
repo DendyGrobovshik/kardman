@@ -57,9 +57,7 @@ object RdmaPluginFileChecker : FirDeclarationChecker<FirFile>(MppCheckerKind.Com
 
         for (imp in declaration.imports) {
             val fqn = imp.importedFqName?.asString() ?: continue
-            if (!RdmaPluginTransformState.isRdmaQualifiedName(fqn) &&
-                !RdmaPluginTransformState.isWidgetQualifiedName(fqn)
-            ) continue
+            if (!RdmaPluginTransformState.isBridgeableQualifiedName(fqn)) continue
             val src = imp.source ?: continue
             RdmaPluginTransformState.addEdit(path, src.startOffset, endWithNewline(text, src.endOffset), "")
         }
@@ -71,7 +69,7 @@ object RdmaPluginRegularClassChecker : FirDeclarationChecker<FirRegularClass>(Mp
     override fun check(declaration: FirRegularClass) {
         val superRef = declaration.superTypeRefs.firstOrNull { ref ->
             val fqn = ref.coneTypeSafe<ConeClassLikeType>()?.lookupTag?.classId?.asSingleFqName()?.asString()
-            fqn != null && RdmaPluginTransformState.isRdmaQualifiedName(fqn)
+            fqn != null && RdmaPluginTransformState.isClassQualifiedName(fqn)
         } ?: return
         val parentSimpleName = superRef.coneTypeSafe<ConeClassLikeType>()?.lookupTag?.classId?.shortClassName?.asString() ?: return
         val className = declaration.name.asString()
@@ -159,7 +157,7 @@ object RdmaPluginWidgetCallChecker : FirExpressionChecker<FirFunctionCall>(MppCh
         val symbol = expression.calleeReference.toResolvedSymbol<FirNamedFunctionSymbol>() ?: return
         val callableId = symbol.callableId ?: return
         val fqn = callableId.asSingleFqName().asString()
-        if (!RdmaPluginTransformState.isWidgetQualifiedName(fqn)) return
+        if (!RdmaPluginTransformState.isFunctionQualifiedName(fqn)) return
         val nameSrc = expression.calleeReference.source ?: return
         val path = filePathOf(context) ?: return
         val bridgeName = RdmaPluginTransformState.bridgeNameFor(fqn)

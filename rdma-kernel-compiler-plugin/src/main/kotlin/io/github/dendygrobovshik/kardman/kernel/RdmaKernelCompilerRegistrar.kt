@@ -22,7 +22,7 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
 
     override val pluginOptions: Collection<AbstractCliOption> = listOf(
         CliOption("cppOutputDir", "<dir>", "Output directory for generated C++ glue", required = false),
-        CliOption("jsonOutputDir", "<dir>", "Output directory for rdma_classes.json", required = false),
+        CliOption("jsonOutputDir", "<dir>", "Output directory for rdma_manifest.json", required = false),
     )
 
     override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
@@ -53,8 +53,16 @@ class RdmaKernelGenerationExtension(
 
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
         val classes = RdmaClassExtractor.extractWithClasses(moduleFragment)
+        val classInfos = classes.map { it.info }
+        val rdmaClassFqns = classInfos.map { it.qualifiedName }.toSet()
 
-        // Clean stale generated C++ files so removing an @RDMA class doesn't leave
+        val functions = RdmaFunctionExtractor.extract(moduleFragment)
+        val errors = functions.flatMap { RdmaTypeValidator.validateFunction(it, rdmaClassFqns) }
+        if (errors.isNotEmpty()) {
+            error("Invalid @RDMA types crossing the runtime boundary:\n" + errors.joinToString("\n"))
+        }
+
+        // Clean stale generated C++ files so removing an @RDMA class/function doesn't leave
         // dangling HostObject sources referencing a no-longer-existing JNI cache entry.
         cppOutputDir?.let { dir ->
             File(dir).listFiles { f ->
@@ -62,23 +70,17 @@ class RdmaKernelGenerationExtension(
             }?.forEach { it.delete() }
         }
 
-        if (classes.isEmpty()) return
-        val classInfos = classes.map { it.info }
+        if (classes.isEmpty() && functions.isEmpty()) return
 
         cppOutputDir?.let { dir ->
             CppGenerator { fileName, _ ->
                 File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
-            }.generate(classInfos)
+            }.generate(classInfos, functions)
         }
 
         jsonOutputDir?.let { dir ->
-            val json = RdmaJsonWriter.write(classInfos)
-            val out = File(dir, "rdma_classes.json").also { it.parentFile.mkdirs() }
-            out.writeText(json)
-
-            val widgets = RdmaWidgetExtractor.extract(moduleFragment)
-            val widgetsJson = widgets.joinToString(prefix = "[", postfix = "]", separator = ",") { "\"$it\"" }
-            File(dir, "rdma_widgets.json").also { it.parentFile.mkdirs() }.writeText(widgetsJson)
+            val json = RdmaJsonWriter.writeManifest(classInfos, functions)
+            File(dir, "rdma_manifest.json").also { it.parentFile.mkdirs() }.writeText(json)
         }
 
         val transformer = RdmaVtableTransformer(pluginContext)

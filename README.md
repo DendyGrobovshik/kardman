@@ -30,9 +30,9 @@ Regular kotlin code, no need for manual serialization/deserialization. It create
 |--------|------|
 | `:rdma-annotation` | `@RDMA` annotation (KMP) |
 | `:kernel` | @RDMA annotated classes + @Composable UI widgets (JVM + material3) |
-| `:rdma-kernel-compiler-plugin` | IR compiler plugin → generates C++ JNI/JSI glue + `rdma_classes.json` + `rdma_widgets.json` + vtable injection |
+| `:rdma-kernel-compiler-plugin` | IR compiler plugin → generates C++ JNI/JSI glue + `rdma_manifest.json` + vtable injection |
 | `:rdma-kernel-gradle-plugin` | Gradle wrapper that wires `:rdma-kernel-compiler-plugin` into the kernel module |
-| `:rdma-plugin-compiler-plugin` | FIR compiler plugin → resolves @RDMA/@RDMAWidget usages and rewrites plugin source to JS proxy calls |
+| `:rdma-plugin-compiler-plugin` | FIR compiler plugin → resolves @RDMA usages and rewrites plugin source to JS proxy calls |
 | `:rdma-plugin-gradle-plugin` | Gradle wrapper that wires `:rdma-plugin-compiler-plugin` into the plugin module's JVM resolve compilation and generates the guest-side widget bridge |
 | `:rdma-runtime-android` | Android AAR: Hermes runtime + JNI bridge + C++ glue |
 | `:plugin` | Demo plugin (Kotlin/JS), compiles to JS executed in Hermes |

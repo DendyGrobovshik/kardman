@@ -42,7 +42,7 @@
 
 ### Plugin transformation
 
-- Auto-detects @RDMA types via `rdma_classes.json` manifest (qualified names)
+- Auto-detects @RDMA types via `rdma_manifest.json` manifest (qualified names)
 - Resolve-based rewriting via FIR compiler plugin: knows the concrete class/method at each call site
 - Transforms constructor calls: `Person("str", 42)` → `js("RDMA.createPerson('str', 42)")`
 - Transforms property access: `.name` → `.getName()`, `.status = v` → `.setStatus(v)`
