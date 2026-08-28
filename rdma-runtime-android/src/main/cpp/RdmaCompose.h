@@ -3,6 +3,8 @@
 #include <jni.h>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <cstdint>
 
 namespace facebook {
 namespace rdma {
@@ -12,12 +14,6 @@ struct ComposeJniCache {
     JavaVM* jvm = nullptr;
 
     jclass composerClass = nullptr;
-    jmethodID startRestartGroup = nullptr;
-    jmethodID endRestartGroup = nullptr;
-    jmethodID shouldExecute = nullptr;
-    jmethodID rememberedValue = nullptr;
-    jmethodID updateRememberedValue = nullptr;
-    jmethodID skipToGroupEnd = nullptr;
 
     jclass scopeUpdateScopeClass = nullptr;
     jmethodID updateScope = nullptr;
@@ -38,7 +34,6 @@ struct ComposeJniCache {
     jclass scopeBlockClass = nullptr;
     jmethodID scopeBlockCtor = nullptr;
 
-    jmethodID changed = nullptr;
     jclass objectClass = nullptr;
     jmethodID objectCtor = nullptr;
 
@@ -60,6 +55,24 @@ void invokeRegisteredContent(jsi::Runtime& rt, jobject composer);
 
 // Called from JNI to invoke a stored scope-update block.
 void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composer, jint changed);
+
+// --- Helpers shared with the generated RdmaComposerProxy.cpp -----------------
+
+JNIEnv* getEnv(JavaVM* jvm);
+
+jobject boxJsi(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v);
+
+jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o);
+
+jsi::Object makeStateProxy(jsi::Runtime& rt, jobject state);
+
+jobject stateProxyJObject(jsi::Runtime& rt, const jsi::Value& v);
+
+jsi::Object makeScopeUpdateScopeProxy(jsi::Runtime& rt, jobject scope);
+
+extern std::shared_ptr<jsi::Object> g_empty;
+extern std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
+extern int64_t g_nextJsValueId;
 
 // JNI entry points (declared for clarity; defined in RdmaCompose.cpp).
 extern "C" {

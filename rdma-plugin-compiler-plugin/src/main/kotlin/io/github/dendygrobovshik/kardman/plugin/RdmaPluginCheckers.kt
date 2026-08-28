@@ -25,12 +25,12 @@ import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
 class RdmaPluginAdditionalCheckersExtension(session: FirSession) : FirAdditionalCheckersExtension(session) {
 
     override val declarationCheckers: DeclarationCheckers = object : DeclarationCheckers() {
-        override val fileCheckers = setOf(RdmaPluginFileChecker)
+        override val fileCheckers = setOf(RdmaPluginFileChecker, RdmaPluginComposeImportChecker)
         override val regularClassCheckers = setOf(RdmaPluginRegularClassChecker)
     }
 
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
-        override val functionCallCheckers = setOf(RdmaPluginFunctionCallChecker, RdmaPluginWidgetCallChecker)
+        override val functionCallCheckers = setOf(RdmaPluginFunctionCallChecker, RdmaPluginWidgetCallChecker, RdmaPluginComposeCallChecker)
         override val propertyAccessExpressionCheckers = setOf(RdmaPluginPropertyAccessChecker)
         override val variableAssignmentCheckers = setOf(RdmaPluginVariableAssignmentChecker)
     }

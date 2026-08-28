@@ -72,6 +72,19 @@ class RdmaKernelGenerationExtension(
             }?.forEach { it.delete() }
         }
 
+        // The Composer proxy is part of the base protocol and does not depend on any
+        // @RDMA class/function, so it is always regenerated (and version-checked against
+        // the resolved `androidx.compose.runtime.Composer` IR).
+        cppOutputDir?.let { dir ->
+            val protocolErrors = RdmaComposerProtocol.validateAgainst(pluginContext)
+            if (protocolErrors.isNotEmpty()) {
+                error("Compose base protocol mismatch:\n" + protocolErrors.joinToString("\n"))
+            }
+            RdmaComposerProxyGenerator { fileName, _ ->
+                File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
+            }.generate(RdmaComposerProtocol.baseProtocol)
+        }
+
         if (classes.isEmpty() && functions.isEmpty()) return
 
         cppOutputDir?.let { dir ->

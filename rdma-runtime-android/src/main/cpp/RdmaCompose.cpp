@@ -1,4 +1,5 @@
 #include "RdmaCompose.h"
+#include "RdmaComposerProxy.h"
 
 #include <jsi/jsi.h>
 #include <jni.h>
@@ -19,11 +20,11 @@ namespace rdma {
 ComposeJniCache g_composeCache;
 
 static std::shared_ptr<jsi::Function> g_content;
-static std::shared_ptr<jsi::Object> g_empty;
+std::shared_ptr<jsi::Object> g_empty;
 static std::unordered_map<int64_t, std::shared_ptr<jsi::Function>> g_scopeBlocks;
 static int64_t g_nextScopeBlockId = 1;
-static std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
-static int64_t g_nextJsValueId = 1;
+std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
+int64_t g_nextJsValueId = 1;
 static jobject g_currentComposer = nullptr; // global ref to the currently-composing Composer
 
 // ---------------------------------------------------------------- JNI cache
@@ -54,13 +55,6 @@ static bool initComposeJniCache(JNIEnv* env) {
         return false;
     }
 
-    g_composeCache.startRestartGroup = env->GetMethodID(g_composeCache.composerClass, "startRestartGroup", "(I)Landroidx/compose/runtime/Composer;");
-    g_composeCache.endRestartGroup = env->GetMethodID(g_composeCache.composerClass, "endRestartGroup", "()Landroidx/compose/runtime/ScopeUpdateScope;");
-    g_composeCache.shouldExecute = env->GetMethodID(g_composeCache.composerClass, "shouldExecute", "(ZI)Z");
-    g_composeCache.rememberedValue = env->GetMethodID(g_composeCache.composerClass, "rememberedValue", "()Ljava/lang/Object;");
-    g_composeCache.updateRememberedValue = env->GetMethodID(g_composeCache.composerClass, "updateRememberedValue", "(Ljava/lang/Object;)V");
-    g_composeCache.skipToGroupEnd = env->GetMethodID(g_composeCache.composerClass, "skipToGroupEnd", "()V");
-
     g_composeCache.stateGetValue = env->GetMethodID(g_composeCache.mutableStateClass, "getValue", "()Ljava/lang/Object;");
     g_composeCache.stateSetValue = env->GetMethodID(g_composeCache.mutableStateClass, "setValue", "(Ljava/lang/Object;)V");
 
@@ -73,7 +67,6 @@ static bool initComposeJniCache(JNIEnv* env) {
     g_composeCache.updateScope = env->GetMethodID(g_composeCache.scopeUpdateScopeClass, "updateScope", "(Lkotlin/jvm/functions/Function2;)V");
     g_composeCache.scopeBlockCtor = env->GetMethodID(g_composeCache.scopeBlockClass, "<init>", "(J)V");
 
-    g_composeCache.changed = env->GetMethodID(g_composeCache.composerClass, "changed", "(Ljava/lang/Object;)Z");
     g_composeCache.objectClass = cacheClass(env, "java/lang/Object");
     g_composeCache.objectCtor = env->GetMethodID(g_composeCache.objectClass, "<init>", "()V");
 
@@ -84,18 +77,16 @@ static bool initComposeJniCache(JNIEnv* env) {
     g_composeCache.jsValueHolderCtor = env->GetMethodID(g_composeCache.jsValueHolderClass, "<init>", "(J)V");
     g_composeCache.jsValueHolderGetId = env->GetMethodID(g_composeCache.jsValueHolderClass, "getId", "()J");
 
-    return g_composeCache.startRestartGroup && g_composeCache.shouldExecute &&
-           g_composeCache.rememberedValue && g_composeCache.updateRememberedValue &&
-           g_composeCache.skipToGroupEnd && g_composeCache.stateGetValue &&
+    return g_composeCache.stateGetValue &&
            g_composeCache.stateSetValue && g_composeCache.mutableStateOf &&
            g_composeCache.structuralEqualityPolicy &&
            g_composeCache.getEmpty && g_composeCache.updateScope &&
-           g_composeCache.scopeBlockCtor && g_composeCache.changed &&
+           g_composeCache.scopeBlockCtor &&
            g_composeCache.objectCtor && g_composeCache.dispatchMethod &&
            g_composeCache.jsValueHolderCtor && g_composeCache.jsValueHolderGetId;
 }
 
-static JNIEnv* getEnv(JavaVM* jvm) {
+JNIEnv* getEnv(JavaVM* jvm) {
     JNIEnv* env = nullptr;
     if (jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_OK) return env;
     if (jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) return env;
@@ -104,7 +95,7 @@ static JNIEnv* getEnv(JavaVM* jvm) {
 
 // ------------------------------------------------- value conversion (JVM <-> JSI)
 
-static jobject boxJsi(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
+jobject boxJsi(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
     if (v.isNumber()) {
         jclass integer = env->FindClass("java/lang/Integer");
         jmethodID valueOf = env->GetStaticMethodID(integer, "valueOf", "(I)Ljava/lang/Integer;");
@@ -126,7 +117,7 @@ static jobject boxJsi(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
     return nullptr;
 }
 
-static jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o) {
+jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o) {
     if (o == nullptr) return jsi::Value::null();
     jclass cls = env->GetObjectClass(o);
     jclass integer = env->FindClass("java/lang/Integer");
@@ -229,12 +220,12 @@ private:
     jobject state_; // global ref
 };
 
-static jsi::Object makeStateProxy(jsi::Runtime& rt, jobject state) {
+jsi::Object makeStateProxy(jsi::Runtime& rt, jobject state) {
     auto host = std::make_shared<StateProxyHost>(state);
     return jsi::Object::createFromHostObject(rt, host);
 }
 
-static jobject stateProxyJObject(jsi::Runtime& rt, const jsi::Value& v) {
+jobject stateProxyJObject(jsi::Runtime& rt, const jsi::Value& v) {
     if (!v.isObject()) return nullptr;
     auto obj = v.asObject(rt);
     if (!obj.isHostObject(rt)) return nullptr;
@@ -281,203 +272,10 @@ private:
     jobject scope_; // global ref
 };
 
-static jsi::Object makeScopeUpdateScopeProxy(jsi::Runtime& rt, jobject scope) {
+jsi::Object makeScopeUpdateScopeProxy(jsi::Runtime& rt, jobject scope) {
     JNIEnv* env = getEnv(g_composeCache.jvm);
     jobject global = env->NewGlobalRef(scope);
     auto host = std::make_shared<ScopeUpdateScopeProxyHost>(global);
-    return jsi::Object::createFromHostObject(rt, host);
-}
-
-class ComposerProxyHost : public jsi::HostObject, public std::enable_shared_from_this<ComposerProxyHost> {
-public:
-    ComposerProxyHost(jobject composer) : composer_(composer) {}
-    ~ComposerProxyHost() override {
-        if (composer_ && g_composeCache.jvm) {
-            JNIEnv* env = getEnv(g_composeCache.jvm);
-            if (env) env->DeleteGlobalRef(composer_);
-        }
-    }
-
-    jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& name) override {
-        std::string n = name.utf8(rt);
-
-        // Source information markers are diagnostics-only; accept them as no-ops.
-        if (n.rfind("sourceInformationMarkerStart", 0) == 0 ||
-            n.rfind("sourceInformationMarkerEnd", 0) == 0 ||
-            n.rfind("sourceInformation", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "sourceInformation"), 0,
-                [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    return jsi::Value::undefined();
-                });
-        }
-
-        if (n.rfind("changed", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "changed"), 1,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value(true);
-                    // Advance the slot and report "changed" using an identity-unique holder.
-                    jobject holder = e->NewObject(g_composeCache.objectClass, g_composeCache.objectCtor);
-                    jboolean res = e->CallBooleanMethod(self->composer_, g_composeCache.changed, holder);
-                    e->DeleteLocalRef(holder);
-                    return jsi::Value((bool)res);
-                });
-        }
-
-        if (n.rfind("get_recomposeScope", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "get_recomposeScope"), 0,
-                [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    return jsi::Value::null();
-                });
-        }
-
-        if (n.rfind("recordUsed", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "recordUsed"), 1,
-                [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    return jsi::Value::undefined();
-                });
-        }
-
-        if (n.rfind("startRestartGroup", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "startRestartGroup"), 1,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value::undefined();
-                    jint key = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
-                    jobject result = e->CallObjectMethod(self->composer_, g_composeCache.startRestartGroup, key);
-                    e->DeleteLocalRef(result); // ComposerImpl returns `this`
-                    return jsi::Object::createFromHostObject(r, self);
-                });
-        }
-
-        if (n.rfind("shouldExecute", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "shouldExecute"), 2,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value(false);
-                    jboolean p = count > 0 && args[0].isBool() ? args[0].getBool() : false;
-                    jint flags = count > 1 && args[1].isNumber() ? (jint)args[1].getNumber() : 0;
-                    jboolean res = e->CallBooleanMethod(self->composer_, g_composeCache.shouldExecute, p, flags);
-                    return jsi::Value((bool)res);
-                });
-        }
-
-        if (n.rfind("rememberedValue", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "rememberedValue"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value::undefined();
-                    jobject v = e->CallObjectMethod(self->composer_, g_composeCache.rememberedValue);
-
-                    // Empty sentinel?
-                    jobject companion = e->GetStaticObjectField(g_composeCache.composerClass, g_composeCache.composerCompanionField);
-                    jobject empty = e->CallObjectMethod(companion, g_composeCache.getEmpty);
-                    e->DeleteLocalRef(companion);
-                    bool isEmpty = e->IsSameObject(v, empty);
-                    e->DeleteLocalRef(empty);
-                    if (isEmpty) {
-                        e->DeleteLocalRef(v);
-                        return g_empty ? jsi::Value(r, *g_empty) : jsi::Value::undefined();
-                    }
-                    // State value?
-                    if (e->IsInstanceOf(v, g_composeCache.mutableStateClass)) {
-                        jobject global = e->NewGlobalRef(v);
-                        e->DeleteLocalRef(v);
-                        return makeStateProxy(r, global);
-                    }
-                    // Arbitrary JS value held via JsValueHolder?
-                    if (e->IsInstanceOf(v, g_composeCache.jsValueHolderClass)) {
-                        jlong id = e->CallLongMethod(v, g_composeCache.jsValueHolderGetId);
-                        e->DeleteLocalRef(v);
-                        auto it = g_jsValues.find(id);
-                        if (it != g_jsValues.end()) {
-                            return jsi::Value(r, *it->second);
-                        }
-                        return jsi::Value::undefined();
-                    }
-                    jsi::Value out = unboxJni(e, r, v);
-                    e->DeleteLocalRef(v);
-                    return out;
-                });
-        }
-
-        if (n.rfind("updateRememberedValue", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "updateRememberedValue"), 1,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value::undefined();
-                    if (count < 1) return jsi::Value::undefined();
-                    jobject stored = nullptr;
-                    bool deleteStored = false;
-                    jobject stateObj = stateProxyJObject(r, args[0]);
-                    if (stateObj) {
-                        stored = stateObj;
-                    } else if (args[0].isObject()) {
-                        auto obj = std::make_shared<jsi::Object>(args[0].asObject(r));
-                        int64_t id = g_nextJsValueId++;
-                        g_jsValues[id] = obj;
-                        stored = e->NewObject(g_composeCache.jsValueHolderClass, g_composeCache.jsValueHolderCtor, (jlong)id);
-                        deleteStored = true;
-                    } else {
-                        stored = boxJsi(e, r, args[0]);
-                        deleteStored = true;
-                    }
-                    if (stored) {
-                        e->CallVoidMethod(self->composer_, g_composeCache.updateRememberedValue, stored);
-                        if (deleteStored) e->DeleteLocalRef(stored);
-                    }
-                    return jsi::Value::undefined();
-                });
-        }
-
-        if (n.rfind("skipToGroupEnd", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "skipToGroupEnd"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value::undefined();
-                    e->CallVoidMethod(self->composer_, g_composeCache.skipToGroupEnd);
-                    return jsi::Value::undefined();
-                });
-        }
-
-        if (n.rfind("endRestartGroup", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "endRestartGroup"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value::null();
-                    jobject scope = e->CallObjectMethod(self->composer_, g_composeCache.endRestartGroup);
-                    if (!scope) return jsi::Value::null();
-                    jsi::Object proxy = makeScopeUpdateScopeProxy(r, scope);
-                    e->DeleteLocalRef(scope);
-                    return proxy;
-                });
-        }
-
-        return jsi::Value::undefined();
-    }
-
-    jobject composer() const { return composer_; }
-
-private:
-    jobject composer_; // global ref
-};
-
-// ------------------------------------------------------------------ bridge
-
-static jsi::Object makeComposerProxy(jsi::Runtime& rt, jobject composer) {
-    JNIEnv* env = getEnv(g_composeCache.jvm);
-    jobject global = env->NewGlobalRef(composer);
-    auto host = std::make_shared<ComposerProxyHost>(global);
     return jsi::Object::createFromHostObject(rt, host);
 }
 
@@ -533,6 +331,7 @@ void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
         LOGW("Compose bridge init failed");
         return;
     }
+    initComposerProxyCache(env);
 
     jsi::Object rdma = rt.global().getPropertyAsObject(rt, "RDMA");
 

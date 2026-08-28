@@ -41,3 +41,36 @@ type. A violation is a compile error.
 - Composite value types: data classes without `@RDMA`, `enum`, `Array`, `Map`.
 - Generics, except the `List<T>` special case.
 - `suspend` / async functions, overloaded functions/constructors, default parameter values.
+
+## Base Compose protocol (plugin)
+
+The plugin is a `@Composable` guest: the host kernel owns the Compose runtime and
+exposes only a **base protocol** — the structural `Composer` methods needed for
+`if`/`for`/`when`, `remember` (with keys), `changed`/skip and state.
+
+The exact protocol is defined in `RdmaComposerProtocol.kt`
+(`rdma-kernel-compiler-plugin`) and cross-checked against the resolved
+`androidx.compose.runtime.Composer` interface at build time, so a compose-runtime
+upgrade that changes the interface fails fast.
+
+**Allowed for the plugin** (whitelist in `ComposeAllowlist.kt`):
+
+| Symbol | Notes |
+|---|---|
+| `@Composable` | composable functions / lambdas |
+| `remember { ... }` (with keys) | keys go through `changed` |
+| `mutableStateOf` | rewritten to `rdmaMutableStateOf` |
+| `var x by ...` (`getValue`/`setValue`) | state delegation |
+| kernel widgets (`Text`, `Column`, `Button`, `TextField`, ...) | via `@RDMA` |
+
+**Forbidden (compile error):** effects (`LaunchedEffect`, `DisposableEffect`,
+`SideEffect`), `derivedStateOf`, `snapshotFlow`, `rememberCoroutineScope`,
+`movableContentOf`, `produceState`, animations, and any `androidx.compose.*`
+symbol outside the whitelist.
+
+The plugin compiler plugin rejects any call or import of a forbidden compose symbol
+with an error of the form:
+
+```
+kernel doesn't support 'LaunchedEffect' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
+```
