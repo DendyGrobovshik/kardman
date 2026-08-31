@@ -15,12 +15,12 @@ tasks.register<Delete>("cleanGenerated") {
 
     delete(
         "kernel/build/generated",
+        "kernel-bridge/src/main/cpp/generated",
         "plugin/build/generated",
         "plugin/build/compileSync",
         "plugin/build/kotlin-webpack",
         "plugin/build/dist",
         "rdma-runtime-android/.cxx",
-        "rdma-runtime-android/src/main/cpp/generated",
         "androidApp/src/main/assets/kotlin",
     )
 }

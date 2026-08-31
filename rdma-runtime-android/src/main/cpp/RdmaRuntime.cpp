@@ -6,7 +6,6 @@
 #include <memory>
 #include <android/log.h>
 
-#include "RdmaBridge.h"
 #include "RdmaRuntime.h"
 #include "RdmaCompose.h"
 
@@ -59,10 +58,6 @@ void initRdmaRuntime(JavaVM* jvm) {
 
     g_runtime = facebook::hermes::makeHermesRuntime();
 
-    JNIEnv* env = nullptr;
-    jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
-
-    facebook::rdma::installRdmaBridge(*g_runtime, jvm, env);
     facebook::rdma::installRdmaComposeBridge(*g_runtime, jvm);
 
     // Hermes doesn't have console, globalThis — provide stubs

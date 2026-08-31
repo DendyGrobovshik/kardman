@@ -34,9 +34,8 @@ plugins {
 }
 
 include(":androidApp")
-include(":desktopApp")
-include(":shared")
 include(":kernel")
+include(":kernel-bridge")
 include(":rdma-annotation")
 include(":rdma-types")
 include(":rdma-kernel-compiler-plugin")

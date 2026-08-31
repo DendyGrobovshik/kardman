@@ -11,6 +11,7 @@ allowed types below.
 |---|---|---|
 | Primitives (`Int`, `Long`, `Float`, `Double`, `Boolean`, `String`) | by copy | a copy on each side |
 | `@RDMA` class | by reference (handle) | object lives only in kernel memory; plugin holds a handle |
+| `@RDMA` companion `val` (static) | by reference (handle) | singleton exposed as `RDMA.<class><Name>()` (e.g. `RDMA.alignmentCenter()`) |
 | Function / lambda | registration + callback | body lives in the plugin; kernel holds an id |
 | `List<T>` | special case | list object lives in kernel memory, at least after first border transfer (initial plugin list may be pure plugin memory located list) |
 | `Unit` | — | return type only |

@@ -116,4 +116,26 @@ class RdmaPluginConfigTest {
         assertTrue(empty.classes.isEmpty())
         assertTrue(empty.functions.isEmpty())
     }
+
+    @Test
+    fun `parses companion statics from manifest`() {
+        val manifest = RdmaManifest(
+            classes = listOf(
+                RdmaClassInfo(
+                    packageName = "com.example.kernel", className = "Alignment",
+                    qualifiedName = "com.example.kernel.Alignment",
+                    constructors = listOf(ConstructorInfo(listOf(ParameterInfo("ordinal", "kotlin.Int")))),
+                    methods = emptyList(),
+                    properties = listOf(PropertyInfo("ordinal", "kotlin.Int", false)),
+                    statics = listOf(
+                        io.github.dendygrobovshik.kardman.types.StaticInfo("Center", "com.example.kernel.Alignment"),
+                        io.github.dendygrobovshik.kardman.types.StaticInfo("TopStart", "com.example.kernel.Alignment"),
+                    ),
+                ),
+            ),
+        )
+        val parsed = RdmaPluginConfig.parseManifest(Json.encodeToString(RdmaManifest.serializer(), manifest))
+        val alignment = parsed.classes.first()
+        assertEquals(listOf("Center", "TopStart"), alignment.statics)
+    }
 }

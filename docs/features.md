@@ -26,6 +26,8 @@
 
 - Access via getter methods: `.name` → `getName()`
 - Auto-transformed by plugin build script
+- Companion-object `val`s (statics) — exposed as `RDMA.<class><Name>()` singletons
+  (e.g. `Alignment.Center` → `rdmaAlignmentCenter()`)
 
 ### Methods
 

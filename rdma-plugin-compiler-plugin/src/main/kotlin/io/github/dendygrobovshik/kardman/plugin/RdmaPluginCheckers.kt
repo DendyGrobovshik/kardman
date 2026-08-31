@@ -170,6 +170,21 @@ object RdmaPluginPropertyAccessChecker : FirExpressionChecker<FirPropertyAccessE
     override fun check(expression: FirPropertyAccessExpression) {
         val symbol = expression.calleeReference.toResolvedSymbol<FirPropertySymbol>() ?: return
         val classId = symbol.callableId?.classId ?: return
+
+        // Companion object static: `Alignment.Center` -> `rdmaAlignmentCenter()`.
+        if (classId.shortClassName.asString() == "Companion") {
+            val outer = classId.outerClassId ?: return
+            val outerFqn = outer.asSingleFqName().asString()
+            val type = RdmaPluginTransformState.typeByQualifiedName(outerFqn) ?: return
+            val propName = symbol.name.asString()
+            if (propName !in type.statics) return
+            val accessSrc = expression.source ?: return
+            val path = filePathOf(context) ?: return
+            val bridge = RdmaPluginTransformState.staticBridgeNameFor(type.simpleName, propName)
+            RdmaPluginTransformState.addEdit(path, accessSrc.startOffset, accessSrc.endOffset, "$bridge()")
+            return
+        }
+
         val fqn = classId.asSingleFqName().asString()
         val type = RdmaPluginTransformState.typeByQualifiedName(fqn) ?: return
         val propName = symbol.name.asString()

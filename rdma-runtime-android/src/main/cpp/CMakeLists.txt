@@ -4,14 +4,12 @@ set(CMAKE_CXX_STANDARD 17)
 
 find_package(hermes-engine REQUIRED CONFIG)
 
-file(GLOB GENERATED_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/generated/*.cpp")
-
 add_library(rdma_runtime SHARED
         RdmaJni.cpp
         RdmaRuntime.cpp
         RdmaCompose.cpp
         ListHandle.cpp
-        ${GENERATED_SOURCES}
+        generated/RdmaComposerProxy.cpp
 )
 
 target_include_directories(rdma_runtime PRIVATE

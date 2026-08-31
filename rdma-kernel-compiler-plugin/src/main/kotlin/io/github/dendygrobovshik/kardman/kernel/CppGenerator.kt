@@ -5,6 +5,7 @@ import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
 import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
+import io.github.dendygrobovshik.kardman.types.StaticInfo
 import java.io.OutputStream
 
 class CppGenerator(private val output: (String, String) -> OutputStream) {
@@ -55,6 +56,10 @@ struct RdmaJniCache {
         jclass clazz = nullptr;
         jmethodID constructor = nullptr;
 """)
+            if (info.statics.isNotEmpty()) {
+                out.write("        jclass companionClazz = nullptr;\n")
+                out.write("        jfieldID companionField = nullptr;\n")
+            }
             for (method in info.methods) {
                 out.write("        jmethodID method_${method.name} = nullptr;\n")
             }
@@ -63,6 +68,9 @@ struct RdmaJniCache {
                 if (prop.isMutable) {
                     out.write("        jmethodID setter_${prop.name} = nullptr;\n")
                 }
+            }
+            for (static in info.statics) {
+                out.write("        jmethodID static_get_${static.name} = nullptr;\n")
             }
             out.write("    };\n")
             out.write("    ${info.className}Cache ${info.className.lowercase()}_cache;\n")
@@ -92,6 +100,15 @@ void initJniCache(JNIEnv* env) {
         g_rdmaCache.$cacheVar.clazz = (jclass)env->NewGlobalRef(localCls);
         env->DeleteLocalRef(localCls);
 """)
+            if (info.statics.isNotEmpty()) {
+                val companionJni = "$jniClassName\$Companion"
+                out.write("""
+        jclass companionLocal = env->FindClass("$companionJni");
+        g_rdmaCache.$cacheVar.companionClazz = (jclass)env->NewGlobalRef(companionLocal);
+        env->DeleteLocalRef(companionLocal);
+        g_rdmaCache.$cacheVar.companionField = env->GetStaticFieldID(g_rdmaCache.$cacheVar.clazz, "Companion", "L$companionJni;");
+""")
+            }
             for (ctor in info.constructors) {
                 val paramSig = ctor.parameters.joinToString("") {
                     JniTypeMapper.jniSignature(it.type)
@@ -114,6 +131,11 @@ void initJniCache(JNIEnv* env) {
                     val setSig = JniTypeMapper.jniSignature(prop.type)
                     out.write("        g_rdmaCache.$cacheVar.setter_${prop.name} = env->GetMethodID(g_rdmaCache.$cacheVar.clazz, \"$setterName\", \"($setSig)V\");\n")
                 }
+            }
+            for (static in info.statics) {
+                val retSig = JniTypeMapper.jniSignature(static.type)
+                val getterName = if (static.type == "kotlin.Boolean") "is${static.name.replaceFirstChar { it.uppercase() }}" else "get${static.name.replaceFirstChar { it.uppercase() }}"
+                out.write("        g_rdmaCache.$cacheVar.static_get_${static.name} = env->GetMethodID(g_rdmaCache.$cacheVar.companionClazz, \"$getterName\", \"()$retSig\");\n")
             }
             out.write("    }\n")
         }
@@ -179,6 +201,13 @@ jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobjec
 """)
         // Include headers for @RDMA types used as parameters or return values
         val referencedRdmaTypes = mutableSetOf<String>()
+        for (ctor in info.constructors) {
+            for (param in ctor.parameters) {
+                if (isRdmaClass(param.type, allClasses) && param.type != info.qualifiedName) {
+                    referencedRdmaTypes.add(rdmaClassByName(param.type, allClasses)!!.className)
+                }
+            }
+        }
         for (method in info.methods) {
             for (param in method.parameters) {
                 if (isRdmaClass(param.type, allClasses) && param.type != info.qualifiedName) {
@@ -483,6 +512,20 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                 if (type != null) {
                     val extract = type.fromJsi.replace("%d", idx.toString())
                     out.write("    ${type.cppType} cpp_${param.name} = $extract;\n")
+                } else if (isRdmaClass(param.type, allClasses)) {
+                    val rdmaName = rdmaClassByName(param.type, allClasses)!!.className
+                    if (param.nullable) {
+                        out.write("    jobject arg_${param.name} = nullptr;\n")
+                        out.write("    if (!args[$idx].isNull() && args[$idx].isObject() && args[$idx].asObject(rt).hasNativeState(rt)) {\n")
+                        out.write("        auto argObj_${param.name} = args[$idx].asObject(rt);\n")
+                        out.write("        auto argState_${param.name} = std::static_pointer_cast<${rdmaName}NativeState>(argObj_${param.name}.getNativeState(rt));\n")
+                        out.write("        if (argState_${param.name}) arg_${param.name} = argState_${param.name}->getObject();\n")
+                        out.write("    }\n")
+                    } else {
+                        out.write("    auto argObj_${param.name} = args[$idx].asObject(rt);\n")
+                        out.write("    auto argState_${param.name} = std::static_pointer_cast<${rdmaName}NativeState>(argObj_${param.name}.getNativeState(rt));\n")
+                        out.write("    jobject arg_${param.name} = argState_${param.name}->getObject();\n")
+                    }
                 }
                 idx++
             }
@@ -498,7 +541,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     "kotlin.Boolean" -> "(jboolean)cpp_${param.name}"
                     "kotlin.Double", "kotlin.Float" -> "(jdouble)cpp_${param.name}"
                     "kotlin.Long" -> "(jlong)cpp_${param.name}"
-                    else -> "nullptr"
+                    else -> if (isRdmaClass(param.type, allClasses)) "arg_${param.name}" else "nullptr"
                 }
             }
             out.write("    jobject localObj = env->NewObject(g_rdmaCache.${cacheVar}.clazz, g_rdmaCache.${cacheVar}.constructor${if (params.isNotEmpty()) ", $params" else ""});\n")
@@ -557,7 +600,9 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
 namespace facebook {
 namespace rdma {
 
-void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env);
+// Installed into the shared `RDMA` namespace by the generic runtime, via the
+// user-bridge hook (see RdmaCompose.h / rdmaSetUserBridgeInstaller).
+void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma);
 
 } // namespace rdma
 } // namespace facebook
@@ -569,6 +614,8 @@ void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env);
 #include "RdmaJniCache.h"
 #include "RdmaVtable.h"
 #include "ListHandle.h"
+#include "RdmaCompose.h"
+#include "RdmaWidgetBridge.h"
 """)
         for (info in infos) {
             cpp.write("#include \"${info.className}HostObject.h\"\n")
@@ -590,20 +637,24 @@ jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object
         for (fn in functions) {
             cpp.write(functionImpl(fn, infos))
         }
+        for (info in infos) {
+            for (static in info.statics) {
+                cpp.write(staticImpl(info, static, infos))
+            }
+        }
         cpp.write("""
-void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env) {
+void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
+    JNIEnv* env = getEnv(jvm);
     g_rdmaCache.jvm = jvm;
     initJniCache(env);
+    initWidgetJniCache(env);
 
-    LOGI("Initializing RDMA bridge...");
+    LOGI("Initializing RDMA user bridge...");
 
 """)
         for (info in infos) {
             cpp.write("    register${info.className}Bridge(rt, jvm);\n")
         }
-        cpp.write("""
-    jsi::Object rdmaNamespace(rt);
-""")
         for (info in infos) {
             val createFnName = "create${info.className}"
             val paramCount = info.constructors.firstOrNull()?.parameters?.size ?: 0
@@ -615,12 +666,17 @@ void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env) {
                 return create${info.className}Instance(r, jvm, args, count);
             }
         );
-        rdmaNamespace.setProperty(rt, "$createFnName", std::move(createFn));
+        rdma.setProperty(rt, "$createFnName", std::move(createFn));
     }
 """)
         }
         for (fn in functions) {
             cpp.write(functionRegistration(fn))
+        }
+        for (info in infos) {
+            for (static in info.statics) {
+                cpp.write(staticRegistration(info, static))
+            }
         }
         cpp.write("""
     {
@@ -634,10 +690,10 @@ void installRdmaBridge(jsi::Runtime& rt, JavaVM* jvm, JNIEnv* env) {
                 return createWithOverrides(r, jvm, className, ctorArgs, overrides);
             }
         );
-        rdmaNamespace.setProperty(rt, "createWithOverrides", std::move(createOverridesFn));
+        rdma.setProperty(rt, "createWithOverrides", std::move(createOverridesFn));
     }
-    rt.global().setProperty(rt, "RDMA", std::move(rdmaNamespace));
-    LOGI("RDMA bridge installed successfully");
+    installRdmaWidgetBridge(rt, jvm, rdma);
+    LOGI("RDMA user bridge installed successfully");
 }
 
 static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides) {
@@ -711,7 +767,81 @@ static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Va
                 return rdma_fn_${fn.name}(r, jvm, args, count);
             }
         );
-        rdmaNamespace.setProperty(rt, "${fn.name}", std::move(fn));
+        rdma.setProperty(rt, "${fn.name}", std::move(fn));
+    }
+"""
+
+    private fun staticJsName(info: RdmaClassInfo, static: StaticInfo): String =
+        info.className.replaceFirstChar { it.lowercase() } + static.name.replaceFirstChar { it.uppercase() }
+
+    private fun staticImpl(info: RdmaClassInfo, static: StaticInfo, allClasses: List<RdmaClassInfo>): String {
+        val cacheVar = "${info.className.lowercase()}_cache"
+        val body = when {
+            isRdmaClass(static.type, allClasses) -> {
+                val rdma = rdmaClassByName(static.type, allClasses)!!
+                val nullCheck = if (static.nullable) {
+                    "    if (jret == nullptr) { env->DeleteLocalRef(companion); return jsi::Value::null(); }\n"
+                } else ""
+                """
+    jobject companion = env->GetStaticObjectField(g_rdmaCache.$cacheVar.clazz, g_rdmaCache.$cacheVar.companionField);
+    jobject jret = env->CallObjectMethod(companion, g_rdmaCache.$cacheVar.static_get_${static.name});
+$nullCheck    jobject globalRet = env->NewGlobalRef(jret);
+    env->DeleteLocalRef(jret);
+    env->DeleteLocalRef(companion);
+    return create${rdma.className}Wrapper(r, jvm, globalRet);
+"""
+            }
+            static.type == "kotlin.String" -> {
+                val nullCheck = if (static.nullable) {
+                    "    if (jret == nullptr) { env->DeleteLocalRef(companion); return jsi::Value::null(); }\n"
+                } else ""
+                """
+    jobject companion = env->GetStaticObjectField(g_rdmaCache.$cacheVar.clazz, g_rdmaCache.$cacheVar.companionField);
+    auto jret = (jstring)env->CallObjectMethod(companion, g_rdmaCache.$cacheVar.static_get_${static.name});
+$nullCheck    auto cstr = env->GetStringUTFChars(jret, nullptr);
+    auto ret = jsi::String::createFromUtf8(r, cstr);
+    env->ReleaseStringUTFChars(jret, cstr);
+    env->DeleteLocalRef(jret);
+    env->DeleteLocalRef(companion);
+    return ret;
+"""
+            }
+            else -> {
+                val call = when (static.type) {
+                    "kotlin.Int" -> "env->CallIntMethod(companion, g_rdmaCache.$cacheVar.static_get_${static.name})"
+                    "kotlin.Boolean" -> "env->CallBooleanMethod(companion, g_rdmaCache.$cacheVar.static_get_${static.name})"
+                    "kotlin.Long" -> "env->CallLongMethod(companion, g_rdmaCache.$cacheVar.static_get_${static.name})"
+                    else -> "env->CallDoubleMethod(companion, g_rdmaCache.$cacheVar.static_get_${static.name})"
+                }
+                val wrap = when (static.type) {
+                    "kotlin.Boolean" -> "$call"
+                    else -> "(double)$call"
+                }
+                """
+    jobject companion = env->GetStaticObjectField(g_rdmaCache.$cacheVar.clazz, g_rdmaCache.$cacheVar.companionField);
+    auto result = $call;
+    env->DeleteLocalRef(companion);
+    return jsi::Value($wrap);
+"""
+            }
+        }
+        return """
+static jsi::Value rdma_static_${info.className}_${static.name}(jsi::Runtime& r, JavaVM* jvm) {
+    JNIEnv* env = nullptr;
+    jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (!env) return jsi::Value::undefined();
+$body}
+"""
+    }
+
+    private fun staticRegistration(info: RdmaClassInfo, static: StaticInfo): String = """
+    {
+        auto fn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "${staticJsName(info, static)}"), 0,
+            [jvm](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                return rdma_static_${info.className}_${static.name}(r, jvm);
+            });
+        rdma.setProperty(rt, "${staticJsName(info, static)}", std::move(fn));
     }
 """
 

@@ -57,6 +57,12 @@ object RdmaPluginTransformState {
 
     fun composeFnName(simpleName: String): String = "compose" + simpleName
 
+    fun staticBridgeNameFor(className: String, staticName: String): String =
+        "rdma" + className + staticName.replaceFirstChar { it.uppercase() }
+
+    fun staticJsName(className: String, staticName: String): String =
+        className.replaceFirstChar { it.lowercase() } + staticName.replaceFirstChar { it.uppercase() }
+
     fun registerSubclass(qualifiedName: String, subclass: RdmaSubclass) {
         subclasses[qualifiedName] = subclass
     }
@@ -108,6 +114,7 @@ object RdmaPluginTransformState {
         }
         writeFunctionBridge(outDir)
         writeWidgetBridge(outDir)
+        writeStaticBridge(outDir)
     }
 
     private fun writeFunctionBridge(outDir: File) {
@@ -130,6 +137,28 @@ object RdmaPluginTransformState {
         }
         outDir.mkdirs()
         bridgeFile.writeText(buildWidgetBridge(widgets))
+    }
+
+    private fun writeStaticBridge(outDir: File) {
+        val bridgeFile = File(outDir, "RdmaStaticBridge.kt")
+        val statics = types.flatMap { type -> type.statics.map { type to it } }
+        if (statics.isEmpty()) {
+            bridgeFile.delete()
+            return
+        }
+        outDir.mkdirs()
+        bridgeFile.writeText(buildStaticBridge(statics))
+    }
+
+    internal fun buildStaticBridge(statics: List<Pair<RdmaPluginType, String>>): String {
+        val sb = StringBuilder()
+        sb.appendLine("package com.example.plugin")
+        sb.appendLine()
+        for ((type, name) in statics) {
+            sb.appendLine("fun ${staticBridgeNameFor(type.simpleName, name)}(): dynamic = js(\"RDMA\").${staticJsName(type.simpleName, name)}()")
+            sb.appendLine()
+        }
+        return sb.toString()
     }
 
     internal fun buildFunctionBridge(plainFunctions: List<RdmaPluginFunction>): String {

@@ -30,14 +30,21 @@ Regular kotlin code, no need for manual serialization/deserialization. It create
 |--------|------|
 | `:rdma-annotation` | `@RDMA` annotation (KMP) |
 | `:kernel` | @RDMA annotated classes + @Composable UI widgets (JVM + material3) |
+| `:kernel-bridge` | Compiles the generated C++/Kotlin into `librdma_user.so` and registers it with the runtime |
 | `:rdma-kernel-compiler-plugin` | IR compiler plugin → generates C++ JNI/JSI glue + `rdma_manifest.json` + vtable injection |
 | `:rdma-kernel-gradle-plugin` | Gradle wrapper that wires `:rdma-kernel-compiler-plugin` into the kernel module |
 | `:rdma-plugin-compiler-plugin` | FIR compiler plugin → resolves @RDMA usages and rewrites plugin source to JS proxy calls |
 | `:rdma-plugin-gradle-plugin` | Gradle wrapper that wires `:rdma-plugin-compiler-plugin` into the plugin module's JVM resolve compilation and generates the guest-side widget bridge |
-| `:rdma-runtime-android` | Android AAR: Hermes runtime + JNI bridge + C++ glue |
+| `:rdma-runtime-android` | Android AAR: generic Hermes runtime + JNI bridge + C++ glue (exported as a prefab) |
 | `:plugin` | Demo plugin (Kotlin/JS), compiles to JS executed in Hermes |
 | `:shared` | Shared KMP code (Compose UI) |
 | `:androidApp` | Android app — initializes Hermes, loads plugin JS |
+
+The framework (all modules except `:kernel`, `:kernel-bridge`, `:plugin`, `:shared`,
+`:androidApp`, `:desktopApp`, `:iosApp`) is generic and knows nothing about user code.
+`:kernel`/`:kernel-bridge`/`:plugin`/`:androidApp` are a self-contained sample of *user*
+code: `:kernel` generates the bridge C++/Kotlin, `:kernel-bridge` compiles it into
+`librdma_user.so` and registers it with the runtime through the `installUserBridge` hook.
 
 See [docs/architecture.md](docs/architecture.md) for details.
 

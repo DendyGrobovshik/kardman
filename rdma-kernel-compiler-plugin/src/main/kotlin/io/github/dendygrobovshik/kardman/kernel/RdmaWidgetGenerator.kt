@@ -17,17 +17,28 @@ class RdmaWidgetGenerator(
     private val kotlinOutput: (String, String) -> OutputStream,
 ) {
 
+    companion object {
+        // Package of the generated host-side widget entries (RdmaWidgetEntries.kt).
+        // This is user code, so it must not live in the framework runtime package.
+        const val WIDGET_ENTRIES_PACKAGE = "com.example.kernel.rdma"
+        const val WIDGET_ENTRIES_CLASS = "com.example.kernel.rdma.RdmaWidgetEntriesKt"
+    }
+
     private sealed class Param {
         data class Value(val name: String, val jvmType: String) : Param()
+        data class Ref(val name: String, val fqn: String, val nullable: Boolean) : Param()
         data class Content(val name: String) : Param()
         data class Callback(val name: String, val arity: Int) : Param()
 
         val idName: String get() = when (this) {
             is Value -> name
+            is Ref -> name
             is Content -> name + "Id"
             is Callback -> name + "Id"
         }
     }
+
+    private fun simpleName(fqn: String): String = fqn.substringAfterLast('.')
 
     fun generate(widgets: List<RdmaFunctionInfo>) {
         generateKotlinEntries(widgets)
@@ -40,6 +51,8 @@ class RdmaWidgetGenerator(
         when {
             fnType != null && p.composable -> Param.Content(p.name)
             fnType != null -> Param.Callback(p.name, fnType.parameters.size)
+            p.type.type is RdmaType.Ref ->
+                Param.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable)
             else -> Param.Value(p.name, valueFqn(p.type.type))
         }
     }
@@ -49,6 +62,8 @@ class RdmaWidgetGenerator(
         is RdmaType.Ref -> t.fqn
         else -> "kotlin.Any"
     }
+
+    private fun refJniType(fqn: String): String = "L${fqn.replace('.', '/')};"
 
     private fun kotlinType(jvmType: String): String = when (jvmType) {
         "kotlin.String" -> "String"
@@ -73,6 +88,7 @@ class RdmaWidgetGenerator(
 
     private fun Param.jniType(): String = when (this) {
         is Param.Value -> jniType(jvmType)
+        is Param.Ref -> refJniType(fqn)
         is Param.Content, is Param.Callback -> "J" // block id is a Long
     }
 
@@ -80,14 +96,22 @@ class RdmaWidgetGenerator(
 
     private fun generateKotlinEntries(widgets: List<RdmaFunctionInfo>) {
         val out = kotlinOutput("RdmaWidgetEntries.kt", "RdmaWidgetEntries.kt").bufferedWriter()
-        out.write("""package io.github.dendygrobovshik.kardman.runtime
+        out.write("""package ${WIDGET_ENTRIES_PACKAGE}
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.currentComposer
+import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 """)
         val imports = widgets.map { it.qualifiedName }.distinct().sorted()
         for (imp in imports) {
             out.write("import $imp\n")
+        }
+        val refFqns = widgets
+            .flatMap { classify(it).filterIsInstance<Param.Ref>().map { r -> r.fqn } }
+            .distinct()
+            .sorted()
+        for (ref in refFqns) {
+            out.write("import $ref\n")
         }
         out.write("\n")
         for (fn in widgets) {
@@ -102,6 +126,7 @@ import androidx.compose.runtime.currentComposer
         val sig = params.joinToString(", ") { p ->
             when (p) {
                 is Param.Value -> "${p.idName}: ${kotlinType(p.jvmType)}"
+                is Param.Ref -> "${p.idName}: ${simpleName(p.fqn)}${if (p.nullable) "?" else ""}"
                 is Param.Content, is Param.Callback -> "${p.idName}: Long"
             }
         }
@@ -119,6 +144,7 @@ import androidx.compose.runtime.currentComposer
 
     private fun callArg(p: Param): String = when (p) {
         is Param.Value -> "${p.name} = ${p.idName}"
+        is Param.Ref -> "${p.name} = ${p.idName}"
         is Param.Content ->
             "${p.name} = { RdmaComposeHost.nativeInvokeScopeBlock(${p.idName}, currentComposer, 0) }"
         is Param.Callback -> {
@@ -165,10 +191,19 @@ void installRdmaWidgetBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma);
 
     private fun generateCpp(widgets: List<RdmaFunctionInfo>) {
         val out = cppOutput("RdmaWidgetBridge.cpp", "RdmaWidgetBridge.cpp").bufferedWriter()
+        val refFqns = widgets
+            .flatMap { classify(it).filterIsInstance<Param.Ref>().map { r -> r.fqn } }
+            .distinct()
+            .sorted()
         out.write("""#include "RdmaWidgetBridge.h"
 #include "RdmaCompose.h"
-
+""")
+        for (ref in refFqns) {
+            out.write("#include \"${simpleName(ref)}HostObject.h\"\n")
+        }
+        out.write("""
 #include <string>
+#include <memory>
 
 namespace facebook {
 namespace rdma {
@@ -176,7 +211,7 @@ namespace rdma {
 WidgetJniCache g_widgetCache;
 
 void initWidgetJniCache(JNIEnv* env) {
-    jclass local = env->FindClass("io/github/dendygrobovshik/kardman/runtime/RdmaWidgetEntriesKt");
+    jclass local = env->FindClass("${WIDGET_ENTRIES_CLASS.replace('.', '/')}");
     g_widgetCache.entriesClass = (jclass)env->NewGlobalRef(local);
     env->DeleteLocalRef(local);
 """)
@@ -241,12 +276,20 @@ $cleanups
             else ->
                 "                jobject cpp_p$i = nullptr;\n"
         }
+        is Param.Ref ->
+            "                jobject cpp_p$i = nullptr;\n" +
+                "                if (count > $i && args[$i].isObject() && args[$i].asObject(r).hasNativeState(r)) {\n" +
+                "                    auto argObj_$i = args[$i].asObject(r);\n" +
+                "                    auto argState_$i = std::static_pointer_cast<${simpleName(p.fqn)}NativeState>(argObj_$i.getNativeState(r));\n" +
+                "                    if (argState_$i) cpp_p$i = argState_$i->getObject();\n" +
+                "                }\n"
         is Param.Content, is Param.Callback ->
             "                jlong cpp_p$i = count > $i && args[$i].isNumber() ? (jlong)args[$i].getNumber() : 0;\n"
     }
 
     private fun argExpr(i: Int, p: Param): String = when (p) {
         is Param.Value -> if (p.jvmType == "kotlin.String") "j_p$i" else "cpp_p$i"
+        is Param.Ref -> "cpp_p$i"
         is Param.Content, is Param.Callback -> "cpp_p$i"
     }
 }

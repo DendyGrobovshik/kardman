@@ -5,8 +5,7 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.tooling.preview.Preview
+import com.example.kernel.UserBridge
 import io.github.dendygrobovshik.kardman.runtime.RdmaBridge
 import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 
@@ -15,6 +14,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
+        UserBridge.nativeInstall()
         RdmaBridge.nativeInit(assets)
         Log.i("RDMA", "Bridge initialized")
 
@@ -41,10 +41,4 @@ class MainActivity : ComponentActivity() {
             RdmaComposeHost.Content()
         }
     }
-}
-
-@Preview
-@Composable
-fun AppAndroidPreview() {
-    App()
 }

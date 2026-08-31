@@ -10,6 +10,18 @@ data class RdmaClassInfo(
     val constructors: List<ConstructorInfo>,
     val methods: List<MethodInfo>,
     val properties: List<PropertyInfo>,
+    val statics: List<StaticInfo> = emptyList(),
+)
+
+/**
+ * A `val` declared on a companion object (or object) of an `@RDMA` class, exposed as a
+ * singleton getter on the host (e.g. `Alignment.Center`, `ContentScale.Crop`).
+ */
+@Serializable
+data class StaticInfo(
+    val name: String,
+    val type: String,
+    val nullable: Boolean = false,
 )
 
 @Serializable

@@ -10,8 +10,8 @@ kotlin {
 }
 
 dependencies {
-    implementation(project(":shared"))
     implementation(project(":rdma-runtime-android"))
+    implementation(project(":kernel-bridge"))
 
     implementation(libs.androidx.activity.compose)
 

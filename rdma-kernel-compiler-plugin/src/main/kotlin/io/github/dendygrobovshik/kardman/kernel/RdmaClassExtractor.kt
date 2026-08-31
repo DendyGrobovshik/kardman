@@ -5,6 +5,7 @@ import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.PropertyInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.StaticInfo
 import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
 import org.jetbrains.kotlin.descriptors.Modality
 import org.jetbrains.kotlin.ir.declarations.IrClass
@@ -92,7 +93,31 @@ object RdmaClassExtractor {
             }
             .toList()
 
-        return RdmaClassInfo(packageName, className, qualifiedName, constructors, methods, properties)
+        return RdmaClassInfo(packageName, className, qualifiedName, constructors, methods, properties, extractStatics(cls))
+    }
+
+    /**
+     * Extracts public `val`s from the companion object of an `@RDMA` class. These become
+     * host-side singleton getters (e.g. `Alignment.Center`) available to the plugin.
+     */
+    private fun extractStatics(cls: IrClass): List<StaticInfo> {
+        val companion = cls.declarations
+            .filterIsInstance<IrClass>()
+            .firstOrNull { it.isCompanion }
+            ?: return emptyList()
+        return companion.properties
+            .filter { it.visibility == DescriptorVisibilities.PUBLIC }
+            .filter { !it.name.asString().startsWith("__") }
+            .filter { !it.name.asString().startsWith("$") }
+            .mapNotNull { prop ->
+                val type = prop.type()
+                StaticInfo(
+                    name = prop.name.asString(),
+                    type = type.toTypeName(),
+                    nullable = type.isNullable(),
+                )
+            }
+            .toList()
     }
 
     private fun IrValueParameter.toParameterInfo(): ParameterInfo {

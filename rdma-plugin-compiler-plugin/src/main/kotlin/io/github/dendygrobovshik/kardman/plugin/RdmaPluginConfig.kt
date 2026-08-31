@@ -9,6 +9,7 @@ data class RdmaPluginType(
     val qualifiedName: String,
     val constructorParams: List<Pair<String, String>>,
     val properties: List<Pair<String, Boolean>>,
+    val statics: List<String> = emptyList(),
 )
 
 data class RdmaPluginFunction(
@@ -47,7 +48,8 @@ object RdmaPluginConfig {
                 ?.parameters?.map { it.name to it.type }
                 ?: emptyList()
             val properties = cls.properties.map { it.name to it.isMutable }
-            RdmaPluginType(cls.className, cls.qualifiedName, constructorParams, properties)
+            val statics = cls.statics.map { it.name }
+            RdmaPluginType(cls.className, cls.qualifiedName, constructorParams, properties, statics)
         }
 
         val functions = raw.functions.map { fn ->

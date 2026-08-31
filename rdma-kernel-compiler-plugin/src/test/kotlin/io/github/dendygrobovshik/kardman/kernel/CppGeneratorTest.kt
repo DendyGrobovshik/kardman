@@ -5,6 +5,7 @@ import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.PropertyInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.StaticInfo
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains
@@ -43,7 +44,7 @@ class CppGeneratorTest {
         val bridgeCpp = generated["RdmaBridge.cpp"] ?: error("RdmaBridge.cpp not generated")
 
         assertContains(bridgeCpp, "createPerson")
-        assertContains(bridgeCpp, "rdmaNamespace.setProperty")
+        assertContains(bridgeCpp, "rdma.setProperty")
         assertContains(bridgeCpp, """PropNameID::forAscii(rt, "createPerson")""")
     }
 
@@ -84,6 +85,35 @@ class CppGeneratorTest {
         assertContains(cpp, "setStatus")
         assertContains(cpp, "PropNameID::forAscii(rt, \"setStatus\")")
         assertContains(cpp, "setProperty(rt, \"setStatus\"")
+    }
+
+    @Test
+    fun `generates companion static getter registered in bridge`() {
+        val alignment = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Alignment",
+            qualifiedName = "com.example.kernel.Alignment",
+            constructors = listOf(ConstructorInfo(listOf(ParameterInfo("ordinal", "kotlin.Int")))),
+            methods = emptyList(),
+            properties = listOf(PropertyInfo("ordinal", "kotlin.Int", false)),
+            statics = listOf(StaticInfo("Center", "com.example.kernel.Alignment")),
+        )
+
+        val generated = generate(alignment)
+        val cacheH = generated["RdmaJniCache.h"] ?: error("RdmaJniCache.h not generated")
+        assertContains(cacheH, "companionClazz")
+        assertContains(cacheH, "companionField")
+        assertContains(cacheH, "static_get_Center")
+
+        val cacheCpp = generated["RdmaJniCache.cpp"] ?: error("RdmaJniCache.cpp not generated")
+        assertContains(cacheCpp, "\$Companion")
+        assertContains(cacheCpp, "GetStaticFieldID")
+        assertContains(cacheCpp, "\"getCenter\"")
+
+        val bridgeCpp = generated["RdmaBridge.cpp"] ?: error("RdmaBridge.cpp not generated")
+        assertContains(bridgeCpp, "rdma_static_Alignment_Center")
+        assertContains(bridgeCpp, "GetStaticObjectField")
+        assertContains(bridgeCpp, "createAlignmentWrapper")
+        assertContains(bridgeCpp, """PropNameID::forAscii(rt, "alignmentCenter")""")
     }
 
     @Test

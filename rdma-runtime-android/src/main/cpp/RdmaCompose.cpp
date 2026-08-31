@@ -1,6 +1,5 @@
 #include "RdmaCompose.h"
 #include "RdmaComposerProxy.h"
-#include "RdmaWidgetBridge.h"
 
 #include <jsi/jsi.h>
 #include <jni.h>
@@ -27,6 +26,12 @@ static int64_t g_nextScopeBlockId = 1;
 std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
 int64_t g_nextJsValueId = 1;
 jobject g_currentComposer = nullptr; // global ref to the currently-composing Composer
+
+static UserBridgeInstaller g_userBridge = nullptr;
+
+extern "C" void rdmaSetUserBridgeInstaller(UserBridgeInstaller installer) {
+    g_userBridge = installer;
+}
 
 // ---------------------------------------------------------------- JNI cache
 
@@ -315,9 +320,8 @@ void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
         return;
     }
     initComposerProxyCache(env);
-    initWidgetJniCache(env);
 
-    jsi::Object rdma = rt.global().getPropertyAsObject(rt, "RDMA");
+    jsi::Object rdma(rt);
 
     auto registerFn = jsi::Function::createFromHostFunction(
         rt, jsi::PropNameID::forAscii(rt, "registerContent"), 1,
@@ -371,7 +375,9 @@ void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
         });
     rdma.setProperty(rt, "registerBlock", std::move(registerBlockFn));
 
-    installRdmaWidgetBridge(rt, jvm, rdma);
+    if (g_userBridge) {
+        g_userBridge(rt, jvm, rdma);
+    }
 
     rt.global().setProperty(rt, "RDMA", std::move(rdma));
     LOGI("Compose bridge installed");

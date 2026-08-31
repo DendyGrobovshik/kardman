@@ -126,9 +126,25 @@ Android Library (AAR) containing:
 
 **Build process:**
 1. Kernel compiler plugin runs → generates C++ files in `kernel/build/generated/rdma/cpp/`
-2. `copyGeneratedCpp` task cleans `src/main/cpp/generated/` then copies fresh files
-3. `CMakeLists.txt` uses `file(GLOB)` to find all `.cpp` files in `generated/`
-4. `invalidateCmake` task deletes `.cxx` cache before CMake runs (ensures new files are picked up)
+2. `:kernel-bridge`'s `copyGeneratedCpp` task copies the *user* generated files (everything
+   except the framework-owned `RdmaComposerProxy.*`) into `kernel-bridge/src/main/cpp/generated/`
+3. `:kernel-bridge`'s CMake compiles those + `UserBridgeJni.cpp` into `librdma_user.so`,
+   linking against `librdma_runtime.so` (via the `rdma-runtime-android` prefab) and
+   `hermes-engine::hermesvm`
+4. `UserBridge.nativeInstall()` registers `installUserBridge` through the runtime hook
+   `rdmaSetUserBridgeInstaller`; `installRdmaComposeBridge` then invokes it to add the
+   user's `createXxx`/functions/statics/widgets to the shared `RDMA` namespace
+
+The generic runtime AAR ships `librdma_runtime.so` (Hermes + JNI + base Compose protocol:
+`RdmaComposerProxy`, state/lambda proxies) plus public headers (`RdmaCompose.h`,
+`ListHandle.h`, `RdmaVtable.h`, `jsi/`) exported as a prefab.
+
+### `:kernel-bridge`
+
+User-side native bridge. Depends on `:kernel` (to trigger generation and compile the
+host-side `RdmaWidgetEntries.kt`) and `:rdma-runtime-android` (for `RdmaComposeHost` +
+the prefab). Its CMake compiles the generated C++ into `librdma_user.so` and its
+`UserBridge.kt` registers the bridge before `RdmaBridge.nativeInit(...)`.
 
 ### `:plugin`
 
@@ -253,13 +269,23 @@ plugin main(): runRdmaApp { App() }
   → rewritten to rdmaRunApp { App() }             (FIR rewrite)
   → RDMA.setComposerEmpty + RDMA.registerContent  (generated bridge, JS)
   → C++ stores g_content + g_empty                (JSI)
-  → MainActivity: setContent { RdmaComposeHost.Content() }
+  → MainActivity: UserBridge.nativeInstall() + RdmaBridge.nativeInit(assets)
+  → setContent { RdmaComposeHost.Content() }
   → nativeInvokeContent → g_content(composerProxy) (JNI → JS)
   → App() runs in JS against the Composer proxy
-  → rdmaText("You typed: x") → RDMA.compose("Text", [...])
-  → JNI → rdmaDispatch("Text", [...]) → kernel Text() → material3
+  → rdmaText("You typed: x") → RDMA.composeText(...)
+  → JNI → composeText(...) → kernel Text() → material3
   → tap/typing → nativeInvokeCallback → JS lambda → state → recompose
 ```
+
+### Companion statics
+
+A public `val` on a companion object of an `@RDMA` class (e.g. `Alignment.Center`,
+`ContentScale.Crop`, `Color.Unspecified`) is extracted as a `StaticInfo` and exposed as a
+singleton getter `RDMA.<className><Name>()` (e.g. `RDMA.alignmentCenter()`). The plugin
+FIR rewrite turns `Alignment.Center` into `rdmaAlignmentCenter()` and the guest bridge
+generates the corresponding stub. The host-side C++ reads the companion singleton and
+wraps the returned `@RDMA` value as a handle.
 
 ## Data Flow
 
