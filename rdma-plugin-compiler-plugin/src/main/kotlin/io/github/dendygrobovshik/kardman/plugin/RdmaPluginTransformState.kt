@@ -55,6 +55,8 @@ object RdmaPluginTransformState {
         else -> "rdma" + fqn.substringAfterLast('.').replaceFirstChar { it.uppercase() }
     }
 
+    fun composeFnName(simpleName: String): String = "compose" + simpleName
+
     fun registerSubclass(qualifiedName: String, subclass: RdmaSubclass) {
         subclasses[qualifiedName] = subclass
     }
@@ -105,6 +107,7 @@ object RdmaPluginTransformState {
             File(outDir, outName).writeText(content)
         }
         writeFunctionBridge(outDir)
+        writeWidgetBridge(outDir)
     }
 
     private fun writeFunctionBridge(outDir: File) {
@@ -118,6 +121,17 @@ object RdmaPluginTransformState {
         bridgeFile.writeText(buildFunctionBridge(plain))
     }
 
+    private fun writeWidgetBridge(outDir: File) {
+        val bridgeFile = File(outDir, "RdmaWidgetBridge.kt")
+        val widgets = functions.filter { it.composable }
+        if (widgets.isEmpty()) {
+            bridgeFile.delete()
+            return
+        }
+        outDir.mkdirs()
+        bridgeFile.writeText(buildWidgetBridge(widgets))
+    }
+
     internal fun buildFunctionBridge(plainFunctions: List<RdmaPluginFunction>): String {
         val sb = StringBuilder()
         sb.appendLine("package com.example.plugin")
@@ -126,17 +140,40 @@ object RdmaPluginTransformState {
             if (fn.composable) continue
             val bridgeName = bridgeNameFor(fn.qualifiedName)
             val params = fn.parameters.mapIndexed { i, p ->
-                if (p.lambdaArity == null) {
+                if (p.kind == RdmaParamKind.VALUE) {
                     "p$i: dynamic"
                 } else {
-                    val inner = (0 until p.lambdaArity).joinToString(", ") { "dynamic" }
+                    val inner = (0 until (p.lambdaArity ?: 0)).joinToString(", ") { "dynamic" }
                     "p$i: ($inner) -> dynamic"
                 }
             }.joinToString(", ")
             val args = fn.parameters.mapIndexed { i, p ->
-                if (p.lambdaArity == null) "p$i" else "js(\"RDMA\").registerBlock(p$i)"
+                if (p.kind == RdmaParamKind.VALUE) "p$i" else "js(\"RDMA\").registerBlock(p$i)"
             }.joinToString(", ")
             sb.appendLine("fun $bridgeName($params): dynamic = js(\"RDMA\").${fn.name}($args)")
+            sb.appendLine()
+        }
+        return sb.toString()
+    }
+
+    internal fun buildWidgetBridge(widgets: List<RdmaPluginFunction>): String {
+        val sb = StringBuilder()
+        sb.appendLine("package com.example.plugin")
+        sb.appendLine()
+        sb.appendLine("import androidx.compose.runtime.Composable")
+        sb.appendLine()
+        for (fn in widgets) {
+            if (!fn.composable) continue
+            val bridgeName = bridgeNameFor(fn.qualifiedName)
+            val params = fn.parameters.joinToString(", ") { p -> "${p.name}: ${p.kotlinType}" }
+            val args = fn.parameters.joinToString(", ") { p ->
+                if (p.kind == RdmaParamKind.VALUE) p.name else "js(\"RDMA\").registerBlock(${p.name})"
+            }
+            val composeName = composeFnName(fn.name)
+            sb.appendLine("@Composable")
+            sb.appendLine("fun $bridgeName($params) {")
+            sb.appendLine("    js(\"RDMA\").$composeName($args)")
+            sb.appendLine("}")
             sb.appendLine()
         }
         return sb.toString()

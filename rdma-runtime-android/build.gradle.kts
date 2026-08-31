@@ -13,6 +13,10 @@ android {
     namespace = "io.github.dendygrobovshik.kardman.runtime"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
+    sourceSets.getByName("main") {
+        kotlin.srcDir("${rootProject.projectDir}/kernel/build/generated/rdma/widget-kotlin")
+    }
+
     defaultConfig {
         minSdk = libs.versions.android.minSdk.get().toInt()
         externalNativeBuild {

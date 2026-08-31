@@ -13,8 +13,8 @@ class RdmaFunctionBridgeTest {
             qualifiedName = "com.example.kernel.forEach",
             composable = false,
             parameters = listOf(
-                RdmaPluginParameter(lambdaArity = null),
-                RdmaPluginParameter(lambdaArity = 1),
+                RdmaPluginParameter("list", RdmaParamKind.VALUE, "dynamic"),
+                RdmaPluginParameter("body", RdmaParamKind.CALLBACK, "(dynamic) -> dynamic", 1),
             ),
         )
         val src = RdmaPluginTransformState.buildFunctionBridge(listOf(fn))
@@ -29,8 +29,8 @@ class RdmaFunctionBridgeTest {
             qualifiedName = "com.example.kernel.add",
             composable = false,
             parameters = listOf(
-                RdmaPluginParameter(lambdaArity = null),
-                RdmaPluginParameter(lambdaArity = null),
+                RdmaPluginParameter("a", RdmaParamKind.VALUE, "dynamic"),
+                RdmaPluginParameter("b", RdmaParamKind.VALUE, "dynamic"),
             ),
         )
         val src = RdmaPluginTransformState.buildFunctionBridge(listOf(fn))

@@ -38,6 +38,7 @@ class RdmaKernelGradlePlugin : KotlinCompilerPluginSupportPlugin {
             listOf(
                 SubpluginOption("cppOutputDir", "${project.buildDir}/generated/rdma/cpp"),
                 SubpluginOption("jsonOutputDir", "${project.buildDir}/generated/rdma"),
+                SubpluginOption("kotlinOutputDir", "${project.buildDir}/generated/rdma/widget-kotlin"),
             )
         }
     }

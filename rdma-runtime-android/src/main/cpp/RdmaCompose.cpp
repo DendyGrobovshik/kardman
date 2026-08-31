@@ -1,5 +1,6 @@
 #include "RdmaCompose.h"
 #include "RdmaComposerProxy.h"
+#include "RdmaWidgetBridge.h"
 
 #include <jsi/jsi.h>
 #include <jni.h>
@@ -25,7 +26,7 @@ static std::unordered_map<int64_t, std::shared_ptr<jsi::Function>> g_scopeBlocks
 static int64_t g_nextScopeBlockId = 1;
 std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
 int64_t g_nextJsValueId = 1;
-static jobject g_currentComposer = nullptr; // global ref to the currently-composing Composer
+jobject g_currentComposer = nullptr; // global ref to the currently-composing Composer
 
 // ---------------------------------------------------------------- JNI cache
 
@@ -70,9 +71,6 @@ static bool initComposeJniCache(JNIEnv* env) {
     g_composeCache.objectClass = cacheClass(env, "java/lang/Object");
     g_composeCache.objectCtor = env->GetMethodID(g_composeCache.objectClass, "<init>", "()V");
 
-    g_composeCache.dispatchClass = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/RdmaWidgetsKt");
-    g_composeCache.dispatchMethod = env->GetStaticMethodID(g_composeCache.dispatchClass, "rdmaDispatch", "(Ljava/lang/String;[Ljava/lang/Object;Landroidx/compose/runtime/Composer;I)V");
-
     g_composeCache.jsValueHolderClass = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/JsValueHolder");
     g_composeCache.jsValueHolderCtor = env->GetMethodID(g_composeCache.jsValueHolderClass, "<init>", "(J)V");
     g_composeCache.jsValueHolderGetId = env->GetMethodID(g_composeCache.jsValueHolderClass, "getId", "()J");
@@ -82,7 +80,7 @@ static bool initComposeJniCache(JNIEnv* env) {
            g_composeCache.structuralEqualityPolicy &&
            g_composeCache.getEmpty && g_composeCache.updateScope &&
            g_composeCache.scopeBlockCtor &&
-           g_composeCache.objectCtor && g_composeCache.dispatchMethod &&
+           g_composeCache.objectCtor &&
            g_composeCache.jsValueHolderCtor && g_composeCache.jsValueHolderGetId;
 }
 
@@ -291,21 +289,6 @@ static void setCurrentComposer(jobject composer) {
     }
 }
 
-static jobjectArray jsiArrayToJObjectArray(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
-    if (!v.isObject()) return nullptr;
-    auto arr = v.asObject(rt).asArray(rt);
-    size_t n = arr.size(rt);
-    jclass objClass = env->FindClass("java/lang/Object");
-    jobjectArray out = env->NewObjectArray((jsize)n, objClass, nullptr);
-    env->DeleteLocalRef(objClass);
-    for (size_t i = 0; i < n; i++) {
-        jobject elem = boxJsi(env, rt, arr.getValueAtIndex(rt, i));
-        env->SetObjectArrayElement(out, (jsize)i, elem);
-        if (elem) env->DeleteLocalRef(elem);
-    }
-    return out;
-}
-
 void invokeRegisteredContent(jsi::Runtime& rt, jobject composer) {
     if (!g_content) {
         LOGW("No content registered");
@@ -332,6 +315,7 @@ void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
         return;
     }
     initComposerProxyCache(env);
+    initWidgetJniCache(env);
 
     jsi::Object rdma = rt.global().getPropertyAsObject(rt, "RDMA");
 
@@ -374,24 +358,6 @@ void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
         });
     rdma.setProperty(rt, "mutableStateOf", std::move(mutableStateOfFn));
 
-    auto composeFn = jsi::Function::createFromHostFunction(
-        rt, jsi::PropNameID::forAscii(rt, "compose"), 2,
-        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-            JNIEnv* e = getEnv(g_composeCache.jvm);
-            if (!e || count < 2 || !args[0].isString()) return jsi::Value::undefined();
-            std::string name = args[0].getString(r).utf8(r);
-            jstring jname = e->NewStringUTF(name.c_str());
-            jobjectArray jargs = jsiArrayToJObjectArray(e, r, args[1]);
-            if (g_currentComposer && jargs) {
-                LOGI("compose: %s", name.c_str());
-                e->CallStaticVoidMethod(g_composeCache.dispatchClass, g_composeCache.dispatchMethod, jname, jargs, g_currentComposer, 0);
-            }
-            e->DeleteLocalRef(jname);
-            if (jargs) e->DeleteLocalRef(jargs);
-            return jsi::Value::undefined();
-        });
-    rdma.setProperty(rt, "compose", std::move(composeFn));
-
     auto registerBlockFn = jsi::Function::createFromHostFunction(
         rt, jsi::PropNameID::forAscii(rt, "registerBlock"), 1,
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
@@ -404,6 +370,8 @@ void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
             return jsi::Value((double)id);
         });
     rdma.setProperty(rt, "registerBlock", std::move(registerBlockFn));
+
+    installRdmaWidgetBridge(rt, jvm, rdma);
 
     rt.global().setProperty(rt, "RDMA", std::move(rdma));
     LOGI("Compose bridge installed");

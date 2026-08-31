@@ -17,6 +17,7 @@ import java.io.File
 object RdmaKernelKeys {
     val CPP_OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("cppOutputDir")
     val JSON_OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("jsonOutputDir")
+    val KOTLIN_OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("kotlinOutputDir")
 }
 
 class RdmaKernelCommandLineProcessor : CommandLineProcessor {
@@ -25,12 +26,14 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
     override val pluginOptions: Collection<AbstractCliOption> = listOf(
         CliOption("cppOutputDir", "<dir>", "Output directory for generated C++ glue", required = false),
         CliOption("jsonOutputDir", "<dir>", "Output directory for rdma_manifest.json", required = false),
+        CliOption("kotlinOutputDir", "<dir>", "Output directory for generated Kotlin widget entries", required = false),
     )
 
     override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
         when (option.optionName) {
             "cppOutputDir" -> configuration.put(RdmaKernelKeys.CPP_OUTPUT_DIR, value)
             "jsonOutputDir" -> configuration.put(RdmaKernelKeys.JSON_OUTPUT_DIR, value)
+            "kotlinOutputDir" -> configuration.put(RdmaKernelKeys.KOTLIN_OUTPUT_DIR, value)
         }
     }
 }
@@ -44,13 +47,15 @@ class RdmaKernelCompilerRegistrar : CompilerPluginRegistrar() {
     override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
         val cppDir = configuration.get(RdmaKernelKeys.CPP_OUTPUT_DIR)
         val jsonDir = configuration.get(RdmaKernelKeys.JSON_OUTPUT_DIR)
-        IrGenerationExtension.registerExtension(RdmaKernelGenerationExtension(cppDir, jsonDir))
+        val kotlinDir = configuration.get(RdmaKernelKeys.KOTLIN_OUTPUT_DIR)
+        IrGenerationExtension.registerExtension(RdmaKernelGenerationExtension(cppDir, jsonDir, kotlinDir))
     }
 }
 
 class RdmaKernelGenerationExtension(
     private val cppOutputDir: String?,
     private val jsonOutputDir: String?,
+    private val kotlinOutputDir: String?,
 ) : IrGenerationExtension {
 
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
@@ -71,6 +76,9 @@ class RdmaKernelGenerationExtension(
                 f.isFile && (f.extension == "h" || f.extension == "cpp")
             }?.forEach { it.delete() }
         }
+        kotlinOutputDir?.let { dir ->
+            File(dir).listFiles { f -> f.isFile && f.extension == "kt" }?.forEach { it.delete() }
+        }
 
         // The Composer proxy is part of the base protocol and does not depend on any
         // @RDMA class/function, so it is always regenerated (and version-checked against
@@ -83,6 +91,17 @@ class RdmaKernelGenerationExtension(
             RdmaComposerProxyGenerator { fileName, _ ->
                 File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
             }.generate(RdmaComposerProtocol.baseProtocol)
+        }
+
+        // Typed per-widget bridge (Variant A): generated Kotlin entries + C++ HostFunctions.
+        val widgets = functions.filter { it.composable }
+        cppOutputDir?.let { cppDir ->
+            kotlinOutputDir?.let { kotlinDir ->
+                RdmaWidgetGenerator(
+                    { fileName, _ -> File(cppDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
+                    { fileName, _ -> File(kotlinDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
+                ).generate(widgets)
+            }
         }
 
         if (classes.isEmpty() && functions.isEmpty()) return

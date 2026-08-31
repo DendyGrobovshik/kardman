@@ -60,6 +60,7 @@ data class RdmaFunctionInfo(
 data class RdmaParameterInfo(
     val name: String,
     val type: RdmaTypeRef,
+    val composable: Boolean = false,
 )
 
 @Serializable

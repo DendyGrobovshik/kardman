@@ -37,15 +37,15 @@ struct ComposeJniCache {
     jclass objectClass = nullptr;
     jmethodID objectCtor = nullptr;
 
-    jclass dispatchClass = nullptr;
-    jmethodID dispatchMethod = nullptr;
-
     jclass jsValueHolderClass = nullptr;
     jmethodID jsValueHolderCtor = nullptr;
     jmethodID jsValueHolderGetId = nullptr;
 };
 
 extern ComposeJniCache g_composeCache;
+
+// Global ref to the currently-composing Composer (set during content invocation).
+extern jobject g_currentComposer;
 
 // Installed into the RDMA namespace from initRdmaRuntime().
 void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm);
