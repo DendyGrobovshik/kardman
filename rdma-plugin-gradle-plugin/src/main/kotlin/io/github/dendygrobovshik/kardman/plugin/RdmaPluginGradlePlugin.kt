@@ -44,9 +44,70 @@ fun rdmaText(text: String) {
 }
 
 @Composable
+fun rdmaTitleText(text: String) {
+    RDMA.compose("TitleText", arrayOf(text))
+}
+
+@Composable
+fun rdmaPriceText(text: String) {
+    RDMA.compose("PriceText", arrayOf(text))
+}
+
+@Composable
+fun rdmaOldPriceText(text: String) {
+    RDMA.compose("OldPriceText", arrayOf(text))
+}
+
+@Composable
+fun rdmaCaptionText(text: String) {
+    RDMA.compose("CaptionText", arrayOf(text))
+}
+
+@Composable
+fun rdmaSectionTitle(text: String) {
+    RDMA.compose("SectionTitle", arrayOf(text))
+}
+
+@Composable
 fun rdmaColumn(content: @Composable () -> Unit) {
     val blockId = RDMA.registerBlock(content)
     RDMA.compose("Column", arrayOf(blockId))
+}
+
+@Composable
+fun rdmaCard(content: @Composable () -> Unit) {
+    val blockId = RDMA.registerBlock(content)
+    RDMA.compose("Card", arrayOf(blockId))
+}
+
+@Composable
+fun rdmaRow(content: @Composable () -> Unit) {
+    val blockId = RDMA.registerBlock(content)
+    RDMA.compose("Row", arrayOf(blockId))
+}
+
+@Composable
+fun rdmaHorizontalScrollRow(content: @Composable () -> Unit) {
+    val blockId = RDMA.registerBlock(content)
+    RDMA.compose("HorizontalScrollRow", arrayOf(blockId))
+}
+
+@Composable
+fun rdmaVerticalScrollColumn(content: @Composable () -> Unit) {
+    val blockId = RDMA.registerBlock(content)
+    RDMA.compose("VerticalScrollColumn", arrayOf(blockId))
+}
+
+@Composable
+fun rdmaImage(url: String) {
+    RDMA.compose("Image", arrayOf(url))
+}
+
+@Composable
+fun rdmaSearchBar(value: String, onValueChange: (String) -> Unit, onClear: () -> Unit) {
+    val cbId = RDMA.registerBlock(onValueChange)
+    val clearId = RDMA.registerBlock(onClear)
+    RDMA.compose("SearchBar", arrayOf(value, cbId, clearId))
 }
 
 @Composable

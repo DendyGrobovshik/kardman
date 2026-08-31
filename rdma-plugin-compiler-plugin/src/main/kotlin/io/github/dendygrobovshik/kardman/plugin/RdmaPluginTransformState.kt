@@ -82,20 +82,27 @@ object RdmaPluginTransformState {
         // Remove stale rewritten sources so deleting a plugin file does not leave
         // a dangling `*_rdma.kt` that still references removed kernel symbols.
         outDir.listFiles { f -> f.isFile && f.name.endsWith("_rdma.kt") }?.forEach { it.delete() }
-        for ((path, fileEdits) in edits) {
-            if (fileEdits.isEmpty()) continue
+        // Emit every plugin source file: edited ones get the rewrites applied, and
+        // untouched files (plain data classes / helpers with no @RDMA usage) are
+        // copied verbatim so they remain available to the JS compilation.
+        for ((path, text) in fileTexts) {
             val sourceFile = File(path)
-            val text = textOf(path)
-            val sorted = fileEdits
-                .filter { it.start in 0..text.length && it.end in it.start..text.length }
-                .sortedByDescending { it.start }
-            val sb = StringBuilder(text)
-            for (edit in sorted) {
-                sb.replace(edit.start, edit.end, edit.replacement)
+            val fileEdits = edits[path].orEmpty()
+            val content = if (fileEdits.isEmpty()) {
+                text
+            } else {
+                val sorted = fileEdits
+                    .filter { it.start in 0..text.length && it.end in it.start..text.length }
+                    .sortedByDescending { it.start }
+                val sb = StringBuilder(text)
+                for (edit in sorted) {
+                    sb.replace(edit.start, edit.end, edit.replacement)
+                }
+                sb.toString()
             }
             val outName = sourceFile.nameWithoutExtension + "_rdma.kt"
             outDir.mkdirs()
-            File(outDir, outName).writeText(sb.toString())
+            File(outDir, outName).writeText(content)
         }
         writeFunctionBridge(outDir)
     }
