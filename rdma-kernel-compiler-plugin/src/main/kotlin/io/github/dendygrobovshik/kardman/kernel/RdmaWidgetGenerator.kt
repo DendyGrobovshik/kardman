@@ -65,6 +65,18 @@ class RdmaWidgetGenerator(
 
     private fun refJniType(fqn: String): String = "L${fqn.replace('.', '/')};"
 
+    /**
+     * Number of trailing `int` "changed" parameters the Compose compiler appends to a
+     * `@Composable` function. The compiler emits `paramCount / 16 + 1` such ints for a
+     * top-level (static) function (each int encodes 16 parameter change bits).
+     */
+    private fun changedIntCount(paramCount: Int): Int = paramCount / 16 + 1
+
+    private fun changedJniSuffix(paramCount: Int): String = "I".repeat(changedIntCount(paramCount))
+
+    private fun changedCallArgs(paramCount: Int): String =
+        (0 until changedIntCount(paramCount)).joinToString(", ") { "0" }
+
     private fun kotlinType(jvmType: String): String = when (jvmType) {
         "kotlin.String" -> "String"
         "kotlin.Int" -> "Int"
@@ -217,7 +229,8 @@ void initWidgetJniCache(JNIEnv* env) {
 """)
         for (fn in widgets) {
             val params = classify(fn)
-            val sig = params.joinToString("") { it.jniType() } + "Landroidx/compose/runtime/Composer;I"
+            val sig = params.joinToString("") { it.jniType() } +
+                "Landroidx/compose/runtime/Composer;" + changedJniSuffix(params.size)
             out.write("    g_widgetCache.compose${fn.name} = env->GetStaticMethodID(g_widgetCache.entriesClass, \"compose${fn.name}\", \"(${sig})V\");\n")
         }
         out.write("""}
@@ -244,6 +257,7 @@ void installRdmaWidgetBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
         val cleanups = params.mapIndexedNotNull { i, p ->
             if (p is Param.Value && p.jvmType == "kotlin.String") "    if (j_p$i) e->DeleteLocalRef(j_p$i);\n" else null
         }.joinToString("")
+        val changedArgs = changedCallArgs(arity)
         return """
     {
         auto fn = jsi::Function::createFromHostFunction(
@@ -252,7 +266,7 @@ void installRdmaWidgetBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
                 JNIEnv* e = getEnv(jvm);
                 if (!e) return jsi::Value::undefined();
 $extractions
-                e->CallStaticVoidMethod(g_widgetCache.entriesClass, g_widgetCache.$jsName, $callArgs, g_currentComposer, 0);
+                e->CallStaticVoidMethod(g_widgetCache.entriesClass, g_widgetCache.$jsName, $callArgs, g_currentComposer, $changedArgs);
 $cleanups
                 return jsi::Value::undefined();
             });

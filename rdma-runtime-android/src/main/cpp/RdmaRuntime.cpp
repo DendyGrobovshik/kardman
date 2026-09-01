@@ -119,7 +119,8 @@ void evalJavaScript(const std::string& code, std::string& result) {
 
     try {
         auto buffer = std::make_shared<facebook::jsi::StringBuffer>(code);
-        facebook::jsi::Value jsResult = g_runtime->evaluateJavaScript(buffer, "<eval>");
+        auto prepared = g_runtime->prepareJavaScript(buffer, "<eval>");
+        facebook::jsi::Value jsResult = g_runtime->evaluatePreparedJavaScript(prepared);
         result = jsiValueToString(*g_runtime, jsResult);
     } catch (const facebook::jsi::JSError& e) {
         std::ostringstream oss;

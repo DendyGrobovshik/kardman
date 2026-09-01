@@ -301,7 +301,11 @@ void invokeRegisteredContent(jsi::Runtime& rt, jobject composer) {
     }
     setCurrentComposer(composer);
     jsi::Object proxy = makeComposerProxy(rt, composer);
-    g_content->call(rt, proxy, 0);
+    try {
+        g_content->call(rt, proxy, 0);
+    } catch (const jsi::JSError& e) {
+        LOGW("JSError in content: %s\n%s", e.what(), e.getStack().c_str());
+    }
 }
 
 void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composer, jint changed) {
@@ -309,7 +313,11 @@ void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composer, jint cha
     if (it == g_scopeBlocks.end()) return;
     setCurrentComposer(composer);
     jsi::Object proxy = makeComposerProxy(rt, composer);
-    it->second->call(rt, proxy, changed);
+    try {
+        it->second->call(rt, proxy, changed);
+    } catch (const jsi::JSError& e) {
+        LOGW("JSError in scope block: %s\n%s", e.what(), e.getStack().c_str());
+    }
 }
 
 void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
