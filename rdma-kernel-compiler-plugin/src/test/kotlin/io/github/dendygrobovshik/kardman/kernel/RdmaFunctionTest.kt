@@ -130,7 +130,7 @@ class RdmaFunctionCodegenTest {
     fun `lambda parameter wraps into RdmaFunction of matching arity`() {
         val generated = generate(listOf(person()), listOf(forEachFn()))
         val bridge = generated["RdmaBridge.cpp"] ?: error("missing bridge")
-        assertContains(bridge, "io/github/dendygrobovshik/kardman/runtime/RdmaFunction1")
+        assertContains(bridge, "createRdmaFunction(env, 1, id_action)")
     }
 
     @Test

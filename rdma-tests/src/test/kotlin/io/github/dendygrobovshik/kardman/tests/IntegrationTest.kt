@@ -121,7 +121,7 @@ class IntegrationTest {
 
         assertContains(bridgeCpp, "createWithOverrides")
         assertContains(bridgeCpp, """PropNameID::forAscii(rt, "createWithOverrides")""")
-        assertContains(bridgeCpp, "rdmaNamespace.setProperty")
+        assertContains(bridgeCpp, "rdma.setProperty")
         assertContains(bridgeCpp, "RdmaVtable")
         assertContains(bridgeCpp, "GetFieldID")
         assertContains(bridgeCpp, "\"__vtable\"")

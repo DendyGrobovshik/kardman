@@ -253,9 +253,11 @@ void installRdmaWidgetBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
         val jsName = "compose" + fn.name
         val arity = params.size
         val extractions = params.mapIndexed { i, p -> extraction(i, p) }.joinToString("")
-        val callArgs = params.mapIndexed { i, p -> argExpr(i, p) }.joinToString(", ")
+        val captures = params.mapIndexed { i, p -> captureExpr(i, p) }.joinToString(", ")
+        val captureList = if (captures.isEmpty()) "" else ", $captures"
+        val callArgs = params.mapIndexed { i, p -> callArgExpr(i, p) }.joinToString(", ")
         val cleanups = params.mapIndexedNotNull { i, p ->
-            if (p is Param.Value && p.jvmType == "kotlin.String") "    if (j_p$i) e->DeleteLocalRef(j_p$i);\n" else null
+            if (p is Param.Value && p.jvmType == "kotlin.String") "        if (j_p${i}g) e->DeleteGlobalRef(j_p${i}g);\n" else null
         }.joinToString("")
         val changedArgs = changedCallArgs(arity)
         return """
@@ -266,8 +268,14 @@ void installRdmaWidgetBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
                 JNIEnv* e = getEnv(jvm);
                 if (!e) return jsi::Value::undefined();
 $extractions
-                e->CallStaticVoidMethod(g_widgetCache.entriesClass, g_widgetCache.$jsName, $callArgs, g_currentComposer, $changedArgs);
+                jobject composer = g_currentComposer;
+                rdmaCallUi([jvm, composer$captureList]() -> RdmaResult {
+                    JNIEnv* e = getEnv(jvm);
+                    if (!e) return RdmaResult::undefined();
+                    e->CallStaticVoidMethod(g_widgetCache.entriesClass, g_widgetCache.$jsName, $callArgs, composer, $changedArgs);
 $cleanups
+                    return RdmaResult::undefined();
+                });
                 return jsi::Value::undefined();
             });
         rdma.setProperty(rt, "$jsName", std::move(fn));
@@ -275,10 +283,24 @@ $cleanups
 """
     }
 
+    private fun captureExpr(i: Int, p: Param): String = when (p) {
+        is Param.Value -> if (p.jvmType == "kotlin.String") "j_p${i}g" else "cpp_p$i"
+        is Param.Ref -> "cpp_p$i"
+        is Param.Content, is Param.Callback -> "cpp_p$i"
+    }
+
+    private fun callArgExpr(i: Int, p: Param): String = when (p) {
+        is Param.Value -> if (p.jvmType == "kotlin.String") "j_p${i}g" else "cpp_p$i"
+        is Param.Ref -> "cpp_p$i"
+        is Param.Content, is Param.Callback -> "cpp_p$i"
+    }
+
     private fun extraction(i: Int, p: Param): String = when (p) {
         is Param.Value -> when (p.jvmType) {
             "kotlin.String" ->
-                "                jstring j_p$i = count > $i && args[$i].isString() ? e->NewStringUTF(args[$i].getString(r).utf8(r).c_str()) : nullptr;\n"
+                "                jstring j_p$i = count > $i && args[$i].isString() ? e->NewStringUTF(args[$i].getString(r).utf8(r).c_str()) : nullptr;\n" +
+                    "                jstring j_p${i}g = j_p$i ? (jstring)e->NewGlobalRef(j_p$i) : nullptr;\n" +
+                    "                if (j_p$i) e->DeleteLocalRef(j_p$i);\n"
             "kotlin.Int" ->
                 "                jint cpp_p$i = count > $i && args[$i].isNumber() ? (jint)args[$i].getNumber() : 0;\n"
             "kotlin.Long" ->
@@ -299,11 +321,5 @@ $cleanups
                 "                }\n"
         is Param.Content, is Param.Callback ->
             "                jlong cpp_p$i = count > $i && args[$i].isNumber() ? (jlong)args[$i].getNumber() : 0;\n"
-    }
-
-    private fun argExpr(i: Int, p: Param): String = when (p) {
-        is Param.Value -> if (p.jvmType == "kotlin.String") "j_p$i" else "cpp_p$i"
-        is Param.Ref -> "cpp_p$i"
-        is Param.Content, is Param.Callback -> "cpp_p$i"
     }
 }

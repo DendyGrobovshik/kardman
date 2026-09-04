@@ -9,6 +9,11 @@ import java.io.OutputStream
  * The generated proxy lives alongside the other generated glue in
  * `kernel/build/generated/rdma/cpp/` and is copied into the runtime by `copyGeneratedCpp`.
  * It relies on helpers exposed by the static `RdmaCompose.cpp` (declared in `RdmaCompose.h`).
+ *
+ * Since the Hermes runtime lives on a dedicated thread, every `Composer` method is marshaled
+ * to the UI thread via `rdmaCallUi`: the JS thread extracts/boxes arguments into global refs,
+ * the UI thread performs the JNI call and returns an `RdmaResult` descriptor, and the JS thread
+ * converts it back into a `jsi::Value` via `rdmaResultToJsi`.
  */
 class RdmaComposerProxyGenerator(private val output: (String, String) -> OutputStream) {
 
@@ -114,8 +119,8 @@ jsi::Object makeComposerProxy(jsi::Runtime& rt, jobject composer) {
     private fun handler(m: ComposerMethod): String = when (m.returnKind) {
         ComposerReturnKind.NOOP -> noopHandler(m, "undefined")
         ComposerReturnKind.NOOP_NULL -> noopHandler(m, "null")
-        ComposerReturnKind.VOID -> callHandler(m, "CallVoidMethod", "jsi::Value::undefined()")
-        ComposerReturnKind.BOOLEAN -> callHandler(m, "CallBooleanMethod", "jsi::Value(false)")
+        ComposerReturnKind.VOID -> voidHandler(m)
+        ComposerReturnKind.BOOLEAN -> booleanHandler(m)
         ComposerReturnKind.COMPOSER_SELF -> composerSelfHandler(m)
         ComposerReturnKind.SCOPE_UPDATE_SCOPE -> scopeHandler(m)
         ComposerReturnKind.CHANGED -> changedHandler()
@@ -131,80 +136,127 @@ jsi::Object makeComposerProxy(jsi::Runtime& rt, jobject composer) {
                 });
 """
 
-    private fun callHandler(m: ComposerMethod, jniCall: String, fallback: String): String {
-        val paramExtract = m.params.mapIndexed { i, k -> paramExtraction(i, k) }.joinToString("")
-        val paramCleanup = m.params.mapIndexedNotNull { i, k ->
-            if (k == ComposerParamKind.OBJECT) "                    if (p$i) e->DeleteLocalRef(p$i);\n" else null
-        }.joinToString("")
-        val paramsCall = if (m.params.isEmpty()) "" else ", " + m.params.indices.joinToString(", ") { "p$it" }
-        return """
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "${m.jsName}"), ${m.arity},
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return $fallback;
-$paramExtract
-                    ${if (jniCall == "CallVoidMethod") "e->CallVoidMethod(self->composer_, g_composerProxyCache.${m.jniName}$paramsCall);"
-                        else "auto res = e->$jniCall(self->composer_, g_composerProxyCache.${m.jniName}$paramsCall);"}
-$paramCleanup
-                    ${if (jniCall == "CallVoidMethod") "return jsi::Value::undefined();"
-                        else "return jsi::Value((bool)res);"}
-                });
-"""
-    }
+    // --- JS-thread argument extraction ---------------------------------------
 
-    private fun paramExtraction(i: Int, k: ComposerParamKind): String = when (k) {
+    private fun extraction(i: Int, k: ComposerParamKind): String = when (k) {
         ComposerParamKind.INT ->
             "                    jint p$i = count > $i && args[$i].isNumber() ? (jint)args[$i].getNumber() : 0;\n"
         ComposerParamKind.BOOLEAN ->
             "                    jboolean p$i = count > $i && args[$i].isBool() ? args[$i].getBool() : false;\n"
         ComposerParamKind.OBJECT ->
-            "                    jobject p$i = count > $i ? boxJsi(e, r, args[$i]) : nullptr;\n"
+            "                    jobject p$i = count > $i ? boxJsi(e, r, args[$i]) : nullptr;\n" +
+                "                    jobject p${i}g = p$i ? e->NewGlobalRef(p$i) : nullptr;\n" +
+                "                    if (p$i) e->DeleteLocalRef(p$i);\n"
     }
 
-    private fun composerSelfHandler(m: ComposerMethod): String {
-        val paramExtract = m.params.mapIndexed { i, k -> paramExtraction(i, k) }.joinToString("")
-        val paramCleanup = m.params.mapIndexedNotNull { i, k ->
-            if (k == ComposerParamKind.OBJECT) "                    if (p$i) e->DeleteLocalRef(p$i);\n" else null
-        }.joinToString("")
-        val paramsCall = if (m.params.isEmpty()) "" else ", " + m.params.indices.joinToString(", ") { "p$it" }
-        return """
+    private fun captureExpr(i: Int, k: ComposerParamKind): String = when (k) {
+        ComposerParamKind.INT -> "p$i"
+        ComposerParamKind.BOOLEAN -> "p$i"
+        ComposerParamKind.OBJECT -> "p${i}g"
+    }
+
+    private fun callExpr(i: Int, k: ComposerParamKind): String = when (k) {
+        ComposerParamKind.INT -> "p$i"
+        ComposerParamKind.BOOLEAN -> "p$i"
+        ComposerParamKind.OBJECT -> "p${i}g"
+    }
+
+    private fun cleanup(i: Int, k: ComposerParamKind): String = when (k) {
+        ComposerParamKind.OBJECT -> "                    if (p${i}g) e->DeleteGlobalRef(p${i}g);\n"
+        else -> ""
+    }
+
+    private fun paramExtract(m: ComposerMethod): String =
+        m.params.mapIndexed { i, k -> extraction(i, k) }.joinToString("")
+
+    private fun paramCleanup(m: ComposerMethod): String =
+        m.params.mapIndexed { i, k -> cleanup(i, k) }.joinToString("")
+
+    private fun captureList(m: ComposerMethod): String {
+        val c = m.params.mapIndexed { i, k -> captureExpr(i, k) }.joinToString(", ")
+        return if (c.isEmpty()) "" else ", $c"
+    }
+
+    private fun paramsCall(m: ComposerMethod): String =
+        if (m.params.isEmpty()) "" else ", " + m.params.indices.joinToString(", ") { i -> callExpr(i, m.params[i]) }
+
+    // --- Handlers ------------------------------------------------------------
+
+    private fun voidHandler(m: ComposerMethod): String = """
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "${m.jsName}"), ${m.arity},
                 [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
-$paramExtract
-                    jobject result = e->CallObjectMethod(self->composer_, g_composerProxyCache.${m.jniName}$paramsCall);
-$paramCleanup
-                    if (result) e->DeleteLocalRef(result); // ComposerImpl returns `this`
+${paramExtract(m)}
+                    rdmaCallUi([composer = self->composer_${captureList(m)}]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.${m.jniName}${paramsCall(m)});
+${paramCleanup(m)}
+                        return RdmaResult::undefined();
+                    });
+                    return jsi::Value::undefined();
+                });
+"""
+
+    private fun booleanHandler(m: ComposerMethod): String = """
+            return jsi::Function::createFromHostFunction(
+                rt, jsi::PropNameID::forAscii(rt, "${m.jsName}"), ${m.arity},
+                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    JNIEnv* e = getEnv(g_composeCache.jvm);
+                    if (!e) return jsi::Value(false);
+${paramExtract(m)}
+                    RdmaResult result = rdmaCallUi([composer = self->composer_${captureList(m)}]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::boolean(false);
+                        jboolean res = e->CallBooleanMethod(composer, g_composerProxyCache.${m.jniName}${paramsCall(m)});
+${paramCleanup(m)}
+                        return RdmaResult::boolean((bool)res);
+                    });
+                    return rdmaResultToJsi(r, result);
+                });
+"""
+
+    private fun composerSelfHandler(m: ComposerMethod): String = """
+            return jsi::Function::createFromHostFunction(
+                rt, jsi::PropNameID::forAscii(rt, "${m.jsName}"), ${m.arity},
+                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    JNIEnv* e = getEnv(g_composeCache.jvm);
+                    if (!e) return jsi::Value::undefined();
+${paramExtract(m)}
+                    rdmaCallUi([composer = self->composer_${captureList(m)}]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        jobject result = e->CallObjectMethod(composer, g_composerProxyCache.${m.jniName}${paramsCall(m)});
+                        if (result) e->DeleteLocalRef(result);
+${paramCleanup(m)}
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Object::createFromHostObject(r, self);
                 });
 """
-    }
 
-    private fun scopeHandler(m: ComposerMethod): String {
-        val paramExtract = m.params.mapIndexed { i, k -> paramExtraction(i, k) }.joinToString("")
-        val paramCleanup = m.params.mapIndexedNotNull { i, k ->
-            if (k == ComposerParamKind.OBJECT) "                    if (p$i) e->DeleteLocalRef(p$i);\n" else null
-        }.joinToString("")
-        val paramsCall = if (m.params.isEmpty()) "" else ", " + m.params.indices.joinToString(", ") { "p$it" }
-        return """
+    private fun scopeHandler(m: ComposerMethod): String = """
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "${m.jsName}"), ${m.arity},
                 [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::null();
-$paramExtract
-                    jobject scope = e->CallObjectMethod(self->composer_, g_composerProxyCache.${m.jniName}$paramsCall);
-$paramCleanup
-                    if (!scope) return jsi::Value::null();
-                    jsi::Object proxy = makeScopeUpdateScopeProxy(r, scope);
-                    e->DeleteLocalRef(scope);
-                    return proxy;
+${paramExtract(m)}
+                    RdmaResult result = rdmaCallUi([composer = self->composer_${captureList(m)}]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::null();
+                        jobject scope = e->CallObjectMethod(composer, g_composerProxyCache.${m.jniName}${paramsCall(m)});
+${paramCleanup(m)}
+                        if (!scope) return RdmaResult::null();
+                        jobject global = e->NewGlobalRef(scope);
+                        e->DeleteLocalRef(scope);
+                        return RdmaResult::scopeRef(global);
+                    });
+                    return rdmaResultToJsi(r, result);
                 });
 """
-    }
 
     private fun changedHandler(): String = """
             return jsi::Function::createFromHostFunction(
@@ -222,9 +274,16 @@ $paramCleanup
                             arg = boxJsi(e, r, args[0]);
                         }
                     }
-                    jboolean res = e->CallBooleanMethod(self->composer_, g_composerProxyCache.changed, arg);
+                    jobject argG = arg ? e->NewGlobalRef(arg) : nullptr;
                     if (arg) e->DeleteLocalRef(arg);
-                    return jsi::Value((bool)res);
+                    RdmaResult result = rdmaCallUi([composer = self->composer_, argG]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::boolean(true);
+                        jboolean res = e->CallBooleanMethod(composer, g_composerProxyCache.changed, argG);
+                        if (argG) e->DeleteGlobalRef(argG);
+                        return RdmaResult::boolean((bool)res);
+                    });
+                    return rdmaResultToJsi(r, result);
                 });
 """
 
@@ -234,34 +293,35 @@ $paramCleanup
                 [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
-                    jobject v = e->CallObjectMethod(self->composer_, g_composerProxyCache.rememberedValue);
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        jobject v = e->CallObjectMethod(composer, g_composerProxyCache.rememberedValue);
 
-                    jobject companion = e->GetStaticObjectField(g_composeCache.composerClass, g_composeCache.composerCompanionField);
-                    jobject empty = e->CallObjectMethod(companion, g_composeCache.getEmpty);
-                    e->DeleteLocalRef(companion);
-                    bool isEmpty = e->IsSameObject(v, empty);
-                    e->DeleteLocalRef(empty);
-                    if (isEmpty) {
-                        e->DeleteLocalRef(v);
-                        return g_empty ? jsi::Value(r, *g_empty) : jsi::Value::undefined();
-                    }
-                    if (e->IsInstanceOf(v, g_composeCache.mutableStateClass)) {
-                        jobject global = e->NewGlobalRef(v);
-                        e->DeleteLocalRef(v);
-                        return makeStateProxy(r, global);
-                    }
-                    if (e->IsInstanceOf(v, g_composeCache.jsValueHolderClass)) {
-                        jlong id = e->CallLongMethod(v, g_composeCache.jsValueHolderGetId);
-                        e->DeleteLocalRef(v);
-                        auto it = g_jsValues.find(id);
-                        if (it != g_jsValues.end()) {
-                            return jsi::Value(r, *it->second);
+                        jobject companion = e->GetStaticObjectField(g_composeCache.composerClass, g_composeCache.composerCompanionField);
+                        jobject empty = e->CallObjectMethod(companion, g_composeCache.getEmpty);
+                        e->DeleteLocalRef(companion);
+                        bool isEmpty = e->IsSameObject(v, empty);
+                        e->DeleteLocalRef(empty);
+                        if (isEmpty) {
+                            if (v) e->DeleteLocalRef(v);
+                            return RdmaResult::empty();
                         }
-                        return jsi::Value::undefined();
-                    }
-                    jsi::Value out = unboxJni(e, r, v);
-                    e->DeleteLocalRef(v);
-                    return out;
+                        if (e->IsInstanceOf(v, g_composeCache.mutableStateClass)) {
+                            jobject global = e->NewGlobalRef(v);
+                            e->DeleteLocalRef(v);
+                            return RdmaResult::stateRef(global);
+                        }
+                        if (e->IsInstanceOf(v, g_composeCache.jsValueHolderClass)) {
+                            jlong id = e->CallLongMethod(v, g_composeCache.jsValueHolderGetId);
+                            e->DeleteLocalRef(v);
+                            return RdmaResult::jsValueId((int64_t)id);
+                        }
+                        RdmaResult r2 = classifyBoxedValue(e, v);
+                        e->DeleteLocalRef(v);
+                        return r2;
+                    });
+                    return rdmaResultToJsi(r, result);
                 });
 """
 
@@ -281,16 +341,26 @@ $paramCleanup
                         auto obj = std::make_shared<jsi::Object>(args[0].asObject(r));
                         int64_t id = g_nextJsValueId++;
                         g_jsValues[id] = obj;
-                        stored = e->NewObject(g_composeCache.jsValueHolderClass, g_composeCache.jsValueHolderCtor, (jlong)id);
+                        jobject local = e->NewObject(g_composeCache.jsValueHolderClass, g_composeCache.jsValueHolderCtor, (jlong)id);
+                        stored = e->NewGlobalRef(local);
+                        e->DeleteLocalRef(local);
                         deleteStored = true;
                     } else {
-                        stored = boxJsi(e, r, args[0]);
+                        jobject local = boxJsi(e, r, args[0]);
+                        stored = local ? e->NewGlobalRef(local) : nullptr;
+                        if (local) e->DeleteLocalRef(local);
                         deleteStored = true;
                     }
-                    if (stored) {
-                        e->CallVoidMethod(self->composer_, g_composerProxyCache.updateRememberedValue, stored);
-                        if (deleteStored) e->DeleteLocalRef(stored);
-                    }
+                    // Always call updateRememberedValue (even with null) so the slot is
+                    // appended on the first composition. Skipping it for Unit/undefined
+                    // would misalign the slot table on recomposition.
+                    rdmaCallUi([composer = self->composer_, stored, deleteStored]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.updateRememberedValue, stored);
+                        if (deleteStored && stored) e->DeleteGlobalRef(stored);
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
 """

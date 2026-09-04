@@ -8,5 +8,6 @@ object RdmaBridge {
     }
 
     external fun nativeInit(assetManager: AssetManager)
-    external fun nativeEvalAsset(assetPath: String): String
+    external fun nativeEvalAsset(assetPath: String)
+    external fun nativeIsReady(): Boolean
 }

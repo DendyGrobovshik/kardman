@@ -329,6 +329,46 @@ When Hermes GC collects the JS proxy object:
 2. `env->DeleteGlobalRef(globalRef_)` — releases JVM reference
 3. If no other JVM references → Person is eligible for JVM GC
 
+## Threading Model (dedicated Hermes thread)
+
+Hermes runs on a dedicated `"Hermes"` thread (see `RdmaRendezvous.h/cpp`). The UI
+thread never touches the `jsi::Runtime` directly — every cross-boundary call is
+routed through two channels:
+
+```
+UI thread                                Hermes thread
+┌────────────────────┐    uiToJs (high/low)   ┌────────────────────┐
+│ Compose            │ ─────────────────────▶ │ jsi::Runtime       │
+│ nativeInvoke*      │ ◀───────────────────── │ runContent /       │
+│ (compose ops)      │    jsToUi (compose ops) │ runScopeBlock /    │
+└────────────────────┘                        │ callbacks / eval   │
+                                              └────────────────────┘
+```
+
+- **Synchronous rendezvous** (`rdmaCallJs`/`rdmaCallUi`) for everything that touches
+  the `Composer` and for state reads during composition. Both sides run *reentrant
+  service loops*: while waiting for a response, a thread services the opposite queue.
+  This is what makes nested `UI → JS → UI → JS → …` composition correct and deadlock-free.
+- **Async** (`rdmaPostJs`) for service callbacks (`httpGetAsync`, `fileCacheReadAsync`, …),
+  click callbacks and `nativeInvokeLambda`. These run on the Hermes thread without
+  stalling the UI. The JS queue is two-priority: compose/init (`high`) over callbacks (`low`).
+- **Async init** (`RdmaBridge.nativeInit`/`nativeEvalAsset`): `nativeInit` populates all
+  JNI caches on the UI thread (app-class `FindClass` needs the app classloader) and then
+  starts the Hermes thread; `nativeEvalAsset` enqueues evals asynchronously.
+  `nativeIsReady()` becomes true once the runtime is ready **and** all evals have drained.
+
+Why the rendezvous exists for `Composer`/state, not just perf isolation:
+
+- `SnapshotMutableState` must be **created** and **read** on the UI thread inside the
+  active composition snapshot. `RDMA.mutableStateOf` and `StateProxyHost.get_value`
+  therefore marshal to the UI thread during composition; `set_value` is direct
+  (thread-safe) and triggers recomposition from the Hermes thread.
+- `g_currentComposer` / `g_scopeBlocks` / `g_jsValues` / `g_empty` are owned by the
+  Hermes thread; `g_currentComposer` is borrowed into the UI-bound compose op.
+
+Thread ids are captured (`g_uiTid`/`g_jsTid` via `gettid()`) and asserted in debug
+builds in the `rdmaCallJs`/`rdmaCallUi` executors.
+
 ## Key Design Decisions
 
 **JNI caching**: `FindClass` and `GetMethodID` are slow. They run once at `installRdmaBridge()`, and `jmethodID` / `jclass` (as global ref) are stored in a static `RdmaJniCache`.

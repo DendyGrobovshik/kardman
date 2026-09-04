@@ -8,6 +8,7 @@ add_library(rdma_runtime SHARED
         RdmaJni.cpp
         RdmaRuntime.cpp
         RdmaCompose.cpp
+        RdmaRendezvous.cpp
         ListHandle.cpp
         generated/RdmaComposerProxy.cpp
 )

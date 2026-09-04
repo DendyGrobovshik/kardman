@@ -1,14 +1,14 @@
 #include "RdmaCompose.h"
 #include "RdmaComposerProxy.h"
+#include "RdmaRuntime.h"
 
 #include <jsi/jsi.h>
 #include <jni.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <cstdio>
 #include <android/log.h>
-
-#include "RdmaRuntime.h"
 
 #define LOG_TAG "RdmaCompose"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -25,12 +25,22 @@ static std::unordered_map<int64_t, std::shared_ptr<jsi::Function>> g_scopeBlocks
 static int64_t g_nextScopeBlockId = 1;
 std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
 int64_t g_nextJsValueId = 1;
-jobject g_currentComposer = nullptr; // global ref to the currently-composing Composer
+jobject g_currentComposer = nullptr; // borrowed global ref; owned by the content/scope task
+
+// True on the Hermes thread while content/scope blocks are executing (i.e. during
+// composition). State reads performed in this window rendezvous to the UI thread so
+// that Compose's snapshot read observer records the dependency.
+static thread_local bool g_inComposition = false;
 
 static UserBridgeInstaller g_userBridge = nullptr;
+static UserBridgeJniInit g_userBridgeJniInit = nullptr;
 
 extern "C" void rdmaSetUserBridgeInstaller(UserBridgeInstaller installer) {
     g_userBridge = installer;
+}
+
+extern "C" void rdmaSetUserBridgeJniInit(UserBridgeJniInit init) {
+    g_userBridgeJniInit = init;
 }
 
 // ---------------------------------------------------------------- JNI cache
@@ -80,13 +90,31 @@ static bool initComposeJniCache(JNIEnv* env) {
     g_composeCache.jsValueHolderCtor = env->GetMethodID(g_composeCache.jsValueHolderClass, "<init>", "(J)V");
     g_composeCache.jsValueHolderGetId = env->GetMethodID(g_composeCache.jsValueHolderClass, "getId", "()J");
 
+    for (int i = 0; i <= 3; i++) {
+        char name[128];
+        snprintf(name, sizeof(name), "io/github/dendygrobovshik/kardman/runtime/RdmaFunction%d", i);
+        g_composeCache.rdmaFunctionClass[i] = cacheClass(env, name);
+        g_composeCache.rdmaFunctionCtor[i] =
+            env->GetMethodID(g_composeCache.rdmaFunctionClass[i], "<init>", "(J)V");
+    }
+
     return g_composeCache.stateGetValue &&
            g_composeCache.stateSetValue && g_composeCache.mutableStateOf &&
            g_composeCache.structuralEqualityPolicy &&
            g_composeCache.getEmpty && g_composeCache.updateScope &&
            g_composeCache.scopeBlockCtor &&
            g_composeCache.objectCtor &&
-           g_composeCache.jsValueHolderCtor && g_composeCache.jsValueHolderGetId;
+           g_composeCache.jsValueHolderCtor && g_composeCache.jsValueHolderGetId &&
+           g_composeCache.rdmaFunctionCtor[0] && g_composeCache.rdmaFunctionCtor[1] &&
+           g_composeCache.rdmaFunctionCtor[2] && g_composeCache.rdmaFunctionCtor[3];
+}
+
+jobject createRdmaFunction(JNIEnv* env, int arity, jlong id) {
+    if (arity < 0 || arity > 3) return nullptr;
+    jclass cls = g_composeCache.rdmaFunctionClass[arity];
+    jmethodID ctor = g_composeCache.rdmaFunctionCtor[arity];
+    if (!cls || !ctor) return nullptr;
+    return env->NewObject(cls, ctor, id);
 }
 
 JNIEnv* getEnv(JavaVM* jvm) {
@@ -170,6 +198,61 @@ jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o) {
     return result;
 }
 
+// Classifies a boxed JVM value into an RdmaResult descriptor (run on the UI thread).
+// Handles Integer/Boolean/Double/Long/Float/String/null; anything else -> Null.
+RdmaResult classifyBoxedValue(JNIEnv* env, jobject o) {
+    if (o == nullptr) return RdmaResult::null();
+    jclass integer = env->FindClass("java/lang/Integer");
+    jclass boolean = env->FindClass("java/lang/Boolean");
+    jclass string = env->FindClass("java/lang/String");
+    jclass dbl = env->FindClass("java/lang/Double");
+    jclass lng = env->FindClass("java/lang/Long");
+    jclass flt = env->FindClass("java/lang/Float");
+
+    RdmaResult r;
+    if (env->IsInstanceOf(o, integer)) {
+        jmethodID intValue = env->GetMethodID(integer, "intValue", "()I");
+        r = RdmaResult::number((double)env->CallIntMethod(o, intValue));
+    } else if (env->IsInstanceOf(o, boolean)) {
+        jmethodID boolValue = env->GetMethodID(boolean, "booleanValue", "()Z");
+        r = RdmaResult::boolean(env->CallBooleanMethod(o, boolValue));
+    } else if (env->IsInstanceOf(o, string)) {
+        jmethodID getBytes = env->GetMethodID(string, "getBytes", "(Ljava/lang/String;)[B");
+        jstring utf8 = env->NewStringUTF("UTF-8");
+        jbyteArray bytes = (jbyteArray)env->CallObjectMethod(o, getBytes, utf8);
+        env->DeleteLocalRef(utf8);
+        if (bytes != nullptr) {
+            jsize len = env->GetArrayLength(bytes);
+            jbyte* elems = env->GetByteArrayElements(bytes, nullptr);
+            std::string s((char*)elems, len);
+            env->ReleaseByteArrayElements(bytes, elems, JNI_ABORT);
+            env->DeleteLocalRef(bytes);
+            r = RdmaResult::string(std::move(s));
+        } else {
+            r = RdmaResult::string("");
+        }
+    } else if (env->IsInstanceOf(o, dbl)) {
+        jmethodID doubleValue = env->GetMethodID(dbl, "doubleValue", "()D");
+        r = RdmaResult::number(env->CallDoubleMethod(o, doubleValue));
+    } else if (env->IsInstanceOf(o, lng)) {
+        jmethodID longValue = env->GetMethodID(lng, "longValue", "()J");
+        r = RdmaResult::number((double)env->CallLongMethod(o, longValue));
+    } else if (env->IsInstanceOf(o, flt)) {
+        jmethodID floatValue = env->GetMethodID(flt, "floatValue", "()F");
+        r = RdmaResult::number((double)env->CallFloatMethod(o, floatValue));
+    } else {
+        r = RdmaResult::null();
+    }
+
+    env->DeleteLocalRef(integer);
+    env->DeleteLocalRef(boolean);
+    env->DeleteLocalRef(string);
+    env->DeleteLocalRef(dbl);
+    env->DeleteLocalRef(lng);
+    env->DeleteLocalRef(flt);
+    return r;
+}
+
 // ----------------------------------------------------------------- proxies
 
 class StateProxyHost : public jsi::HostObject {
@@ -190,11 +273,24 @@ public:
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "get_value"), 0,
                 [state = state_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    if (g_inComposition) {
+                        // Rendezvous to the UI thread so Compose's snapshot read
+                        // observer records the dependency on this state.
+                        RdmaResult res = rdmaCallUi([state]() -> RdmaResult {
+                            JNIEnv* e = getEnv(g_composeCache.jvm);
+                            if (!e) return RdmaResult::undefined();
+                            jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
+                            RdmaResult r2 = classifyBoxedValue(e, v);
+                            if (v) e->DeleteLocalRef(v);
+                            return r2;
+                        });
+                        return rdmaResultToJsi(r, res);
+                    }
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
                     jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
                     jsi::Value out = unboxJni(e, r, v);
-                    e->DeleteLocalRef(v);
+                    if (v) e->DeleteLocalRef(v);
                     return out;
                 });
         }
@@ -223,8 +319,8 @@ private:
     jobject state_; // global ref
 };
 
-jsi::Object makeStateProxy(jsi::Runtime& rt, jobject state) {
-    auto host = std::make_shared<StateProxyHost>(state);
+jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal) {
+    auto host = std::make_shared<StateProxyHost>(stateGlobal);
     return jsi::Object::createFromHostObject(rt, host);
 }
 
@@ -258,13 +354,18 @@ public:
                     auto fn = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
                     int64_t id = g_nextScopeBlockId++;
                     g_scopeBlocks[id] = fn;
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value::undefined();
-                    jobject block = e->NewObject(g_composeCache.scopeBlockClass, g_composeCache.scopeBlockCtor, (jlong)id);
-                    if (block) {
-                        e->CallVoidMethod(scope, g_composeCache.updateScope, block);
-                        e->DeleteLocalRef(block);
-                    }
+                    // ScopeUpdateScope.updateScope is a Compose-runtime call and must run
+                    // on the UI thread; only the JS block registration happens here.
+                    rdmaCallUi([scope, id]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        jobject block = e->NewObject(g_composeCache.scopeBlockClass, g_composeCache.scopeBlockCtor, (jlong)id);
+                        if (block) {
+                            e->CallVoidMethod(scope, g_composeCache.updateScope, block);
+                            e->DeleteLocalRef(block);
+                        }
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -275,60 +376,103 @@ private:
     jobject scope_; // global ref
 };
 
-jsi::Object makeScopeUpdateScopeProxy(jsi::Runtime& rt, jobject scope) {
-    JNIEnv* env = getEnv(g_composeCache.jvm);
-    jobject global = env->NewGlobalRef(scope);
-    auto host = std::make_shared<ScopeUpdateScopeProxyHost>(global);
+jsi::Object makeScopeUpdateScopeProxy(jsi::Runtime& rt, jobject scopeGlobal) {
+    auto host = std::make_shared<ScopeUpdateScopeProxyHost>(scopeGlobal);
     return jsi::Object::createFromHostObject(rt, host);
 }
 
 static void setCurrentComposer(jobject composer) {
-    JNIEnv* env = getEnv(g_composeCache.jvm);
-    if (!env) return;
-    if (g_currentComposer) {
-        env->DeleteGlobalRef(g_currentComposer);
-        g_currentComposer = nullptr;
-    }
-    if (composer) {
-        g_currentComposer = env->NewGlobalRef(composer);
-    }
+    g_currentComposer = composer; // borrowed global ref, owned by the content/scope task
 }
 
-void invokeRegisteredContent(jsi::Runtime& rt, jobject composer) {
+// ------------------------------------------------------------------- result
+
+jsi::Value rdmaResultToJsi(jsi::Runtime& rt, RdmaResult& result) {
+    switch (result.kind) {
+        case RdmaResultKind::Undefined: return jsi::Value::undefined();
+        case RdmaResultKind::Null: return jsi::Value::null();
+        case RdmaResultKind::Bool: return jsi::Value(result.b);
+        case RdmaResultKind::Number: return jsi::Value(result.num);
+        case RdmaResultKind::String: return jsi::String::createFromUtf8(rt, result.str);
+        case RdmaResultKind::Empty:
+            return g_empty ? jsi::Value(rt, *g_empty) : jsi::Value::undefined();
+        case RdmaResultKind::JsValueId: {
+            auto it = g_jsValues.find(result.id);
+            if (it != g_jsValues.end()) return jsi::Value(rt, *it->second);
+            return jsi::Value::undefined();
+        }
+        case RdmaResultKind::StateRef: {
+            if (!result.ref) return jsi::Value::null();
+            jobject ref = result.ref;
+            result.ref = nullptr; // ownership transferred to the proxy
+            return makeStateProxy(rt, ref);
+        }
+        case RdmaResultKind::ScopeRef: {
+            if (!result.ref) return jsi::Value::null();
+            jobject ref = result.ref;
+            result.ref = nullptr; // ownership transferred to the proxy
+            return makeScopeUpdateScopeProxy(rt, ref);
+        }
+    }
+    return jsi::Value::undefined();
+}
+
+// ------------------------------------------------------------- content/scope
+
+void invokeRegisteredContent(jsi::Runtime& rt, jobject composerGlobal) {
     if (!g_content) {
         LOGW("No content registered");
         return;
     }
-    setCurrentComposer(composer);
-    jsi::Object proxy = makeComposerProxy(rt, composer);
+    jobject prevComposer = g_currentComposer;
+    bool prevInComposition = g_inComposition;
+    setCurrentComposer(composerGlobal);
+    g_inComposition = true;
+    jsi::Object proxy = makeComposerProxy(rt, composerGlobal);
     try {
         g_content->call(rt, proxy, 0);
     } catch (const jsi::JSError& e) {
         LOGW("JSError in content: %s\n%s", e.what(), e.getStack().c_str());
     }
+    g_inComposition = prevInComposition;
+    setCurrentComposer(prevComposer);
 }
 
-void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composer, jint changed) {
+void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composerGlobal, jint changed) {
     auto it = g_scopeBlocks.find(blockId);
     if (it == g_scopeBlocks.end()) return;
-    setCurrentComposer(composer);
-    jsi::Object proxy = makeComposerProxy(rt, composer);
+    jobject prevComposer = g_currentComposer;
+    bool prevInComposition = g_inComposition;
+    setCurrentComposer(composerGlobal);
+    g_inComposition = true;
+    jsi::Object proxy = makeComposerProxy(rt, composerGlobal);
     try {
         it->second->call(rt, proxy, changed);
     } catch (const jsi::JSError& e) {
         LOGW("JSError in scope block: %s\n%s", e.what(), e.getStack().c_str());
     }
+    g_inComposition = prevInComposition;
+    setCurrentComposer(prevComposer);
 }
 
-void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
+// ------------------------------------------------------------ init (JNI/JSI)
+
+void initRdmaComposeJniCache(JNIEnv* env) {
+    JavaVM* jvm = nullptr;
+    env->GetJavaVM(&jvm);
     g_composeCache.jvm = jvm;
-    JNIEnv* env = getEnv(jvm);
-    if (!env || !initComposeJniCache(env)) {
-        LOGW("Compose bridge init failed");
+    if (!initComposeJniCache(env)) {
+        LOGW("Compose bridge JNI cache init failed");
         return;
     }
     initComposerProxyCache(env);
+    if (g_userBridgeJniInit) {
+        g_userBridgeJniInit(env);
+    }
+    LOGI("Compose + user bridge JNI caches initialized");
+}
 
+void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
     jsi::Object rdma(rt);
 
     auto registerFn = jsi::Function::createFromHostFunction(
@@ -359,14 +503,24 @@ void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
             if (!e || count < 1) return jsi::Value::undefined();
             jobject boxed = boxJsi(e, r, args[0]);
             if (!boxed) return jsi::Value::undefined();
-            jobject policy = e->CallStaticObjectMethod(g_composeCache.snapshotStateKt, g_composeCache.structuralEqualityPolicy);
-            jobject state = e->CallStaticObjectMethod(g_composeCache.snapshotStateKt, g_composeCache.mutableStateOf, boxed, policy);
+            jobject boxedG = e->NewGlobalRef(boxed);
             e->DeleteLocalRef(boxed);
-            e->DeleteLocalRef(policy);
-            if (!state) return jsi::Value::undefined();
-            jobject global = e->NewGlobalRef(state);
-            e->DeleteLocalRef(state);
-            return makeStateProxy(r, global);
+            // SnapshotMutableState must be created on the UI thread inside the active
+            // snapshot; creating it on the Hermes thread would bind it to the wrong
+            // snapshot (and reads during composition would throw).
+            RdmaResult result = rdmaCallUi([boxedG]() -> RdmaResult {
+                JNIEnv* e = getEnv(g_composeCache.jvm);
+                if (!e) return RdmaResult::undefined();
+                jobject policy = e->CallStaticObjectMethod(g_composeCache.snapshotStateKt, g_composeCache.structuralEqualityPolicy);
+                jobject state = e->CallStaticObjectMethod(g_composeCache.snapshotStateKt, g_composeCache.mutableStateOf, boxedG, policy);
+                e->DeleteLocalRef(policy);
+                if (boxedG) e->DeleteGlobalRef(boxedG);
+                if (!state) return RdmaResult::undefined();
+                jobject global = e->NewGlobalRef(state);
+                e->DeleteLocalRef(state);
+                return RdmaResult::stateRef(global);
+            });
+            return rdmaResultToJsi(r, result);
         });
     rdma.setProperty(rt, "mutableStateOf", std::move(mutableStateOfFn));
 
@@ -391,70 +545,115 @@ void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
     LOGI("Compose bridge installed");
 }
 
-// -------------------------------------------------------------------- JNI
+// ---------------------------------------------------- callback/lambda (JS side)
+
+static void runCallback(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal) {
+    auto it = g_scopeBlocks.find(blockId);
+    if (it == g_scopeBlocks.end()) return;
+    std::vector<jsi::Value> jsArgs;
+    if (argsGlobal) {
+        JNIEnv* env = getEnv(g_composeCache.jvm);
+        if (env) {
+            jsize n = env->GetArrayLength(argsGlobal);
+            jsArgs.reserve(n);
+            for (jsize i = 0; i < n; i++) {
+                jobject elem = env->GetObjectArrayElement(argsGlobal, i);
+                jsArgs.push_back(unboxJni(env, rt, elem));
+                if (elem) env->DeleteLocalRef(elem);
+            }
+        }
+    }
+    const jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
+    it->second->call(rt, callArgs, jsArgs.size());
+}
+
+static void runLambda(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal) {
+    auto it = g_scopeBlocks.find(blockId);
+    if (it == g_scopeBlocks.end()) return;
+    std::vector<jsi::Value> jsArgs;
+    if (argsGlobal) {
+        JNIEnv* env = getEnv(g_composeCache.jvm);
+        if (env) {
+            jsize n = env->GetArrayLength(argsGlobal);
+            jsArgs.reserve(n);
+            for (jsize i = 0; i < n; i++) {
+                jobject elem = env->GetObjectArrayElement(argsGlobal, i);
+                jsArgs.push_back(unboxJni(env, rt, elem));
+                if (elem) env->DeleteLocalRef(elem);
+            }
+        }
+    }
+    const jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
+    // Return value intentionally ignored: service lambdas are Unit-returning and
+    // execute asynchronously.
+    it->second->call(rt, callArgs, jsArgs.size());
+}
+
+static void deleteGlobalRef(jobject ref) {
+    if (!ref) return;
+    JNIEnv* env = getEnv(g_composeCache.jvm);
+    if (env) env->DeleteGlobalRef(ref);
+}
 
 } // namespace rdma
 } // namespace facebook
+
+// -------------------------------------------------------------------- JNI
 
 extern "C" JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeContent(
     JNIEnv* env, jclass, jobject composer) {
     using namespace facebook::rdma;
-    facebook::jsi::Runtime* rt = getRdmaRuntime();
-    if (!rt) return;
-    invokeRegisteredContent(*rt, composer);
+    if (!rdmaIsReady()) return;
+    jobject composerGlobal = env->NewGlobalRef(composer);
+    rdmaCallJs([composerGlobal] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            invokeRegisteredContent(*rt, composerGlobal);
+        }
+        deleteGlobalRef(composerGlobal);
+    });
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeScopeBlock(
     JNIEnv* env, jclass, jlong blockId, jobject composer, jint changed) {
     using namespace facebook::rdma;
-    facebook::jsi::Runtime* rt = getRdmaRuntime();
-    if (!rt) return;
-    invokeScopeBlock(*rt, blockId, composer, changed);
+    jobject composerGlobal = env->NewGlobalRef(composer);
+    rdmaCallJs([blockId, composerGlobal, changed] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            invokeScopeBlock(*rt, blockId, composerGlobal, changed);
+        }
+        deleteGlobalRef(composerGlobal);
+    });
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeCallback(
     JNIEnv* env, jclass, jlong blockId, jobjectArray args) {
     using namespace facebook::rdma;
-    facebook::jsi::Runtime* rt = getRdmaRuntime();
-    if (!rt) return;
-    auto it = g_scopeBlocks.find(blockId);
-    if (it == g_scopeBlocks.end()) return;
-    std::vector<facebook::jsi::Value> jsArgs;
-    if (args) {
-        jsize n = env->GetArrayLength(args);
-        jsArgs.reserve(n);
-        for (jsize i = 0; i < n; i++) {
-            jobject elem = env->GetObjectArrayElement(args, i);
-            jsArgs.push_back(unboxJni(env, *rt, elem));
-            if (elem) env->DeleteLocalRef(elem);
+    jobjectArray argsGlobal = args ? (jobjectArray)env->NewGlobalRef(args) : nullptr;
+    rdmaPostJs([blockId, argsGlobal] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            runCallback(*rt, blockId, argsGlobal);
         }
-    }
-    const facebook::jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
-    it->second->call(*rt, callArgs, jsArgs.size());
+        deleteGlobalRef(argsGlobal);
+    });
 }
 
 extern "C" JNIEXPORT jobject JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeLambda(
     JNIEnv* env, jclass, jlong blockId, jobjectArray args) {
     using namespace facebook::rdma;
-    facebook::jsi::Runtime* rt = getRdmaRuntime();
-    if (!rt) return nullptr;
-    auto it = g_scopeBlocks.find(blockId);
-    if (it == g_scopeBlocks.end()) return nullptr;
-    std::vector<facebook::jsi::Value> jsArgs;
-    if (args) {
-        jsize n = env->GetArrayLength(args);
-        jsArgs.reserve(n);
-        for (jsize i = 0; i < n; i++) {
-            jobject elem = env->GetObjectArrayElement(args, i);
-            jsArgs.push_back(unboxJni(env, *rt, elem));
-            if (elem) env->DeleteLocalRef(elem);
+    jobjectArray argsGlobal = args ? (jobjectArray)env->NewGlobalRef(args) : nullptr;
+    rdmaPostJs([blockId, argsGlobal] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            runLambda(*rt, blockId, argsGlobal);
         }
-    }
-    const facebook::jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
-    facebook::jsi::Value result = it->second->call(*rt, callArgs, jsArgs.size());
-    return boxJsi(env, *rt, result);
+        deleteGlobalRef(argsGlobal);
+    });
+    return nullptr; // async: no result
 }

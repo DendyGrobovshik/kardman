@@ -48,9 +48,14 @@ public:
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
 
-                    jobject result = e->CallObjectMethod(self->composer_, g_composerProxyCache.startRestartGroup, p0);
+                    rdmaCallUi([composer = self->composer_, p0]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        jobject result = e->CallObjectMethod(composer, g_composerProxyCache.startRestartGroup, p0);
+                        if (result) e->DeleteLocalRef(result);
 
-                    if (result) e->DeleteLocalRef(result); // ComposerImpl returns `this`
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Object::createFromHostObject(r, self);
                 });
         }
@@ -62,12 +67,17 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::null();
 
-                    jobject scope = e->CallObjectMethod(self->composer_, g_composerProxyCache.endRestartGroup);
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::null();
+                        jobject scope = e->CallObjectMethod(composer, g_composerProxyCache.endRestartGroup);
 
-                    if (!scope) return jsi::Value::null();
-                    jsi::Object proxy = makeScopeUpdateScopeProxy(r, scope);
-                    e->DeleteLocalRef(scope);
-                    return proxy;
+                        if (!scope) return RdmaResult::null();
+                        jobject global = e->NewGlobalRef(scope);
+                        e->DeleteLocalRef(scope);
+                        return RdmaResult::scopeRef(global);
+                    });
+                    return rdmaResultToJsi(r, result);
                 });
         }
         if (n.rfind("startReplaceGroup", 0) == 0) {
@@ -79,8 +89,13 @@ public:
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
 
-                    e->CallVoidMethod(self->composer_, g_composerProxyCache.startReplaceGroup, p0);
+                    rdmaCallUi([composer = self->composer_, p0]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.startReplaceGroup, p0);
 
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -92,8 +107,13 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    e->CallVoidMethod(self->composer_, g_composerProxyCache.endReplaceGroup);
+                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.endReplaceGroup);
 
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -106,10 +126,17 @@ public:
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
                     jobject p1 = count > 1 ? boxJsi(e, r, args[1]) : nullptr;
-
-                    e->CallVoidMethod(self->composer_, g_composerProxyCache.startMovableGroup, p0, p1);
+                    jobject p1g = p1 ? e->NewGlobalRef(p1) : nullptr;
                     if (p1) e->DeleteLocalRef(p1);
 
+                    rdmaCallUi([composer = self->composer_, p0, p1g]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.startMovableGroup, p0, p1g);
+                    if (p1g) e->DeleteGlobalRef(p1g);
+
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -121,8 +148,13 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    e->CallVoidMethod(self->composer_, g_composerProxyCache.endMovableGroup);
+                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.endMovableGroup);
 
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -135,10 +167,17 @@ public:
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
                     jobject p1 = count > 1 ? boxJsi(e, r, args[1]) : nullptr;
-
-                    e->CallVoidMethod(self->composer_, g_composerProxyCache.startReusableGroup, p0, p1);
+                    jobject p1g = p1 ? e->NewGlobalRef(p1) : nullptr;
                     if (p1) e->DeleteLocalRef(p1);
 
+                    rdmaCallUi([composer = self->composer_, p0, p1g]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.startReusableGroup, p0, p1g);
+                    if (p1g) e->DeleteGlobalRef(p1g);
+
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -150,8 +189,13 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    e->CallVoidMethod(self->composer_, g_composerProxyCache.endReusableGroup);
+                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.endReusableGroup);
 
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -163,8 +207,13 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    e->CallVoidMethod(self->composer_, g_composerProxyCache.skipCurrentGroup);
+                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.skipCurrentGroup);
 
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -176,8 +225,13 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    e->CallVoidMethod(self->composer_, g_composerProxyCache.skipToGroupEnd);
+                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.skipToGroupEnd);
 
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -188,34 +242,35 @@ public:
                 [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
-                    jobject v = e->CallObjectMethod(self->composer_, g_composerProxyCache.rememberedValue);
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        jobject v = e->CallObjectMethod(composer, g_composerProxyCache.rememberedValue);
 
-                    jobject companion = e->GetStaticObjectField(g_composeCache.composerClass, g_composeCache.composerCompanionField);
-                    jobject empty = e->CallObjectMethod(companion, g_composeCache.getEmpty);
-                    e->DeleteLocalRef(companion);
-                    bool isEmpty = e->IsSameObject(v, empty);
-                    e->DeleteLocalRef(empty);
-                    if (isEmpty) {
-                        e->DeleteLocalRef(v);
-                        return g_empty ? jsi::Value(r, *g_empty) : jsi::Value::undefined();
-                    }
-                    if (e->IsInstanceOf(v, g_composeCache.mutableStateClass)) {
-                        jobject global = e->NewGlobalRef(v);
-                        e->DeleteLocalRef(v);
-                        return makeStateProxy(r, global);
-                    }
-                    if (e->IsInstanceOf(v, g_composeCache.jsValueHolderClass)) {
-                        jlong id = e->CallLongMethod(v, g_composeCache.jsValueHolderGetId);
-                        e->DeleteLocalRef(v);
-                        auto it = g_jsValues.find(id);
-                        if (it != g_jsValues.end()) {
-                            return jsi::Value(r, *it->second);
+                        jobject companion = e->GetStaticObjectField(g_composeCache.composerClass, g_composeCache.composerCompanionField);
+                        jobject empty = e->CallObjectMethod(companion, g_composeCache.getEmpty);
+                        e->DeleteLocalRef(companion);
+                        bool isEmpty = e->IsSameObject(v, empty);
+                        e->DeleteLocalRef(empty);
+                        if (isEmpty) {
+                            if (v) e->DeleteLocalRef(v);
+                            return RdmaResult::empty();
                         }
-                        return jsi::Value::undefined();
-                    }
-                    jsi::Value out = unboxJni(e, r, v);
-                    e->DeleteLocalRef(v);
-                    return out;
+                        if (e->IsInstanceOf(v, g_composeCache.mutableStateClass)) {
+                            jobject global = e->NewGlobalRef(v);
+                            e->DeleteLocalRef(v);
+                            return RdmaResult::stateRef(global);
+                        }
+                        if (e->IsInstanceOf(v, g_composeCache.jsValueHolderClass)) {
+                            jlong id = e->CallLongMethod(v, g_composeCache.jsValueHolderGetId);
+                            e->DeleteLocalRef(v);
+                            return RdmaResult::jsValueId((int64_t)id);
+                        }
+                        RdmaResult r2 = classifyBoxedValue(e, v);
+                        e->DeleteLocalRef(v);
+                        return r2;
+                    });
+                    return rdmaResultToJsi(r, result);
                 });
         }
         if (n.rfind("updateRememberedValue", 0) == 0) {
@@ -235,16 +290,26 @@ public:
                         auto obj = std::make_shared<jsi::Object>(args[0].asObject(r));
                         int64_t id = g_nextJsValueId++;
                         g_jsValues[id] = obj;
-                        stored = e->NewObject(g_composeCache.jsValueHolderClass, g_composeCache.jsValueHolderCtor, (jlong)id);
+                        jobject local = e->NewObject(g_composeCache.jsValueHolderClass, g_composeCache.jsValueHolderCtor, (jlong)id);
+                        stored = e->NewGlobalRef(local);
+                        e->DeleteLocalRef(local);
                         deleteStored = true;
                     } else {
-                        stored = boxJsi(e, r, args[0]);
+                        jobject local = boxJsi(e, r, args[0]);
+                        stored = local ? e->NewGlobalRef(local) : nullptr;
+                        if (local) e->DeleteLocalRef(local);
                         deleteStored = true;
                     }
-                    if (stored) {
-                        e->CallVoidMethod(self->composer_, g_composerProxyCache.updateRememberedValue, stored);
-                        if (deleteStored) e->DeleteLocalRef(stored);
-                    }
+                    // Always call updateRememberedValue (even with null) so the slot is
+                    // appended on the first composition. Skipping it for Unit/undefined
+                    // would misalign the slot table on recomposition.
+                    rdmaCallUi([composer = self->composer_, stored, deleteStored]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.updateRememberedValue, stored);
+                        if (deleteStored && stored) e->DeleteGlobalRef(stored);
+                        return RdmaResult::undefined();
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -265,9 +330,16 @@ public:
                             arg = boxJsi(e, r, args[0]);
                         }
                     }
-                    jboolean res = e->CallBooleanMethod(self->composer_, g_composerProxyCache.changed, arg);
+                    jobject argG = arg ? e->NewGlobalRef(arg) : nullptr;
                     if (arg) e->DeleteLocalRef(arg);
-                    return jsi::Value((bool)res);
+                    RdmaResult result = rdmaCallUi([composer = self->composer_, argG]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::boolean(true);
+                        jboolean res = e->CallBooleanMethod(composer, g_composerProxyCache.changed, argG);
+                        if (argG) e->DeleteGlobalRef(argG);
+                        return RdmaResult::boolean((bool)res);
+                    });
+                    return rdmaResultToJsi(r, result);
                 });
         }
         if (n.rfind("shouldExecute", 0) == 0) {
@@ -280,9 +352,14 @@ public:
                     jboolean p0 = count > 0 && args[0].isBool() ? args[0].getBool() : false;
                     jint p1 = count > 1 && args[1].isNumber() ? (jint)args[1].getNumber() : 0;
 
-                    auto res = e->CallBooleanMethod(self->composer_, g_composerProxyCache.shouldExecute, p0, p1);
+                    RdmaResult result = rdmaCallUi([composer = self->composer_, p0, p1]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::boolean(false);
+                        jboolean res = e->CallBooleanMethod(composer, g_composerProxyCache.shouldExecute, p0, p1);
 
-                    return jsi::Value((bool)res);
+                        return RdmaResult::boolean((bool)res);
+                    });
+                    return rdmaResultToJsi(r, result);
                 });
         }
         if (n.rfind("sourceInformation", 0) == 0) {

@@ -2,7 +2,6 @@
 #include <hermes/hermes.h>
 #include <jni.h>
 #include <string>
-#include <sstream>
 #include <memory>
 #include <android/log.h>
 
@@ -19,45 +18,12 @@ facebook::jsi::Runtime* getRdmaRuntime() {
     return g_runtime.get();
 }
 
-static std::string jsiValueToString(facebook::jsi::Runtime& rt, const facebook::jsi::Value& val) {
-    if (val.isString()) {
-        return val.getString(rt).utf8(rt);
-    }
-    if (val.isNumber()) {
-        std::ostringstream oss;
-        oss << val.getNumber();
-        return oss.str();
-    }
-    if (val.isBool()) {
-        return val.getBool() ? "true" : "false";
-    }
-    if (val.isNull()) {
-        return "null";
-    }
-    if (val.isUndefined()) {
-        return "undefined";
-    }
-    if (val.isObject()) {
-        auto obj = val.getObject(rt);
-        if (obj.isFunction(rt)) {
-            return "[Function]";
-        }
-        facebook::jsi::Object json = rt.global().getPropertyAsObject(rt, "JSON");
-        facebook::jsi::Function stringify = json.getPropertyAsFunction(rt, "stringify");
-        facebook::jsi::Value jsonResult = stringify.call(rt, val);
-        if (jsonResult.isString()) {
-            return jsonResult.getString(rt).utf8(rt);
-        }
-        return "[Object]";
-    }
-    return "[unknown]";
-}
-
 void initRdmaRuntime(JavaVM* jvm) {
     if (g_runtime) return; // already initialized
 
     g_runtime = facebook::hermes::makeHermesRuntime();
 
+    // JSI-only install; JNI caches were already initialized on the UI thread.
     facebook::rdma::installRdmaComposeBridge(*g_runtime, jvm);
 
     // Hermes doesn't have console, globalThis — provide stubs
@@ -111,24 +77,19 @@ void initRdmaRuntime(JavaVM* jvm) {
     LOGI("RDMA runtime initialized with bridge");
 }
 
-void evalJavaScript(const std::string& code, std::string& result) {
+void evalJavaScript(const std::string& code) {
     if (!g_runtime) {
-        result = "Error: RDMA runtime not initialized";
+        LOGW("evalJavaScript: runtime not initialized");
         return;
     }
 
     try {
         auto buffer = std::make_shared<facebook::jsi::StringBuffer>(code);
         auto prepared = g_runtime->prepareJavaScript(buffer, "<eval>");
-        facebook::jsi::Value jsResult = g_runtime->evaluatePreparedJavaScript(prepared);
-        result = jsiValueToString(*g_runtime, jsResult);
+        g_runtime->evaluatePreparedJavaScript(prepared);
     } catch (const facebook::jsi::JSError& e) {
-        std::ostringstream oss;
-        oss << "JSError: " << e.what() << "\n" << e.getStack();
-        result = oss.str();
         LOGW("JSError: %s\n%s", e.what(), e.getStack().c_str());
     } catch (const std::exception& e) {
-        result = std::string("Exception: ") + e.what();
         LOGW("Exception: %s", e.what());
     }
 }

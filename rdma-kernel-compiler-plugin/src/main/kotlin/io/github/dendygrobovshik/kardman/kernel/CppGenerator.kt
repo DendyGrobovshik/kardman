@@ -604,6 +604,11 @@ namespace rdma {
 // user-bridge hook (see RdmaCompose.h / rdmaSetUserBridgeInstaller).
 void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma);
 
+// Initializes all JNI caches (FindClass/GetMethodID) for the user bridge on the
+// UI thread. Registered via rdmaSetUserBridgeJniInit and invoked from
+// initRdmaComposeJniCache() before the Hermes thread starts.
+void initUserBridgeJniCaches(JNIEnv* env);
+
 } // namespace rdma
 } // namespace facebook
 """)
@@ -643,12 +648,15 @@ jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object
             }
         }
         cpp.write("""
-void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
-    JNIEnv* env = getEnv(jvm);
+void initUserBridgeJniCaches(JNIEnv* env) {
+    JavaVM* jvm = nullptr;
+    env->GetJavaVM(&jvm);
     g_rdmaCache.jvm = jvm;
     initJniCache(env);
     initWidgetJniCache(env);
+}
 
+void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
     LOGI("Initializing RDMA user bridge...");
 
 """)
@@ -884,10 +892,7 @@ $body}
             is RdmaType.FunctionType -> {
                 val arity = t.parameters.size
                 "    jlong id_${p.name} = (jlong)args[$i].getNumber();\n" +
-                    "    jclass lambdaCls_${p.name} = env->FindClass(\"io/github/dendygrobovshik/kardman/runtime/RdmaFunction$arity\");\n" +
-                    "    jmethodID lambdaCtor_${p.name} = env->GetMethodID(lambdaCls_${p.name}, \"<init>\", \"(J)V\");\n" +
-                    "    jobject arg_${p.name} = env->NewObject(lambdaCls_${p.name}, lambdaCtor_${p.name}, id_${p.name});\n" +
-                    "    env->DeleteLocalRef(lambdaCls_${p.name});\n"
+                    "    jobject arg_${p.name} = createRdmaFunction(env, $arity, id_${p.name});\n"
             }
             is RdmaType.UnitType -> ""
         }
