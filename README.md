@@ -1,28 +1,105 @@
 # Kardman
 
-Cross-runtime object sharing between kernel JVM (Android) and plugin Hermes (JavaScript engine).  
-Annotate a Kotlin class with `@RDMA` — it becomes available on both runtimes.  
-Plugin code looks like plain Kotlin, but executes in Hermes via JSI/JNI bridge.
+Kardman - framework that allows dynamically load code and UI logic into mobile application.
+
+It connects Kotlin(kernel) and JS(plugin) runtimes in an effective way. 
+There is no naive manual serialization, `@RDMA` objects always located in kernel memory, plugin uses this object as usual, however it works only as proxy.
+It also proxies compose UI logic, so dynamically loaded UI logic modify compose tree in kernel, so you achieve native speed in some use cases.
 
 ## How to use
 
-1. Create a class in `kernel` (compiled to JVM):
+1. Create a class in `kernel` (shipped in app):
    ```kotlin
    @RDMA
    class MyType(val name: String, val value: Int)
    ```
 
-2. Use it in `plugin` (Compiled to js):
+2. Use it in `plugin` (dynamically loaded):
    ```kotlin
    import com.example.kernel.MyType
 
    val x = MyType("hello", 42)
    println(x.name)
    ```
+   
+Regular kotlin code, no need for manual serialization/deserialization. For android it creates `MyType` object in JVM memory and call its methods via proxies by JSI and JNI.
 
-Regular kotlin code, no need for manual serialization/deserialization. It creates `MyType` object in JVM memory and call its methods via proxies by JSI and JNI.
+## `@Compose` UI usecase
 
-3. Build. kernel compiler plugin generates C++ bridge; the FIR compiler plugin rewrites plugin Kotlin into JS proxy calls automatically.
+1. Kernel might provide some basic components
+```kotlin
+@Composable  
+@RDMA  
+fun Spacer(width: Double, height: Double) {  
+    M3Spacer(Modifier.size(width.dp, height.dp))  
+}
+
+@Composable
+@RDMA
+fun Text(text: String) {
+   M3Text(text)
+}
+```
+
+2. Plugin naturally use it
+```kotlin
+@Composable
+fun MyCard() {
+    Text("Title") 
+    M3Spacer(0.0, 8.0)
+    Text("Description")
+}
+```
+
+## Service usecase
+
+1. Define any service in kernel
+```kotlin
+@RDMA
+class HttpClient {
+    fun send(request: String, onResponse: (String) -> Unit) { ... } // uses IO thread
+}
+```
+
+2. And easily use it in plugin offloading all heavy network work to IO thread
+```kotlin
+@Composable
+fun ProductTitle() {
+    val title = remember { mutableStateOf("") }
+
+    remember {
+        HttpClient().send("GET https://api/product/123") { response ->
+            val name = runCatching {
+                json.parseToJsonElement(response).jsonObject["name"]!!.jsonPrimitive.content
+            }.getOrDefault("")
+            title.value = name
+        }
+    }
+
+    Text(title.value)
+}
+```
+
+## Open `@RDMA` class
+
+1. Kernel defines open class
+```kotlin
+@RDMA
+open class Animal(val name: String) {
+    open fun speak(): String = "..."
+    open fun speakTwice(): String = "${speak()} ${speak()}"
+    fun upperName(): String = name.uppercase()
+}
+```
+
+2. Plugin inherits and override
+```kotlin
+class Dog(name: String) : Animal(name) {
+    override fun speak(): String = "Woof!"
+}
+```
+
+While working with `Dog` object overridden method will be called from both plugin and kernel.
 
 ## Project modules
 
@@ -46,7 +123,8 @@ The framework (all modules except `:kernel`, `:kernel-bridge`, `:plugin`, `:shar
 code: `:kernel` generates the bridge C++/Kotlin, `:kernel-bridge` compiles it into
 `librdma_user.so` and registers it with the runtime through the `installUserBridge` hook.
 
-See [docs/architecture.md](docs/architecture.md) for details.
+## Limitations
+#TODO
 
 ## Requirements
 
