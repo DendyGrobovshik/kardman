@@ -15,90 +15,216 @@ limitations under the License.
 -->
 # Features
 
-## Supported
+This document explains *what you can do* with the framework and, just as
+importantly, *how to think about it*. It is a narrative, not a reference dump —
+the compiler plugins give you a model where both sides look like plain Kotlin.
+For the runtime mechanics see [architecture.md](architecture.md); for the formal
+type contract see [types.md](types.md); for how the code gets generated see
+[codegen.md](codegen.md).
 
-### Types
+## The mental model
 
-| Kotlin type | Status | Notes |
+The framework connects two runtimes — the **kernel** (JVM/Android) and the
+**plugin** (Hermes/JavaScript). The key promise is that **both sides are just
+Kotlin**. You don't write serialization code, glue code, or a foreign-function
+interface by hand:
+
+```kotlin
+// kernel — shipped inside the app
+@RDMA
+class Person(val name: String, val age: Int)
+
+// plugin — loaded at runtime
+import com.example.kernel.Person
+
+val p = Person("Иван", 30)
+println(p.name)
+```
+
+The only thing you ever do differently from a normal Kotlin project is put
+`@RDMA` on the declarations that may cross the boundary. That annotation *is*
+the boundary: it declares, for each type, exactly what the plugin is allowed to
+see and call.
+
+Everything else is handled by the compiler plugins: they scan the kernel for
+`@RDMA` declarations, generate the C++ bridge, and rewrite the plugin source so
+that the ordinary-looking calls above actually round-trip over JSI/JNI.
+
+There are **two different realities** behind this single mental model, and it
+helps to keep them separate:
+
+- **Data** — a `@RDMA` object always lives in kernel (JVM) memory. The plugin
+  never gets a copy; it gets a *handle* that proxies every call back to the real
+  object. A primitive, by contrast, is copied.
+- **UI** — the Compose tree also lives in the kernel. The plugin is a
+  *`@Composable` guest* that describes the tree; the kernel's Compose runtime
+  actually renders it.
+
+Both are "just Kotlin", but the direction of control differs: for data, the
+plugin calls *into* the kernel; for UI, the kernel pulls composition *out of* the
+plugin.
+
+## The language: what crosses the bridge
+
+### What can be `@RDMA`
+
+Four kinds of declarations can be marked `@RDMA`:
+
+1. **A class** — a shared data type. The plugin can construct it, read and write
+   its properties, and call its methods.
+2. **An `open` class** — the plugin can *subclass* it and override its `open`
+   methods (see below).
+3. **A companion `val`** — a static/singleton value, exposed as
+   `RDMA.<Class><Name>()` (e.g. `Alignment.Center`).
+4. **A top-level function** — either a plain function or a widget. A function
+   that is also `@Composable` becomes a **widget** (see the UI section).
+
+### The types that may cross
+
+The plugin can only touch values whose type is on the allowed list. Types are
+validated recursively — including inside `List<T>` and function signatures — and
+a violation is a **compile error**, not a runtime failure.
+
+| Type | How it crosses | Where the value lives |
 |---|---|---|
-| `String` | Supported | |
-| `Int` | Supported | |
-| `Long` | Supported | |
-| `Float` | Supported | |
-| `Double` | Supported | |
-| `Boolean` | Supported | |
-| `Unit` / `void` | Supported | Return type only |
-| `@RDMA class` | Supported | As parameter and return type |
-| Literals in constructor args | Supported | `"str"`, `42`, `true` |
-| Variable refs in constructor args | Supported | `Person(p)`, `Person(x, 5)` |
+| `Int`, `Long`, `Float`, `Double`, `Boolean`, `String` | by copy | a copy on each side |
+| nullable variants (e.g. `String?`) | by copy (may be `null`) | as above |
+| `@RDMA` class | by reference (handle) | only in kernel memory |
+| `List<T>` / `MutableList<T>` of an allowed `T` | by reference (handle) | materialized in kernel memory |
+| function / lambda type | registration + callback | body lives in the plugin; kernel holds an id |
+| `Unit` | — | return type only |
 
-### Constructors
+Two of these deserve a note:
 
-- Primary constructor with any number of parameters
-- Parameter types: all supported types (primitives + @RDMA classes)
+- **`@RDMA` references are handles.** The object is created once in the kernel;
+  every property read and method call on the handle mutates the *kernel* object.
+  There is no object identity across runtimes — each call that crosses back
+  produces a fresh handle to the same underlying object.
+- **`List<T>` is a special case.** A list first created in the plugin is
+  materialized into a kernel-side `ArrayList` on its first crossing and kept
+  there from then on, so element mutation happens on the kernel side.
 
-### Properties
+### What the plugin can write
 
-- Access via getter methods: `.name` → `getName()`
-- Auto-transformed by plugin build script
-- Companion-object `val`s (statics) — exposed as `RDMA.<class><Name>()` singletons
-  (e.g. `Alignment.Center` → `rdmaAlignmentCenter()`)
+This is where the model really pays off. The plugin writes idiomatic Kotlin, and
+the FIR compiler plugin rewrites it. The table shows a few representative
+rewrites (full list in [codegen.md](codegen.md)):
 
-### Methods
+| You write | The compiler emits |
+|---|---|
+| `Person("str", 42)` | `RDMA.createPerson('str', 42)` |
+| `p.name` | `p.getName()` |
+| `p.status = "x"` | `p.setStatus("x")` |
+| `p.toString()` | unchanged — dispatches dynamically on the JS proxy |
+| `Alignment.Center` | `rdmaAlignmentCenter()` |
+| `class Cyborg(n: String) : Person(n, 0) { override fun greet() = "..." }` | `RDMA.createWithOverrides('Person', [...], { greet: function() { return "..."; } })` |
+| `Text("hi")` (a widget) | `rdmaText("hi")` |
 
-- Any method name, any number of parameters
-- Return types: all supported types (primitives + @RDMA classes)
-- `toString()` — always available (via Kotlin `Any`)
+What falls out of this:
 
-### Code generation
+- **Constructors** — the primary constructor, any number of parameters, with
+  literals or variable references as arguments.
+- **Properties** — both `val` and `var`. Property access becomes getter/setter
+  methods, so a `var` is writable from the plugin.
+- **Methods** — any public method; return type may be any allowed type. Calls
+  pass through unchanged and dispatch on the JS proxy.
+- **Inheritance** — subclass a kernel `open` class and override its `open`
+  methods. Overridden methods are called from *both* the plugin and the kernel
+  (via the vtable — see [codegen.md](codegen.md)). Overrides currently need an
+  expression body (`= expr`).
+- **Statics** — companion `val`s become singleton getters.
 
-- C++ bridge generated automatically via the kernel compiler plugin
-- JNI methodID caching — `FindClass`/`GetMethodID` called once at init
-- JVM object lifetime managed via `NativeState` destructor (`DeleteGlobalRef`)
-- Multiple @RDMA classes in any files — detected automatically
+### The invariant and what's rejected
 
-### Plugin transformation
+Every type that appears in an `@RDMA` declaration — property, method parameter
+or return, function parameter or return, and anything nested inside a `List` or
+function signature — must be an allowed type. A non-`@RDMA` class on the
+boundary is a compile error. Concretely, the following are **not** supported:
 
-- Auto-detects @RDMA types via `rdma_manifest.json` manifest (qualified names)
-- Resolve-based rewriting via FIR compiler plugin: knows the concrete class/method at each call site
-- Transforms constructor calls: `Person("str", 42)` → `js("RDMA.createPerson('str', 42)")`
-- Transforms property access: `.name` → `.getName()`, `.status = v` → `.setStatus(v)`
-- Transforms inheritance: `class Cyborg : Person` + overrides → `RDMA.createWithOverrides(...)`
-- Method calls pass through unchanged (dynamic dispatch)
+- composite value types without `@RDMA` (data classes, `enum`, `Array`, `Map`);
+- generics other than the `List<T>` special case;
+- secondary/overloaded constructors, named arguments, default parameter values;
+- overloaded methods, extension functions, `suspend`/coroutine functions.
 
-## Not yet supported
+## UI
 
-### Types
-- `List<T>`, `Array<T>`, `Map<K,V>`
-- Nullable types (`String?`)
-- Custom value types / data classes (non-@RDMA)
-- Enum classes
+UI follows the same "just Kotlin" idea but with the direction of control
+reversed: the **kernel owns the Compose runtime** and renders everything; the
+plugin is a guest that *describes* the tree. The plugin therefore does not get
+the full Compose surface — it gets a **base protocol** (the structural
+`Composer` methods) plus the widgets the kernel exposes.
 
-### Constructors
-- Overloaded / secondary constructors
-- Named parameters
-- Default parameter values
+### Two kinds of widgets
 
-### Properties
-- Native JS property access (`.name` without getter) — uses `getName()` methods instead
-- Mutable property setters (generated in C++ but not tested end-to-end)
-- Lateinit / delegated properties
+- **Primitive** widgets (`Text`, `Column`, `Button`, `TextField`) are
+  `@Composable` functions declared in the kernel with `@RDMA` and a real
+  material3 body. They are the only widgets the kernel knows how to render, so
+  they can only live in the kernel.
+- **Composite** widgets are ordinary `@Composable` functions built from
+  primitives and other composites. They can live anywhere — kernel or plugin. A
+  plugin composite's `content` lambda executes in the JS runtime.
 
-### Methods
-- Overloaded methods (same name, different signatures)
-- Extension functions
-- Suspend / coroutine functions
-- Default parameter values
+### What the plugin can express
 
-### Plugin transformation
-- Inherited properties/methods on deeper subclass hierarchies (resolved via supertype chain, but not yet tested end-to-end)
-- Block-body override functions in subclasses (only expression bodies `= expr` are handled)
-- Inline string interpolation in constructor args
-- Overloaded / secondary constructors
+```kotlin
+@Composable
+fun Counter() {
+    var count by remember { mutableStateOf(0) }
+    Column {
+        Text("Count: $count")
+        Button("Increment", onClick = { count++ })
+    }
+}
 
-### Runtime
-- Circular references across runtimes (JVM ↔ Hermes)
-- JNI exception propagation to JS
-- Async / Promise return types
-- Object identity / `equals()` across runtimes (each call creates separate Handle)
-- Batch operations / bulk transfers
+fun main() {
+    runRdmaApp { Counter() }
+}
+```
+
+Allowed in the plugin: `@Composable` functions/lambdas, `remember { ... }` (with
+keys), `mutableStateOf` + `getValue`/`setValue` (the `var x by ...` delegation),
+and the kernel's `@RDMA` widgets. `runRdmaApp { ... }` installs the root content.
+
+Lambdas matter here. The compiler distinguishes two kinds of function
+parameters on a widget:
+
+- a **content lambda** (a `@Composable () -> Unit` parameter, e.g. `Column`'s
+  `content`) — its body runs in the plugin and composes against the host;
+- a **callback** (a plain `() -> Unit`, e.g. `Button`'s `onClick`) — registered
+  in JS and invoked by the kernel on events like taps.
+
+Because the kernel must be able to faithfully execute whatever the plugin
+composes, everything else from `androidx.compose.*` is rejected at compile time.
+Forbidden: effects (`LaunchedEffect`, `DisposableEffect`, `SideEffect`),
+`derivedStateOf`, `snapshotFlow`, `rememberCoroutineScope`, `movableContentOf`,
+`produceState`, animations, and any other Compose symbol outside the allowlist.
+The error is explicit:
+
+```
+kernel doesn't support 'LaunchedEffect' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
+```
+
+## Dynamic loading
+
+The plugin is compiled to a JavaScript bundle that Hermes **evaluates at
+runtime** — it is never baked into the app binary as native or bytecode. Today
+the app ships the bundle in its assets and loads it with `RdmaBridge.nativeEvalAsset(...)`.
+Because the runtime simply evals JS source, the same bundle can equally be
+fetched over the network at runtime (an upcoming, separate module), giving
+app-update-free updates of both plugin logic and UI.
+
+## At a glance
+
+**Supported** — `@RDMA` classes (incl. `open` + plugin subclasses), properties
+(`val`/`var`), public methods, companion statics, `@RDMA` top-level functions
+and widgets; types `Int`/`Long`/`Float`/`Double`/`Boolean`/`String` (nullable
+allowed), `@RDMA` references, `List<T>`, lambdas, `Unit` returns; UI via the base
+Compose protocol (`remember`/`mutableStateOf`/widgets + content lambdas and
+callbacks).
+
+**Not yet** — non-`@RDMA` value types (`enum`, `Array`, `Map`, data classes),
+generics beyond `List<T>`; secondary constructors, named/default arguments;
+overloaded methods, extension and `suspend` functions; block-body overrides;
+Compose effects/animations and anything outside the allowlist; cross-runtime
+object identity/`equals`, JNI exception propagation, async/Promise returns,
+batch transfers.

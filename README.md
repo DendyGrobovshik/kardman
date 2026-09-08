@@ -136,6 +136,7 @@ and register it with the runtime through the `installUserBridge` hook.
 ## Docs
 
 - [User guide](docs/user_guide.md)
+- [Features](docs/features.md)
 - [Architecture](docs/architecture.md)
 - [Modules](docs/modules_architecture.md)
 - [Code generation](docs/codegen.md)
