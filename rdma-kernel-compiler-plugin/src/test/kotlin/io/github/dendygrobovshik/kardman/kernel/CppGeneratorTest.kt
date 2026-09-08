@@ -32,8 +32,8 @@ class CppGeneratorTest {
     fun `generates all expected files for Person class`() {
         val generated = generate(createPerson())
 
-        assertTrue("PersonHostObject.h" in generated, "Missing PersonHostObject.h, got: ${generated.keys}")
-        assertTrue("PersonHostObject.cpp" in generated, "Missing PersonHostObject.cpp")
+        assertTrue("PersonProxy.h" in generated, "Missing PersonProxy.h, got: ${generated.keys}")
+        assertTrue("PersonProxy.cpp" in generated, "Missing PersonProxy.cpp")
         assertTrue("RdmaBridge.h" in generated, "Missing RdmaBridge.h")
         assertTrue("RdmaBridge.cpp" in generated, "Missing RdmaBridge.cpp")
         assertTrue("RdmaJniCache.h" in generated, "Missing RdmaJniCache.h")
@@ -78,8 +78,8 @@ class CppGeneratorTest {
 
         val generated = generate(*classes.toTypedArray())
 
-        assertTrue("PersonHostObject.h" in generated, "Missing Person files")
-        assertTrue("VampierHostObject.h" in generated, "Missing Vampier files")
+        assertTrue("PersonProxy.h" in generated, "Missing Person files")
+        assertTrue("VampierProxy.h" in generated, "Missing Vampier files")
         val bridgeCpp = generated["RdmaBridge.cpp"] ?: error("Bridge not generated")
         assertContains(bridgeCpp, "createPerson")
         assertContains(bridgeCpp, "createVampier")
@@ -96,7 +96,7 @@ class CppGeneratorTest {
         )
 
         val generated = generate(mutable)
-        val cpp = generated["DeviceHostObject.cpp"] ?: error("Not generated")
+        val cpp = generated["DeviceProxy.cpp"] ?: error("Not generated")
         assertContains(cpp, "setStatus")
         assertContains(cpp, "PropNameID::forAscii(rt, \"setStatus\")")
         assertContains(cpp, "setProperty(rt, \"setStatus\"")
@@ -150,7 +150,7 @@ class CppGeneratorTest {
         ))
 
         val generated = generate(classes)
-        val cpp = generated["PersonHostObject.cpp"] ?: error("Not generated")
+        val cpp = generated["PersonProxy.cpp"] ?: error("Not generated")
         assertContains(cpp, "= nullptr")
         assertContains(cpp, "isNull()")
         assertContains(cpp, "return jsi::Value::null()")

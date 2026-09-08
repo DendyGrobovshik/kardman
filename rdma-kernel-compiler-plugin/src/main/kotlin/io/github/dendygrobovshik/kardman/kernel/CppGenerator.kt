@@ -31,8 +31,8 @@ class CppGenerator(private val output: (String, String) -> OutputStream) {
         generateJniCacheHeader(classInfos, plainFunctions)
         generateJniCacheCpp(classInfos, plainFunctions)
         for (info in classInfos) {
-            generateHostObjectHeader(info)
-            generateHostObjectCpp(info, classInfos)
+            generateProxyHeader(info)
+            generateProxyCpp(info, classInfos)
         }
         generateBridge(classInfos, plainFunctions)
     }
@@ -171,8 +171,8 @@ void initJniCache(JNIEnv* env) {
         out.close()
     }
 
-    private fun generateHostObjectHeader(info: RdmaClassInfo) {
-        val out = output("${info.className}HostObject.h", "${info.className}HostObject.h").bufferedWriter()
+    private fun generateProxyHeader(info: RdmaClassInfo) {
+        val out = output("${info.className}Proxy.h", "${info.className}Proxy.h").bufferedWriter()
         out.write("""#pragma once
 #include <jsi/jsi.h>
 #include <jni.h>
@@ -206,11 +206,11 @@ jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobjec
         out.close()
     }
 
-    private fun generateHostObjectCpp(info: RdmaClassInfo, allClasses: List<RdmaClassInfo>) {
-        val out = output("${info.className}HostObject.cpp", "${info.className}HostObject.cpp").bufferedWriter()
+    private fun generateProxyCpp(info: RdmaClassInfo, allClasses: List<RdmaClassInfo>) {
+        val out = output("${info.className}Proxy.cpp", "${info.className}Proxy.cpp").bufferedWriter()
         val cacheVar = "${info.className.lowercase()}_cache"
 
-        out.write("""#include "${info.className}HostObject.h"
+        out.write("""#include "${info.className}Proxy.h"
 #include "RdmaJniCache.h"
 #include "ListHandle.h"
 """)
@@ -234,7 +234,7 @@ jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobjec
             }
         }
         for (rdmaName in referencedRdmaTypes) {
-            out.write("#include \"${rdmaName}HostObject.h\"\n")
+            out.write("#include \"${rdmaName}Proxy.h\"\n")
         }
 
         out.write("""
@@ -638,7 +638,7 @@ void initUserBridgeJniCaches(JNIEnv* env);
 #include "RdmaWidgetBridge.h"
 """)
         for (info in infos) {
-            cpp.write("#include \"${info.className}HostObject.h\"\n")
+            cpp.write("#include \"${info.className}Proxy.h\"\n")
         }
         cpp.write("""
 #include <android/log.h>

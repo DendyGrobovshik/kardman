@@ -64,8 +64,8 @@ class IntegrationTest {
         val classes = listOf(personInfo, vampierInfo)
         val cppFiles = generateCpp(classes)
 
-        assertTrue("PersonHostObject.cpp" in cppFiles)
-        assertTrue("VeryOldVampierHostObject.cpp" in cppFiles)
+        assertTrue("PersonProxy.cpp" in cppFiles)
+        assertTrue("VeryOldVampierProxy.cpp" in cppFiles)
         assertTrue("RdmaBridge.cpp" in cppFiles)
 
         val bridge = cppFiles["RdmaBridge.cpp"]!!
@@ -78,7 +78,7 @@ class IntegrationTest {
         val classes = listOf(personInfo, vampierInfo)
         val cppFiles = generateCpp(classes)
 
-        val personCpp = cppFiles["PersonHostObject.cpp"] ?: error("Person C++ not generated")
+        val personCpp = cppFiles["PersonProxy.cpp"] ?: error("Person C++ not generated")
         assertContains(personCpp, "std::static_pointer_cast<VeryOldVampierNativeState>")
         assertContains(personCpp, "getNativeState")
         assertContains(personCpp, "getObject()")
@@ -90,7 +90,7 @@ class IntegrationTest {
         val classes = listOf(personInfo)
         val cppFiles = generateCpp(classes)
 
-        val personCpp = cppFiles["PersonHostObject.cpp"] ?: error("Person C++ not generated")
+        val personCpp = cppFiles["PersonProxy.cpp"] ?: error("Person C++ not generated")
         assertContains(personCpp, "createPersonWrapper")
         assertContains(personCpp, "NewGlobalRef")
         assertContains(personCpp, "setNativeState")
@@ -101,7 +101,7 @@ class IntegrationTest {
         val classes = listOf(personInfo)
         val cppFiles = generateCpp(classes)
 
-        val personCpp = cppFiles["PersonHostObject.cpp"] ?: error("Person C++ not generated")
+        val personCpp = cppFiles["PersonProxy.cpp"] ?: error("Person C++ not generated")
         assertContains(personCpp, "jsi::Object createPersonWrapper")
         assertContains(personCpp, "setProperty(rt, \"toString\"")
         assertContains(personCpp, "setProperty(rt, \"getName\"")
@@ -113,8 +113,8 @@ class IntegrationTest {
         val classes = listOf(personInfo, vampierInfo)
         val cppFiles = generateCpp(classes)
 
-        val personCpp = cppFiles["PersonHostObject.cpp"] ?: error("Person C++ not generated")
-        assertContains(personCpp, "#include \"VeryOldVampierHostObject.h\"")
+        val personCpp = cppFiles["PersonProxy.cpp"] ?: error("Person C++ not generated")
+        assertContains(personCpp, "#include \"VeryOldVampierProxy.h\"")
     }
 
     @Test
@@ -122,7 +122,7 @@ class IntegrationTest {
         val classes = listOf(personInfo)
         val cppFiles = generateCpp(classes)
 
-        val personCpp = cppFiles["PersonHostObject.cpp"] ?: error("Person C++ not generated")
+        val personCpp = cppFiles["PersonProxy.cpp"] ?: error("Person C++ not generated")
         val wrapperDeclIdx = personCpp.indexOf("static jsi::Object createPersonWrapper")
         val wrapperDefIdx = personCpp.indexOf("jsi::Object createPersonWrapper")
         assertTrue(wrapperDeclIdx < wrapperDefIdx, "Forward declaration must appear before definition")

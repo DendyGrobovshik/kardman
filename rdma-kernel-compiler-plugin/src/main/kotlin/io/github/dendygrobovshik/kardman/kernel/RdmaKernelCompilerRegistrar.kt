@@ -85,7 +85,7 @@ class RdmaKernelGenerationExtension(
         }
 
         // Clean stale generated C++ files so removing an @RDMA class/function doesn't leave
-        // dangling HostObject sources referencing a no-longer-existing JNI cache entry.
+        // dangling proxy sources referencing a no-longer-existing JNI cache entry.
         cppOutputDir?.let { dir ->
             File(dir).listFiles { f ->
                 f.isFile && (f.extension == "h" || f.extension == "cpp")

@@ -63,11 +63,11 @@ class RdmaWidgetGeneratorTest {
     }
 
     @Test
-    fun `cpp includes HostObject headers and marshals refs`() {
+    fun `cpp includes Proxy headers and marshals refs`() {
         val (cpp, _) = generate(listOf(textWidget()))
         val bridge = cpp["RdmaWidgetBridge.cpp"] ?: error("RdmaWidgetBridge.cpp not generated")
-        assertContains(bridge, "#include \"ColorHostObject.h\"")
-        assertContains(bridge, "#include \"DpHostObject.h\"")
+        assertContains(bridge, "#include \"ColorProxy.h\"")
+        assertContains(bridge, "#include \"DpProxy.h\"")
         assertContains(bridge, "static_pointer_cast<ColorNativeState>")
         assertContains(bridge, "static_pointer_cast<DpNativeState>")
         assertContains(bridge, "hasNativeState(r)")

@@ -226,7 +226,7 @@ void installRdmaWidgetBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma);
 #include "RdmaCompose.h"
 """)
         for (ref in refFqns) {
-            out.write("#include \"${simpleName(ref)}HostObject.h\"\n")
+            out.write("#include \"${simpleName(ref)}Proxy.h\"\n")
         }
         out.write("""
 #include <string>
