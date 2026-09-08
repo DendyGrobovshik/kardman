@@ -30,14 +30,13 @@ import java.io.OutputStream
 class RdmaWidgetGenerator(
     private val cppOutput: (String, String) -> OutputStream,
     private val kotlinOutput: (String, String) -> OutputStream,
+    kernelPackage: String = "com.example.kernel",
 ) {
 
-    companion object {
-        // Package of the generated host-side widget entries (RdmaWidgetEntries.kt).
-        // This is user code, so it must not live in the framework runtime package.
-        const val WIDGET_ENTRIES_PACKAGE = "com.example.kernel.rdma"
-        const val WIDGET_ENTRIES_CLASS = "com.example.kernel.rdma.RdmaWidgetEntriesKt"
-    }
+    // Package of the generated host-side widget entries (RdmaWidgetEntries.kt).
+    // This is user code, so it must not live in the framework runtime package.
+    private val widgetEntriesPackage = "$kernelPackage.rdma"
+    private val widgetEntriesClass = "$widgetEntriesPackage.RdmaWidgetEntriesKt"
 
     private sealed class Param {
         data class Value(val name: String, val jvmType: String) : Param()
@@ -123,7 +122,7 @@ class RdmaWidgetGenerator(
 
     private fun generateKotlinEntries(widgets: List<RdmaFunctionInfo>) {
         val out = kotlinOutput("RdmaWidgetEntries.kt", "RdmaWidgetEntries.kt").bufferedWriter()
-        out.write("""package ${WIDGET_ENTRIES_PACKAGE}
+        out.write("""package $widgetEntriesPackage
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.currentComposer
@@ -238,7 +237,7 @@ namespace rdma {
 WidgetJniCache g_widgetCache;
 
 void initWidgetJniCache(JNIEnv* env) {
-    jclass local = env->FindClass("${WIDGET_ENTRIES_CLASS.replace('.', '/')}");
+    jclass local = env->FindClass("${widgetEntriesClass.replace('.', '/')}");
     g_widgetCache.entriesClass = (jclass)env->NewGlobalRef(local);
     env->DeleteLocalRef(local);
 """)

@@ -84,12 +84,14 @@ file(GLOB GENERATED_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/generated/*.cpp")
 target_link_libraries(rdma_runtime hermes-engine::hermesvm android log)
 ```
 
-The user bridge (`librdma_user.so`) is built by
-`kernel-bridge/src/main/cpp/CMakeLists.txt`, which globs the copied user-generated
-`.cpp` files and links `rdma-runtime-android::rdma_runtime` + `hermes-engine::hermesvm`:
+The user bridge (`librdma_user.so`) is built by the app module. The `rdma-app`
+Gradle plugin generates a `CMakeLists.txt` (in `build/generated/rdma/cpp/`) that globs
+the copied user-generated `.cpp` files and links `rdma-runtime-android::rdma_runtime`
++ `hermes-engine::hermesvm`:
 
 ```cmake
 find_package(rdma-runtime-android REQUIRED CONFIG)
+find_package(hermes-engine REQUIRED CONFIG)
 file(GLOB GENERATED_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/generated/*.cpp")
 add_library(rdma_user SHARED UserBridgeJni.cpp ${GENERATED_SOURCES})
 ```
@@ -99,7 +101,9 @@ Both use `file(GLOB)`, so when a new @RDMA class is added the Gradle task
 
 ### Android packaging
 
-Duplicate native libs (`libhermesvm.so`, `libc++_shared.so`) from prefab are resolved with `pickFirsts` in `androidApp/build.gradle.kts`:
+Duplicate native libs (`libhermesvm.so`, `libc++_shared.so`, `librdma_runtime.so`)
+from prefab are resolved with `pickFirsts`. This is handled automatically by the
+`rdma-app` Gradle plugin (see `RdmaAppGradlePlugin`); it sets:
 
 ```kotlin
 packaging {
@@ -107,6 +111,7 @@ packaging {
         useLegacyPackaging = true
         pickFirsts.add("**/libhermesvm.so")
         pickFirsts.add("**/libc++_shared.so")
+        pickFirsts.add("**/librdma_runtime.so")
     }
 }
 ```

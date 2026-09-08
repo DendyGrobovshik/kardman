@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Publishes all framework modules to mavenLocal so that an external project can
-# consume the framework as `io.github.dendygrobovshik.kardman:*:1.0`.
+# Publishes all framework modules to mavenLocal so that an external project (or
+# the in-repo demo) can consume the framework as
+# `io.github.dendygrobovshik.kardman:*:1.0`.
 #
-# Needed for the "use the framework in your own project" flow. The in-repo demo
-# builds the modules from source, so this is not required to run it.
+# Uses a dedicated settings file that includes only the framework modules, so the
+# demo app (which consumes the published `rdma-app` Gradle plugin) is not part of
+# this build.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
 
-./gradlew \
+./gradlew -p "$ROOT_DIR/publish" \
     :rdma-annotation:publishToMavenLocal \
     :rdma-types:publishToMavenLocal \
     :rdma-kernel-compiler-plugin:publishToMavenLocal \
     :rdma-kernel-gradle-plugin:publishToMavenLocal \
     :rdma-plugin-compiler-plugin:publishToMavenLocal \
     :rdma-plugin-gradle-plugin:publishToMavenLocal \
-    :rdma-runtime-android:publishToMavenLocal
+    :rdma-runtime-android:publishToMavenLocal \
+    :rdma-app-gradle-plugin:publishToMavenLocal

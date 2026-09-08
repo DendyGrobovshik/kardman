@@ -33,6 +33,7 @@ object RdmaKernelKeys {
     val CPP_OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("cppOutputDir")
     val JSON_OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("jsonOutputDir")
     val KOTLIN_OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("kotlinOutputDir")
+    val KERNEL_PACKAGE: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("kernelPackage")
 }
 
 class RdmaKernelCommandLineProcessor : CommandLineProcessor {
@@ -42,6 +43,7 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
         CliOption("cppOutputDir", "<dir>", "Output directory for generated C++ glue", required = false),
         CliOption("jsonOutputDir", "<dir>", "Output directory for rdma_manifest.json", required = false),
         CliOption("kotlinOutputDir", "<dir>", "Output directory for generated Kotlin widget entries", required = false),
+        CliOption("kernelPackage", "<package>", "Package name of the user's kernel module", required = false),
     )
 
     override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
@@ -49,6 +51,7 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
             "cppOutputDir" -> configuration.put(RdmaKernelKeys.CPP_OUTPUT_DIR, value)
             "jsonOutputDir" -> configuration.put(RdmaKernelKeys.JSON_OUTPUT_DIR, value)
             "kotlinOutputDir" -> configuration.put(RdmaKernelKeys.KOTLIN_OUTPUT_DIR, value)
+            "kernelPackage" -> configuration.put(RdmaKernelKeys.KERNEL_PACKAGE, value)
         }
     }
 }
@@ -63,7 +66,8 @@ class RdmaKernelCompilerRegistrar : CompilerPluginRegistrar() {
         val cppDir = configuration.get(RdmaKernelKeys.CPP_OUTPUT_DIR)
         val jsonDir = configuration.get(RdmaKernelKeys.JSON_OUTPUT_DIR)
         val kotlinDir = configuration.get(RdmaKernelKeys.KOTLIN_OUTPUT_DIR)
-        IrGenerationExtension.registerExtension(RdmaKernelGenerationExtension(cppDir, jsonDir, kotlinDir))
+        val kernelPackage = configuration.get(RdmaKernelKeys.KERNEL_PACKAGE)
+        IrGenerationExtension.registerExtension(RdmaKernelGenerationExtension(cppDir, jsonDir, kotlinDir, kernelPackage))
     }
 }
 
@@ -71,6 +75,7 @@ class RdmaKernelGenerationExtension(
     private val cppOutputDir: String?,
     private val jsonOutputDir: String?,
     private val kotlinOutputDir: String?,
+    private val kernelPackage: String?,
 ) : IrGenerationExtension {
 
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
@@ -110,11 +115,13 @@ class RdmaKernelGenerationExtension(
 
         // Typed per-widget bridge (Variant A): generated Kotlin entries + C++ HostFunctions.
         val widgets = functions.filter { it.composable }
+        val pkg = kernelPackage ?: "com.example.kernel"
         cppOutputDir?.let { cppDir ->
             kotlinOutputDir?.let { kotlinDir ->
                 RdmaWidgetGenerator(
                     { fileName, _ -> File(cppDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
                     { fileName, _ -> File(kotlinDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
+                    pkg,
                 ).generate(widgets)
             }
         }
@@ -132,7 +139,7 @@ class RdmaKernelGenerationExtension(
             File(dir, "rdma_manifest.json").also { it.parentFile.mkdirs() }.writeText(json)
         }
 
-        val transformer = RdmaVtableTransformer(pluginContext)
+        val transformer = RdmaVtableTransformer(pluginContext, pkg)
         for (entry in classes) {
             transformer.transform(entry.cls, entry.info)
         }

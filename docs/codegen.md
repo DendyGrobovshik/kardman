@@ -136,9 +136,9 @@ source never reaches the JS compiler.
                 │ copyGeneratedCpp (excludes RdmaComposerProxy.*)
                 ▼
 ┌─────────────────────────────────┐
-│ 3. Copy to kernel-bridge        │
-│    kernel-bridge/               │
-│    src/main/cpp/generated/      │
+│ 3. Copy to the app module       │
+│    androidApp/build/generated/  │
+│    rdma/cpp/generated/          │
 └─────────────────────────────────┘
                 │ CMake / NDK (links rdma-runtime-android prefab)
                 ▼
@@ -179,9 +179,9 @@ source never reaches the JS compiler.
 
 ## Regeneration & invalidation
 
-- **`copyGeneratedCpp`** (`kernel-bridge/build.gradle.kts`) copies the generated
-  `*.h`/`*.cpp` from `kernel/build/generated/rdma/cpp/` into
-  `kernel-bridge/src/main/cpp/generated/`, excluding the framework-owned
+- **`copyGeneratedCpp`** (registered on the app module by the `rdma-app` plugin)
+  copies the generated `*.h`/`*.cpp` from `kernel/build/generated/rdma/cpp/` into
+  `androidApp/build/generated/rdma/cpp/generated/`, excluding the framework-owned
   `RdmaComposerProxy.*`.
 - **`invalidateCmake`** deletes `.cxx` whenever the copied sources change, so the
   `file(GLOB)` in CMake picks up newly added/removed classes.

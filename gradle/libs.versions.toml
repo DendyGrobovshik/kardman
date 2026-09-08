@@ -58,6 +58,7 @@ kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutine
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
 kotlin-compiler-embeddable = { module = "org.jetbrains.kotlin:kotlin-compiler-embeddable", version.ref = "kotlin" }
 kotlin-gradle-plugin-api = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin-api", version.ref = "kotlin" }
+android-gradle-plugin = { module = "com.android.tools.build:gradle", version.ref = "agp" }
 hermes-android = { module = "com.facebook.hermes:hermes-android", version.ref = "hermes-android" }
 fbjni = { module = "com.facebook.fbjni:fbjni", version.ref = "fbjni" }
 soloader = { module = "com.facebook.soloader:nativeloader", version.ref = "soloader" }

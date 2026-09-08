@@ -43,13 +43,15 @@ One command builds everything:
 ./scripts/build.sh
 ```
 
-This script does two things:
+This script does three things:
 
 1. **Sets up Hermes** (see [`scripts/setup-hermes.sh`](../scripts/setup-hermes.sh)):
    - clones Hermes (default `static_h` branch of `facebook/hermes`) into `.hermes-src/`
    - builds the Android AAR and publishes `com.facebook.hermes:hermes-android` to `mavenLocal`
    - copies the JSI headers into `rdma-runtime-android/src/main/cpp/include/jsi/`
-2. **Assembles the demo APK**: `./gradlew :androidApp:assembleDebug`, which runs the
+2. **Publishes the framework** to `mavenLocal` (see [`scripts/publish.sh`](../scripts/publish.sh)) —
+   the demo app consumes the `rdma-app` Gradle plugin by id from `mavenLocal`.
+3. **Assembles the demo APK**: `./gradlew :androidApp:assembleDebug`, which runs the
    entire pipeline:
    1. **Kernel compiler plugin** — generates C++ glue + `rdma_manifest.json` + injects the vtable
    2. **Plugin compiler plugin** — reads the manifest and rewrites the plugin source
@@ -126,20 +128,33 @@ To consume them from a separate project:
 2. **Add `mavenLocal()`** to `settings.gradle.kts` (`pluginManagement` and
    `dependencyResolutionManagement`).
 
-3. **Create the four user-side modules** (a complete working example lives in the
+3. **Create the three user-side modules** (a complete working example lives in the
    companion `wb2` project — copy its structure):
 
-   | Module | Purpose | Plugins / deps |
-   |--------|---------|----------------|
-   | `:kernel` | Your `@RDMA` classes + `@Composable` widgets | `id("io.github.dendygrobovshik.kardman.rdma-kernel-compiler") version "1.0"`, dep `rdma-annotation:1.0` + Compose |
-   | `:kernel-bridge` | Compiles the generated C++ into `librdma_user.so` | `androidLibrary` + CMake (globs the generated `*.cpp`), deps `:kernel`, `rdma-runtime-android:1.0` |
+   | Module | Purpose | Plugins |
+   |--------|---------|---------|
+   | `:kernel` | Your `@RDMA` classes + `@Composable` widgets | `id("io.github.dendygrobovshik.kardman.rdma-kernel-compiler") version "1.0"` |
    | `:plugin` | Your plugin code (Kotlin/JS) | `id("io.github.dendygrobovshik.kardman.rdma-plugin-compiler") version "1.0"`, `jsMain` points at `build/generated/rdma` |
-   | `:androidApp` | Loads Hermes + the plugin | `androidApplication`, deps `:kernel`, `:kernel-bridge`, `rdma-runtime-android:1.0` |
+   | `:androidApp` | Loads Hermes + the plugin | `androidApplication` + `id("io.github.dendygrobovshik.kardman.rdma-app") version "1.0"` |
 
-4. **Wire the plugin's two-pass compilation**: `jvmMain` compiles the original
-   `src/kotlin` against `:kernel` (the FIR resolve pass emits `*_rdma.kt`); `jsMain`
-   points only at `build/generated/rdma/`. The `:kernel` module adds
-   `kotlin.srcDir("build/generated/rdma/kotlin")` for the injected vtable declaration.
+   The `rdma-app` plugin does the rest of the wiring for you:
+   - adds the dependencies (`:kernel`, `rdma-runtime-android`, `hermes-android`);
+   - generates the user bridge and compiles the generated C++ into `librdma_user.so`;
+   - copies the compiled plugin JS into the app's assets (or AOT-compiles it to `.hbc`,
+     see below).
+
+   So `:androidApp` needs no hand-written deps, native config or asset-copy tasks —
+   just the plugin and the usual `android {}` block.
+
+4. **Set the module paths/packages** in `gradle.properties` (single source of truth):
+
+   ```properties
+   rdmaKernelPackage=com.example.kernel
+   rdmaKernelProject=:kernel
+   rdmaPluginProject=:plugin
+   # optional: AOT-compile the plugin JS to Hermes bytecode (.hbc)
+   rdmaHermesc=tools/hermesc
+   ```
 
 5. **In `MainActivity`**, register the user bridge and init the runtime (async):
 
@@ -150,5 +165,9 @@ To consume them from a separate project:
    // poll RdmaBridge.nativeIsReady(), then setContent { RdmaComposeHost.Content() }
    ```
 
-See the in-repo `androidApp`, `kernel`, `kernel-bridge` and `plugin` modules for a
-self-contained reference of this exact wiring.
+   Without `rdmaHermesc`, the plugin copies the JS source (`.js`) and the runtime evals
+   it directly. With `rdmaHermesc`, the plugin compiles the JS to `.hbc` bytecode (faster
+   startup, smaller size) — in that case load the `.hbc` assets instead of `.js`.
+
+See the in-repo `androidApp`, `kernel` and `plugin` modules for a self-contained
+reference of this exact wiring.

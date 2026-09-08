@@ -16,6 +16,7 @@
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeCompiler)
+    id("io.github.dendygrobovshik.kardman.rdma-app") version "1.0"
 }
 
 kotlin {
@@ -25,9 +26,6 @@ kotlin {
 }
 
 dependencies {
-    implementation(project(":rdma-runtime-android"))
-    implementation(project(":kernel-bridge"))
-
     implementation(libs.androidx.activity.compose)
 
     implementation(libs.compose.uiToolingPreview)
@@ -49,11 +47,6 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
-        jniLibs {
-            useLegacyPackaging = true
-            pickFirsts.add("**/libhermesvm.so")
-            pickFirsts.add("**/libc++_shared.so")
-        }
     }
     buildTypes {
         release {
@@ -71,23 +64,4 @@ android {
     buildFeatures {
         compose = true
     }
-}
-
-afterEvaluate {
-    tasks.named("mergeDebugAssets") {
-        dependsOn(":plugin:jsBrowserDevelopmentExecutableDistribution")
-    }
-    tasks.named("mergeReleaseAssets") {
-        dependsOn(":plugin:jsBrowserProductionExecutableDistribution")
-    }
-}
-
-val copyPluginJs = tasks.register<Copy>("copyPluginJs") {
-    dependsOn(":plugin:jsBrowserDevelopmentExecutableDistribution")
-    from("${rootProject.projectDir}/plugin/build/compileSync/js/main/developmentExecutable/kotlin")
-    into("${projectDir}/src/main/assets/kotlin")
-}
-
-tasks.named("preBuild") {
-    dependsOn(copyPluginJs)
 }

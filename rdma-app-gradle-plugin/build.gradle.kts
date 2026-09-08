@@ -13,16 +13,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.example.kernel
+plugins {
+    alias(libs.plugins.kotlinJvm)
+    `java-gradle-plugin`
+    `maven-publish`
+}
 
-/**
- * Loads the user-side native bridge (librdma_user.so) and registers it with the
- * generic framework runtime. Must be initialized before `RdmaBridge.nativeInit(...)`.
- */
-object UserBridge {
-    init {
-        System.loadLibrary("rdma_user")
+group = "io.github.dendygrobovshik.kardman"
+version = "1.0"
+
+dependencies {
+    compileOnly(libs.kotlin.gradle.plugin.api)
+    compileOnly(libs.android.gradle.plugin)
+}
+
+gradlePlugin {
+    plugins {
+        create("rdmaAppPlugin") {
+            id = "io.github.dendygrobovshik.kardman.rdma-app"
+            implementationClass = "io.github.dendygrobovshik.kardman.app.RdmaAppGradlePlugin"
+        }
     }
-
-    external fun nativeInstall()
 }

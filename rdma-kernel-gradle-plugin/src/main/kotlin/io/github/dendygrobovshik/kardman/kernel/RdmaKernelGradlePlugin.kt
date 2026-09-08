@@ -24,10 +24,17 @@ import org.jetbrains.kotlin.gradle.plugin.SubpluginArtifact
 import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
 import java.io.File
 
-private const val RDMA_VTABLE_SOURCE = """package com.example.kernel
+private const val DEFAULT_KERNEL_PACKAGE = "com.example.kernel"
+
+private fun vtableSource(kernelPackage: String) = """package $kernelPackage
 
 external fun rdmaVtableDispatch(vtablePtr: Long, vtableId: Int): Any?
 """
+
+private fun Project.kernelPackage(): String =
+    findProperty("rdmaKernelPackage")?.toString()
+        ?: rootProject.findProperty("rdmaKernelPackage")?.toString()
+        ?: DEFAULT_KERNEL_PACKAGE
 
 class RdmaKernelGradlePlugin : KotlinCompilerPluginSupportPlugin {
 
@@ -36,7 +43,7 @@ class RdmaKernelGradlePlugin : KotlinCompilerPluginSupportPlugin {
         // `rdmaVtableDispatch` is a static external declaration, so we generate it up-front.
         val dir = File(target.buildDir, "generated/rdma/kotlin")
         dir.mkdirs()
-        File(dir, "RdmaVtable.kt").writeText(RDMA_VTABLE_SOURCE)
+        File(dir, "RdmaVtable.kt").writeText(vtableSource(target.kernelPackage()))
     }
 
     override fun isApplicable(kotlinCompilation: KotlinCompilation<*>): Boolean =
@@ -54,6 +61,7 @@ class RdmaKernelGradlePlugin : KotlinCompilerPluginSupportPlugin {
                 SubpluginOption("cppOutputDir", "${project.buildDir}/generated/rdma/cpp"),
                 SubpluginOption("jsonOutputDir", "${project.buildDir}/generated/rdma"),
                 SubpluginOption("kotlinOutputDir", "${project.buildDir}/generated/rdma/widget-kotlin"),
+                SubpluginOption("kernelPackage", project.kernelPackage()),
             )
         }
     }

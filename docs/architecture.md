@@ -94,9 +94,9 @@ The kernel compiler plugin extracts every `@RDMA` function that is also
 `@Composable` (a widget) into `rdma_manifest.json` (the unified manifest
 consumed by the plugin compiler plugin).
 
-The host renderer (`RdmaWidgetEntries.kt`, generated into `:kernel-bridge`) is
-the single dispatch point. It receives `(name, args)` from JNI and calls the
-kernel widgets, bridging JS content/event lambdas back via
+The host renderer (`RdmaWidgetEntries.kt`, generated into the app module by the
+`rdma-app` plugin) is the single dispatch point. It receives `(name, args)` from JNI
+and calls the kernel widgets, bridging JS content/event lambdas back via
 `RdmaComposeHost.nativeInvokeScopeBlock` / `nativeInvokeCallback`.
 
 ### Plugin side (guest, JS)

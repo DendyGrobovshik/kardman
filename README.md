@@ -113,21 +113,21 @@ project are in the [user guide](docs/user_guide.md).
 | `:rdma-annotation` | `@RDMA` annotation (KMP) |
 | `:rdma-types` | Shared metadata model + `RdmaManifest` (`@Serializable` DTOs) |
 | `:kernel` | @RDMA annotated classes + @Composable UI widgets (JVM + material3) |
-| `:kernel-bridge` | Compiles the generated C++/Kotlin into `librdma_user.so` and registers it with the runtime |
 | `:rdma-kernel-compiler-plugin` | IR compiler plugin → generates C++ JNI/JSI glue + `rdma_manifest.json` + vtable injection |
 | `:rdma-kernel-gradle-plugin` | Gradle wrapper that wires `:rdma-kernel-compiler-plugin` into the kernel module |
 | `:rdma-plugin-compiler-plugin` | FIR compiler plugin → resolves @RDMA usages and rewrites plugin source to JS proxy calls |
 | `:rdma-plugin-gradle-plugin` | Gradle wrapper that wires `:rdma-plugin-compiler-plugin` into the plugin module's JVM resolve compilation and generates the guest-side widget bridge |
+| `:rdma-app-gradle-plugin` | Gradle plugin applied to the app: generates the user bridge + compiles the generated C++ into `librdma_user.so` |
 | `:rdma-runtime-android` | Android AAR: generic Hermes runtime + JNI bridge + C++ glue (exported as a prefab) |
 | `:plugin` | Demo plugin (Kotlin/JS), compiles to JS executed in Hermes |
 | `:androidApp` | Android app — initializes Hermes, loads plugin JS |
 | `:rdma-tests` | JVM tests asserting on generated C++ output |
 
-The framework (all modules except `:kernel`, `:kernel-bridge`, `:plugin`,
-`:androidApp`) is generic and knows nothing about user code.
-`:kernel`/`:kernel-bridge`/`:plugin`/`:androidApp` are a self-contained sample of *user*
-code: `:kernel` generates the bridge C++/Kotlin, `:kernel-bridge` compiles it into
-`librdma_user.so` and registers it with the runtime through the `installUserBridge` hook.
+The framework (all modules except `:kernel`, `:plugin`, `:androidApp`) is generic and
+knows nothing about user code. `:kernel`/`:plugin`/`:androidApp` are a self-contained
+sample of *user* code: `:kernel` declares the `@RDMA` types/widgets, `:plugin` uses them,
+and `:androidApp` applies the `rdma-app` plugin to build the bridge into `librdma_user.so`
+and register it with the runtime through the `installUserBridge` hook.
 
 ## Limitations
 

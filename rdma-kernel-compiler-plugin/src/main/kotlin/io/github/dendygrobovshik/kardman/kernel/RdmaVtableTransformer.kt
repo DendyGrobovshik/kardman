@@ -43,11 +43,11 @@ import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 
-class RdmaVtableTransformer(private val pluginContext: IrPluginContext) {
+class RdmaVtableTransformer(private val pluginContext: IrPluginContext, kernelPackage: String) {
 
     private val dispatchFn: IrSimpleFunctionSymbol? by lazy {
         pluginContext.referenceFunctions(
-            CallableId(FqName("com.example.kernel"), Name.identifier("rdmaVtableDispatch"))
+            CallableId(FqName(kernelPackage), Name.identifier("rdmaVtableDispatch"))
         ).firstOrNull()
     }
 

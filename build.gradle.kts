@@ -30,7 +30,6 @@ tasks.register<Delete>("cleanGenerated") {
 
     delete(
         "kernel/build/generated",
-        "kernel-bridge/src/main/cpp/generated",
         "plugin/build/generated",
         "plugin/build/compileSync",
         "plugin/build/kotlin-webpack",

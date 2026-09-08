@@ -13,7 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-rootProject.name = "RDMAHermes"
+// Minimal build used by scripts/publish.sh to publish only the framework modules
+// to mavenLocal. Keeping the app/kernel/plugin (user) modules out of this build
+// avoids the chicken-and-egg where the demo app consumes the just-published
+// `rdma-app` Gradle plugin.
+//
+// Run with `./gradlew -p publish ...`.
+rootProject.name = "rdma-framework"
 
 pluginManagement {
     repositories {
@@ -31,6 +37,11 @@ pluginManagement {
 }
 
 dependencyResolutionManagement {
+    versionCatalogs {
+        create("libs") {
+            from(files("../gradle/libs.versions.toml"))
+        }
+    }
     repositories {
         mavenLocal()
         google {
@@ -48,15 +59,16 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
-include(":androidApp")
-include(":kernel")
-include(":rdma-annotation")
-include(":rdma-types")
-include(":rdma-kernel-compiler-plugin")
-include(":rdma-kernel-gradle-plugin")
-include(":rdma-app-gradle-plugin")
-include(":rdma-runtime-android")
-include(":plugin")
-include(":rdma-plugin-compiler-plugin")
-include(":rdma-plugin-gradle-plugin")
-include(":rdma-tests")
+fun includeModule(name: String) {
+    include(":$name")
+    project(":$name").projectDir = file("../$name")
+}
+
+includeModule("rdma-annotation")
+includeModule("rdma-types")
+includeModule("rdma-kernel-compiler-plugin")
+includeModule("rdma-kernel-gradle-plugin")
+includeModule("rdma-plugin-compiler-plugin")
+includeModule("rdma-plugin-gradle-plugin")
+includeModule("rdma-runtime-android")
+includeModule("rdma-app-gradle-plugin")
