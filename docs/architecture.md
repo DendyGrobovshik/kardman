@@ -57,6 +57,7 @@ things it elides, detailed later:
   the Hermes thread (see [Threading Model](#threading-model-dedicated-hermes-thread)).
 
 Per-module details: [modules_architecture.md](modules_architecture.md).
+Code generation: [codegen.md](codegen.md).
 
 ## UI Widget Layer (Redwood-like)
 

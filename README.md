@@ -21,17 +21,17 @@ It also proxies compose UI logic, so dynamically loaded UI logic modify compose 
    val x = MyType("hello", 42)
    println(x.name)
    ```
-   
+
 Regular kotlin code, no need for manual serialization/deserialization. For android it creates `MyType` object in JVM memory and call its methods via proxies by JSI and JNI.
 
 ## `@Compose` UI usecase
 
 1. Kernel might provide some basic components
 ```kotlin
-@Composable  
-@RDMA  
-fun Spacer(width: Double, height: Double) {  
-    M3Spacer(Modifier.size(width.dp, height.dp))  
+@Composable
+@RDMA
+fun Spacer(width: Double, height: Double) {
+    M3Spacer(Modifier.size(width.dp, height.dp))
 }
 
 @Composable
@@ -45,7 +45,7 @@ fun Text(text: String) {
 ```kotlin
 @Composable
 fun MyCard() {
-    Text("Title") 
+    Text("Title")
     M3Spacer(0.0, 8.0)
     Text("Description")
 }
@@ -101,6 +101,11 @@ class Dog(name: String) : Animal(name) {
 
 While working with `Dog` object overridden method will be called from both plugin and kernel.
 
+## Getting started
+
+Prerequisites, running the demo and how to wire the framework into your own
+project are in the [user guide](docs/user_guide.md).
+
 ## Project modules
 
 | Module | Role |
@@ -125,19 +130,15 @@ code: `:kernel` generates the bridge C++/Kotlin, `:kernel-bridge` compiles it in
 `librdma_user.so` and registers it with the runtime through the `installUserBridge` hook.
 
 ## Limitations
+
 #TODO
-
-## Requirements
-
-- Android SDK + NDK (28+)
-- Kotlin 2.4.10
-- Gradle 9.1+
-- Hermes Android AAR published to `mavenLocal()` (see [contribution guide](docs/contribution.md))
 
 ## Docs
 
+- [User guide](docs/user_guide.md)
 - [Architecture](docs/architecture.md)
 - [Modules](docs/modules_architecture.md)
+- [Code generation](docs/codegen.md)
 - [Contributing](docs/contribution.md)
 - [Design concept](docs/ORIGINAL_DESIGN.md)
 

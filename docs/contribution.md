@@ -15,66 +15,16 @@ limitations under the License.
 -->
 # Contributing
 
-## Prerequisites
-
-- **Android Studio** with SDK 36, NDK 28+
-- **Kotlin 2.4.10**, Gradle 9.1+
-- **Hermes Android AAR** — published to `mavenLocal()`
-
-## Hermes Setup
-
-The project depends on `com.facebook.hermes:hermes-android:0.76.9` from `mavenLocal()`.  
-You need to build Hermes for Android and publish it locally.
-
-The Hermes source is expected at `~/Code/hrms/hermes/`. The JSI headers are copied from there:
-```bash
-# Already done once — headers are at:
-rdma-runtime-android/src/main/cpp/include/jsi/
-```
-
-If you need to update JSI headers:
-```bash
-cp ~/Code/hrms/hermes/API/jsi/jsi/*.h rdma-runtime-android/src/main/cpp/include/jsi/
-```
-
-JSI headers are NOT included in the Hermes AAR prefab module — they are bundled with this project.
-
-## Building
-
-### Full Android build
-```bash
-./gradlew :androidApp:assembleDebug
-```
-
-This runs the entire pipeline:
-1. **Kernel compiler plugin** — generates C++ glue + `rdma_manifest.json` + injects vtable
-2. **Plugin compiler plugin** — reads JSON, transforms plugin source
-3. **Plugin JS compilation** — Kotlin/JS → `plugin.js`
-4. **C++ compilation** — CMake + NDK → `librdma_runtime.so`
-5. **APK packaging** — assets + native libs + dex
-
-### Plugin JS only
-```bash
-./gradlew :plugin:jsBrowserDevelopmentExecutableDistribution
-```
-
-### Kernel C++ generation only
-```bash
-./gradlew :kernel:compileKotlinJvm
-# Output: kernel/build/generated/rdma/cpp/
-```
-
-### Force full rebuild (if stale caches)
-```bash
-rm -rf kernel/build plugin/build rdma-runtime-android/.cxx .gradle/configuration-cache
-./gradlew :androidApp:assembleDebug --no-configuration-cache --rerun-tasks
-```
+This guide is for developers working on the framework itself. If you only want to
+run the demo or use the framework in your own project, see the
+[user guide](user_guide.md). How the code generation works end-to-end is described
+in [codegen.md](codegen.md).
 
 ## Project Configuration
 
 ### Version catalog
 
-All dependency versions in `gradle/libs.versions.toml`:
+All dependency versions live in `gradle/libs.versions.toml`:
 
 | Key | Value | Notes |
 |-----|-------|-------|
@@ -87,24 +37,40 @@ All dependency versions in `gradle/libs.versions.toml`:
 
 1. Create the module directory with `build.gradle.kts`
 2. Add `include(":module-name")` in `settings.gradle.kts`
-3. Add plugin/library alias in `gradle/libs.versions.toml` if needed
+3. Add a plugin/library alias in `gradle/libs.versions.toml` if needed
 
-### Plugin compiler plugin configuration
+### Compiler plugin configuration
 
-The FIR compiler plugin (`:rdma-plugin-compiler-plugin`) is applied to the plugin module's JVM resolve compilation via the Gradle wrapper `:rdma-plugin-gradle-plugin`. It receives two options, defaulting to:
+The **kernel** compiler plugin (`:rdma-kernel-compiler-plugin`) is applied to
+`:kernel`'s JVM compilation by the Gradle wrapper `:rdma-kernel-gradle-plugin`,
+which passes three output directories:
 
 ```kotlin
-// rdma-plugin-gradle-plugin/src/main/kotlin/.../RdmaPluginGradlePlugin.kt
+SubpluginOption("cppOutputDir", "${project.buildDir}/generated/rdma/cpp")
+SubpluginOption("jsonOutputDir", "${project.buildDir}/generated/rdma")
+SubpluginOption("kotlinOutputDir", "${project.buildDir}/generated/rdma/widget-kotlin")
+```
+
+The **plugin** FIR compiler plugin (`:rdma-plugin-compiler-plugin`) is applied to
+the plugin module's JVM resolve compilation by `:rdma-plugin-gradle-plugin`. It
+receives two options, defaulting to:
+
+```kotlin
 SubpluginOption("rdmaManifest", "${rootProject.projectDir}/kernel/build/generated/rdma/rdma_manifest.json")
 SubpluginOption("rdmaOutputDir", "${project.buildDir}/generated/rdma")
 ```
 
-The resolve pass compiles the original source (`plugin/src/kotlin/...`) against `:kernel` and emits `*_rdma.kt` into `build/generated/rdma/`. The JS pass (`jsMain`) points at `build/generated/rdma/` and compiles the rewritten code.
+The resolve pass compiles the original source (`plugin/src/kotlin/...`) against
+`:kernel` and emits `*_rdma.kt` into `build/generated/rdma/`. The JS pass
+(`jsMain`) points at `build/generated/rdma/` and compiles the rewritten code.
 
-Note: `:rdma-plugin-compiler-plugin` and `:rdma-plugin-gradle-plugin` are published to `mavenLocal()`. After changing them, run:
+Both compiler plugins and their Gradle wrappers are published to `mavenLocal()`.
+After changing them, republish:
 
 ```bash
-./gradlew :rdma-plugin-compiler-plugin:publishToMavenLocal :rdma-plugin-gradle-plugin:publishToMavenLocal
+./scripts/publish.sh
+# or individually, e.g.:
+./gradlew :rdma-kernel-compiler-plugin:publishToMavenLocal :rdma-kernel-gradle-plugin:publishToMavenLocal
 ```
 
 ### C++ CMake configuration
@@ -148,15 +114,19 @@ packaging {
 ## Testing
 
 ### Build verification
+
 ```bash
 # Compile all Kotlin modules
 ./gradlew compileKotlinJs compileKotlinJvm compileDebugKotlin
 
-# Verify kernel compiler plugin generates expected output
+# Compiler-plugin unit/integration tests (no device needed)
+./gradlew :rdma-kernel-compiler-plugin:test :rdma-plugin-compiler-plugin:test :rdma-tests:test
+
+# Verify the kernel compiler plugin generated the expected output
 ./gradlew :kernel:compileKotlinJvm
 cat kernel/build/generated/rdma/rdma_manifest.json
 
-# Check transformed plugin code (generated by the FIR resolve pass)
+# Check the transformed plugin code (generated by the FIR resolve pass)
 ./gradlew :plugin:compileKotlinJvm
 cat plugin/build/generated/rdma/Main_rdma.kt
 ```
@@ -166,11 +136,11 @@ cat plugin/build/generated/rdma/Main_rdma.kt
 Install the APK on an emulator or device and check logcat:
 
 ```bash
-# Filter relevant tags
 adb logcat -s RdmaBridge RdmaRuntime RdmaJni RDMA
 ```
 
 Expected output:
+
 ```
 RdmaBridge: Initializing RDMA bridge...
 RdmaBridge: RDMA bridge installed successfully
@@ -184,11 +154,13 @@ RdmaRuntime: JS: Name: Эдвард, Age: 104               ← plugin println
 ### Adding a test class
 
 1. Create `kernel/src/commonMain/kotlin/com/example/kernel/TestType.kt`:
+
    ```kotlin
    @RDMA class TestType(val msg: String)
    ```
 
 2. Add to plugin `Main.kt`:
+
    ```kotlin
    import com.example.kernel.TestType
    val t = TestType("works")
@@ -202,6 +174,7 @@ RdmaRuntime: JS: Name: Эдвард, Age: 104               ← plugin println
 ### `undefined symbol: registerXBridge`
 
 CMake cached the old file list. Run:
+
 ```bash
 rm -rf rdma-runtime-android/.cxx
 ```
@@ -209,6 +182,7 @@ rm -rf rdma-runtime-android/.cxx
 ### `rdma_manifest.json not found`
 
 The kernel compiler plugin has not run. Run:
+
 ```bash
 ./gradlew :kernel:compileKotlinJvm
 ```
@@ -216,6 +190,7 @@ The kernel compiler plugin has not run. Run:
 ### `KMP Dependencies Resolution Failure` on iOS
 
 `rdma-annotation` or `kernel` missing iOS targets. Make sure both have:
+
 ```kotlin
 iosArm64()
 iosSimulatorArm64()
@@ -223,75 +198,16 @@ iosSimulatorArm64()
 
 ### `Property 'console' doesn't exist`
 
-Older build without `console` stub in `RdmaRuntime.cpp`. Rebuild.
+Older build without the `console` stub in `RdmaRuntime.cpp`. Rebuild.
 
 ### `Property 'RDMA' doesn't exist` / `ReferenceError`
 
-Plugin JS loaded before Hermes runtime init. Check `MainActivity` — `nativeInit()` must be called before `nativeEval()`.
+Plugin JS loaded before the Hermes runtime init. Check `MainActivity` —
+`nativeInit()` must be called before `nativeEvalAsset()`.
 
 ### `Error loading module 'RDMAHermes:plugin'`
 
-Missing Kotlin stdlib. Make sure `kotlin-kotlin-stdlib.js` is loaded before the plugin JS. Note: the plugin's JS source set must compile only the generated `build/generated/rdma/` files (kernel is a JVM resolve-pass dependency only, not a JS dependency).
-
-## Code Generation Pipeline
-
-```
-┌─────────────────────────────────┐
-│ 1. Kernel @RDMA classes         │
-│    kernel/src/commonMain/...    │
-└───────────────┬─────────────────┘
-                │ :kernel:compileKotlinJvm (kernel compiler plugin)
-                ▼
-┌─────────────────────────────────┐
-│ 2. Generate C++ + JSON + vtable │
-│    kernel/build/generated/rdma/ │
-│    ├── PersonProxy.cpp          │
-│    ├── RdmaJniCache.cpp         │
-│    ├── RdmaBridge.cpp           │
-│    ├── RdmaWidgetBridge.cpp     │
-│    ├── rdma_manifest.json       │
-│    └── kotlin/RdmaVtable.kt     │
-└───────────────┬─────────────────┘
-                │ copyGeneratedCpp (excludes RdmaComposerProxy.*)
-                ▼
-┌─────────────────────────────────┐
-│ 3. Copy to kernel-bridge        │
-│    kernel-bridge/               │
-│    src/main/cpp/generated/      │
-└─────────────────────────────────┘
-                │ CMake / NDK (links rdma-runtime-android prefab)
-                ▼
-┌─────────────────────────────────┐
-│ 4. Compile C++ → librdma_user.so│
-│    (librdma_runtime.so is the   │
-│     generic runtime AAR)        │
-└─────────────────────────────────┘
-
-┌─────────────────────────────────┐
-│ 5. Plugin original source       │
-│    plugin/src/kotlin/           │
-│    Main.kt                      │
-└───────────────┬─────────────────┘
-                │ :plugin:compileKotlinJvm (FIR resolve pass)
-                ▼
-┌─────────────────────────────────┐
-│ 6. Generate transformed code    │
-│    plugin/build/generated/rdma/ │
-│    Main_rdma.kt                 │
-└───────────────┬─────────────────┘
-                │ Kotlin/JS compiler
-                ▼
-┌─────────────────────────────────┐
-│ 7. Compile JS → plugin.js       │
-└───────────────┬─────────────────┘
-                │ assets
-                ▼
-┌─────────────────────────────────┐
-│ 8. APK                          │
-│    ├── librdma_runtime.so       │
-│    ├── librdma_user.so          │
-│    ├── plugin.js                │
-│    ├── kotlin-kotlin-stdlib.js  │
-│    └── classes.dex              │
-└─────────────────────────────────┘
-```
+Missing Kotlin stdlib. Make sure `kotlin-kotlin-stdlib.js` is loaded before the
+plugin JS. Note: the plugin's JS source set must compile only the generated
+`build/generated/rdma/` files (kernel is a JVM resolve-pass dependency only, not
+a JS dependency).
