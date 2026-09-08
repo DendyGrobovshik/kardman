@@ -106,6 +106,7 @@ While working with `Dog` object overridden method will be called from both plugi
 | Module | Role |
 |--------|------|
 | `:rdma-annotation` | `@RDMA` annotation (KMP) |
+| `:rdma-types` | Shared metadata model + `RdmaManifest` (`@Serializable` DTOs) |
 | `:kernel` | @RDMA annotated classes + @Composable UI widgets (JVM + material3) |
 | `:kernel-bridge` | Compiles the generated C++/Kotlin into `librdma_user.so` and registers it with the runtime |
 | `:rdma-kernel-compiler-plugin` | IR compiler plugin → generates C++ JNI/JSI glue + `rdma_manifest.json` + vtable injection |
@@ -114,11 +115,11 @@ While working with `Dog` object overridden method will be called from both plugi
 | `:rdma-plugin-gradle-plugin` | Gradle wrapper that wires `:rdma-plugin-compiler-plugin` into the plugin module's JVM resolve compilation and generates the guest-side widget bridge |
 | `:rdma-runtime-android` | Android AAR: generic Hermes runtime + JNI bridge + C++ glue (exported as a prefab) |
 | `:plugin` | Demo plugin (Kotlin/JS), compiles to JS executed in Hermes |
-| `:shared` | Shared KMP code (Compose UI) |
 | `:androidApp` | Android app — initializes Hermes, loads plugin JS |
+| `:rdma-tests` | JVM tests asserting on generated C++ output |
 
-The framework (all modules except `:kernel`, `:kernel-bridge`, `:plugin`, `:shared`,
-`:androidApp`, `:desktopApp`, `:iosApp`) is generic and knows nothing about user code.
+The framework (all modules except `:kernel`, `:kernel-bridge`, `:plugin`,
+`:androidApp`) is generic and knows nothing about user code.
 `:kernel`/`:kernel-bridge`/`:plugin`/`:androidApp` are a self-contained sample of *user*
 code: `:kernel` generates the bridge C++/Kotlin, `:kernel-bridge` compiles it into
 `librdma_user.so` and registers it with the runtime through the `installUserBridge` hook.
@@ -136,6 +137,7 @@ code: `:kernel` generates the bridge C++/Kotlin, `:kernel-bridge` compiles it in
 ## Docs
 
 - [Architecture](docs/architecture.md)
+- [Modules](docs/modules_architecture.md)
 - [Contributing](docs/contribution.md)
 - [Design concept](docs/ORIGINAL_DESIGN.md)
 
