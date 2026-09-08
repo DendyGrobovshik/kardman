@@ -137,7 +137,7 @@ code: `:kernel` generates the bridge C++/Kotlin, `:kernel-bridge` compiles it in
 
 - [Architecture](docs/architecture.md)
 - [Contributing](docs/contribution.md)
-- [Design concept](DESIGN.md)
+- [Design concept](docs/ORIGINAL_DESIGN.md)
 
 # Лицензия / License
 

@@ -73,17 +73,16 @@ It also generation handle in glue code.
 
 using namespace facebook;
 
-// 1. Структура для хранения закэшированных JNI-данных
 struct JniCache {
     jclass personClass = nullptr;
     jmethodID constructor = nullptr;
     jmethodID toStringMethod = nullptr;
 };
 
-// Глобальный или статический инстанс кэша
+// Cache instance
 static JniCache gJniCache;
 
-// Контейнер состояния (в стиле Nitro)
+// State container (в стиле Nitro)
 class PersonNativeState : public jsi::NativeState {
 public:
     JavaVM* jvm_;
@@ -109,7 +108,6 @@ public:
     }
 };
 
-// 2. Высокопроизводительный нативный вызов метода toString()
 jsi::Value personToStringNative(jsi::Runtime& runtime, const jsi::Value& thisVal, const jsi::Value* args, size_t count, JavaVM* jvm) {
     jsi::Object thisObj = thisVal.asObject(runtime);
     auto state = std::static_pointer_cast<PersonNativeState>(thisObj.getNativeState(runtime));
@@ -118,8 +116,6 @@ jsi::Value personToStringNative(jsi::Runtime& runtime, const jsi::Value& thisVal
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
     if (!env) return jsi::Value::undefined();
 
-    // СВЕРХБЫСТРЫЙ ВЫЗОВ: Никаких FindClass и GetMethodID по строкам!
-    // Используем закэшированный gJniCache.toStringMethod по O(1)
     jstring jstr = (jstring)env->CallObjectMethod(state->globalPersonRef_, gJniCache.toStringMethod);
 
     const char* cstr = env->GetStringUTFChars(jstr, nullptr);
@@ -129,25 +125,18 @@ jsi::Value personToStringNative(jsi::Runtime& runtime, const jsi::Value& thisVal
     return jsi::Value(jsi::String::createFromUtf8(runtime, cppStr));
 }
 
-// 3. Инициализация моста с однократным кэшированием
 void installRdmaBridge(jsi::Runtime& runtime, JavaVM* jvm, JNIEnv* env) {
     
-    // --- ЭТАП КЭШИРОВАНИЯ JNI (Выполняется ровно 1 раз при старте) ---
     if (gJniCache.personClass == nullptr) {
-        // Находим класс локально
         jclass localClass = env->FindClass("com/example/rdma/Person");
         
-        // КРИТИЧЕСКИ ВАЖНО: Для jclass делаем NewGlobalRef, иначе он удалится!
         gJniCache.personClass = (jclass)env->NewGlobalRef(localClass);
         env->DeleteLocalRef(localClass);
 
-        // Кэшируем ID методов. jmethodID — это просто указатели, GlobalRef для них делать НЕ НАДО.
         gJniCache.constructor = env->GetMethodID(gJniCache.personClass, "<init>", "(Ljava/lang/String;I)V");
         gJniCache.toStringMethod = env->GetMethodID(gJniCache.personClass, "toString", "()Ljava/lang/String;");
     }
-    // -----------------------------------------------------------------
 
-    // Создаем прототип для JS-класса Person
     jsi::Object personPrototype(runtime);
     auto toStringFunc = jsi::Function::createFromHostFunction(
         runtime, jsi::PropNameID::forAscii(runtime, "toString"), 0,
@@ -160,7 +149,6 @@ void installRdmaBridge(jsi::Runtime& runtime, JavaVM* jvm, JNIEnv* env) {
     auto sharedPrototype = std::make_shared<jsi::Object>(std::move(personPrototype));
     jsi::Object rdmaNamespace(runtime);
 
-    // Регистрируем фабрику createPerson
     auto createPersonFunc = jsi::Function::createFromHostFunction(
         runtime, jsi::PropNameID::forAscii(runtime, "createPerson"), 2,
         [jvm, sharedPrototype](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
@@ -173,7 +161,6 @@ void installRdmaBridge(jsi::Runtime& runtime, JavaVM* jvm, JNIEnv* env) {
 
             jstring jName = env->NewStringUTF(name.c_str());
             
-            // СВЕРХБЫСТРОЕ СОЗДАНИЕ ОБЪЕКТА: используем кэшированные класс и конструктор
             jobject localPerson = env->NewObject(gJniCache.personClass, gJniCache.constructor, jName, age);
             env->DeleteLocalRef(jName);
 
