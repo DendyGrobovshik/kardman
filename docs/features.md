@@ -183,7 +183,9 @@ fun main() {
 
 Allowed in the plugin: `@Composable` functions/lambdas, `remember { ... }` (with
 keys), `mutableStateOf` + `getValue`/`setValue` (the `var x by ...` delegation),
-and the kernel's `@RDMA` widgets. `runRdmaApp { ... }` installs the root content.
+the kernel's `@RDMA` widgets, and two effects — `SideEffect` and
+`DisposableEffect` (both hosted in the kernel, see below). `runRdmaApp { ... }`
+installs the root content.
 
 Lambdas matter here. The compiler distinguishes two kinds of function
 parameters on a widget:
@@ -193,12 +195,30 @@ parameters on a widget:
 - a **callback** (a plain `() -> Unit`, e.g. `Button`'s `onClick`) — registered
   in JS and invoked by the kernel on events like taps.
 
+### Effects
+
+`SideEffect` and `DisposableEffect` run their bodies in the plugin (JS), but the
+**lifecycle is owned by the kernel**: the Compose runtime must be the one calling
+`onRemembered`/`onForgotten`/`onAbandoned`, and a guest-side `remember` value is
+just an opaque `JsValueHolder` the kernel cannot drive. So each effect is
+rewritten into a kernel-backed bridge:
+
+- `SideEffect { … }` → `rdmaSideEffect { … }` — the kernel composes a real
+  `SideEffect` that forwards the block id back into JS after every commit.
+- `DisposableEffect(keys) { onDispose { … } }` → `rdmaDisposableEffect(keys) { … }`
+  — the kernel composes `remember(keys) { RdmaDisposableEffectObserver(blockId) }`,
+  a real `RememberObserver` whose `onRemembered` runs the effect body once and
+  whose `onForgotten`/`onAbandoned` dispose the returned result. The `keys` are
+  marshalled to the kernel and compared there, so key-change semantics match the
+  host. Primitive keys are compared faithfully; `Unit` is normalized to a stable
+  sentinel; object/`@RDMA`-handle keys are treated as always-changed (a known
+  limitation until stable handle identity lands).
+
 Because the kernel must be able to faithfully execute whatever the plugin
 composes, everything else from `androidx.compose.*` is rejected at compile time.
-Forbidden: effects (`LaunchedEffect`, `DisposableEffect`, `SideEffect`),
-`derivedStateOf`, `snapshotFlow`, `rememberCoroutineScope`, `movableContentOf`,
-`produceState`, animations, and any other Compose symbol outside the allowlist.
-The error is explicit:
+Forbidden: `LaunchedEffect`, `derivedStateOf`, `snapshotFlow`,
+`rememberCoroutineScope`, `movableContentOf`, `produceState`, animations, and any
+other Compose symbol outside the allowlist. The error is explicit:
 
 ```
 kernel doesn't support 'LaunchedEffect' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
@@ -220,11 +240,12 @@ app-update-free updates of both plugin logic and UI.
 and widgets; types `Int`/`Long`/`Float`/`Double`/`Boolean`/`String` (nullable
 allowed), `@RDMA` references, `List<T>`, lambdas, `Unit` returns; UI via the base
 Compose protocol (`remember`/`mutableStateOf`/widgets + content lambdas and
-callbacks).
+callbacks) plus the `SideEffect` and `DisposableEffect` effects.
 
 **Not yet** — non-`@RDMA` value types (`enum`, `Array`, `Map`, data classes),
 generics beyond `List<T>`; secondary constructors, named/default arguments;
 overloaded methods, extension and `suspend` functions; block-body overrides;
-Compose effects/animations and anything outside the allowlist; cross-runtime
-object identity/`equals`, JNI exception propagation, async/Promise returns,
-batch transfers.
+`LaunchedEffect`/coroutines, `derivedStateOf`/`snapshotFlow`, animations and
+anything else outside the allowlist; stable identity for object/`@RDMA` effect
+keys; cross-runtime object identity/`equals`, JNI exception propagation,
+async/Promise returns, batch transfers.

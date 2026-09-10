@@ -40,6 +40,9 @@ object RdmaPluginTransformState {
     private val extraBridgeable = setOf(
         "com.example.kernel.runRdmaApp",
         "androidx.compose.runtime.mutableStateOf",
+        "androidx.compose.runtime.mutableIntStateOf",
+        "androidx.compose.runtime.SideEffect",
+        "androidx.compose.runtime.DisposableEffect",
     )
 
     fun configure(manifestPath: String?, outputDir: String?) {
@@ -67,6 +70,9 @@ object RdmaPluginTransformState {
     fun bridgeNameFor(fqn: String): String = when (fqn) {
         "com.example.kernel.runRdmaApp" -> "rdmaRunApp"
         "androidx.compose.runtime.mutableStateOf" -> "rdmaMutableStateOf"
+        "androidx.compose.runtime.mutableIntStateOf" -> "rdmaMutableIntStateOf"
+        "androidx.compose.runtime.SideEffect" -> "rdmaSideEffect"
+        "androidx.compose.runtime.DisposableEffect" -> "rdmaDisposableEffect"
         else -> "rdma" + fqn.substringAfterLast('.').replaceFirstChar { it.uppercase() }
     }
 

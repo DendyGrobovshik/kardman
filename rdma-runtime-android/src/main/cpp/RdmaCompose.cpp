@@ -95,6 +95,10 @@ static bool initComposeJniCache(JNIEnv* env) {
     g_composeCache.getEmpty = env->GetMethodID(g_composeCache.composerCompanion, "getEmpty", "()Ljava/lang/Object;");
     g_composeCache.composerCompanionField = env->GetStaticFieldID(g_composeCache.composerClass, "Companion", "Landroidx/compose/runtime/Composer$Companion;");
 
+    g_composeCache.effectsKt = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/RdmaEffectsKt");
+    g_composeCache.sideEffect = env->GetStaticMethodID(g_composeCache.effectsKt, "sideEffect", "(JLandroidx/compose/runtime/Composer;I)V");
+    g_composeCache.disposableEffect = env->GetStaticMethodID(g_composeCache.effectsKt, "disposableEffect", "([Ljava/lang/Object;JLandroidx/compose/runtime/Composer;I)Z");
+
     g_composeCache.updateScope = env->GetMethodID(g_composeCache.scopeUpdateScopeClass, "updateScope", "(Lkotlin/jvm/functions/Function2;)V");
     g_composeCache.scopeBlockCtor = env->GetMethodID(g_composeCache.scopeBlockClass, "<init>", "(J)V");
 
@@ -120,6 +124,8 @@ static bool initComposeJniCache(JNIEnv* env) {
            g_composeCache.scopeBlockCtor &&
            g_composeCache.objectCtor &&
            g_composeCache.jsValueHolderCtor && g_composeCache.jsValueHolderGetId &&
+           g_composeCache.effectsKt && g_composeCache.sideEffect &&
+           g_composeCache.disposableEffect &&
            g_composeCache.rdmaFunctionCtor[0] && g_composeCache.rdmaFunctionCtor[1] &&
            g_composeCache.rdmaFunctionCtor[2] && g_composeCache.rdmaFunctionCtor[3];
 }
@@ -161,6 +167,17 @@ jobject boxJsi(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
         return r;
     }
     return nullptr;
+}
+
+// Boxes a `remember` key for the DisposableEffect bridge. Primitives are boxed
+// faithfully (compared structurally by the kernel `remember`); null/undefined stay
+// null (stable); object keys are boxed as identity-unique holders, so they are
+// always treated as "changed" (the plugin normalizes `Unit` itself).
+static jobject boxKeyForRemember(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
+    if (v.isObject()) {
+        return env->NewObject(g_composeCache.objectClass, g_composeCache.objectCtor);
+    }
+    return boxJsi(env, rt, v);
 }
 
 jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o) {
@@ -552,6 +569,79 @@ void installRdmaComposeBridge(jsi::Runtime& rt, JavaVM* jvm) {
         });
     rdma.setProperty(rt, "registerBlock", std::move(registerBlockFn));
 
+    auto sideEffectFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "sideEffect"), 1,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 1 || !args[0].isNumber()) return jsi::Value::undefined();
+            jlong blockId = (jlong)args[0].getNumber();
+            jobject composer = g_currentComposer;
+            rdmaCallUi([blockId, composer]() -> RdmaResult {
+                JNIEnv* e = getEnv(g_composeCache.jvm);
+                if (!e) return RdmaResult::undefined();
+                e->CallStaticVoidMethod(g_composeCache.effectsKt, g_composeCache.sideEffect, blockId, composer, 0);
+                return RdmaResult::undefined();
+            });
+            return jsi::Value::undefined();
+        });
+    rdma.setProperty(rt, "sideEffect", std::move(sideEffectFn));
+
+    auto disposableEffectFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "disposableEffect"), 2,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 2 || !args[0].isObject() || !args[0].asObject(r).isArray(r) ||
+                !args[1].isObject() || !args[1].asObject(r).isFunction(r)) {
+                return jsi::Value::undefined();
+            }
+
+            // Register the (single-use) effect body, then let the kernel decide
+            // whether it is adopted by a freshly created observer.
+            auto fn = std::make_shared<jsi::Function>(args[1].asObject(r).asFunction(r));
+            int64_t id = g_nextScopeBlockId++;
+            g_scopeBlocks[id] = fn;
+
+            auto keysArr = args[0].asObject(r).asArray(r);
+            JNIEnv* e = getEnv(g_composeCache.jvm);
+            if (!e) {
+                g_scopeBlocks.erase(id);
+                return jsi::Value::undefined();
+            }
+            jsize n = (jsize)keysArr.size(r);
+            jobjectArray jkeys = e->NewObjectArray(n, g_composeCache.objectClass, nullptr);
+            for (jsize i = 0; i < n; i++) {
+                jsi::Value kv = keysArr.getValueAtIndex(r, (size_t)i);
+                jobject boxed = boxKeyForRemember(e, r, kv);
+                e->SetObjectArrayElement(jkeys, i, boxed);
+                if (boxed) e->DeleteLocalRef(boxed);
+            }
+            jobject jkeysGlobal = e->NewGlobalRef(jkeys);
+            e->DeleteLocalRef(jkeys);
+            jobject composer = g_currentComposer;
+
+            RdmaResult result = rdmaCallUi([id, composer, jkeysGlobal]() -> RdmaResult {
+                JNIEnv* e = getEnv(g_composeCache.jvm);
+                if (!e) {
+                    if (jkeysGlobal) {
+                        // Best-effort: without an env we cannot delete the ref here;
+                        // the global ref is cleaned up by the UI thread teardown.
+                    }
+                    return RdmaResult::boolean(false);
+                }
+                jboolean used = e->CallStaticBooleanMethod(
+                    g_composeCache.effectsKt, g_composeCache.disposableEffect,
+                    jkeysGlobal, (jlong)id, composer, 0);
+                if (jkeysGlobal) e->DeleteGlobalRef(jkeysGlobal);
+                return RdmaResult::boolean((bool)used);
+            });
+
+            // If the kernel reused the previous observer (keys unchanged), this
+            // freshly registered block is unused and can be released immediately.
+            if (!result.b) {
+                g_scopeBlocks.erase(id);
+            }
+            return jsi::Value::undefined();
+        });
+    rdma.setProperty(rt, "disposableEffect", std::move(disposableEffectFn));
+
     if (g_userBridge) {
         g_userBridge(rt, jvm, rdma);
     }
@@ -671,4 +761,59 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeLambd
         deleteGlobalRef(argsGlobal);
     });
     return nullptr; // async: no result
+}
+
+// ----------------------------------------------------------- DisposableEffect
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeEffectBody(
+    JNIEnv* env, jclass, jlong blockId) {
+    using namespace facebook::rdma;
+    int64_t resultId = 0;
+    rdmaCallJs([blockId, &resultId] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (!rt) return;
+        auto it = g_scopeBlocks.find(blockId);
+        if (it == g_scopeBlocks.end()) return;
+        auto fn = it->second;
+        // The block is single-use: release it before running so reentrant calls
+        // cannot observe a half-consumed block.
+        g_scopeBlocks.erase(it);
+        facebook::jsi::Value result = fn->call(*rt, nullptr, 0);
+        if (result.isObject()) {
+            auto obj = std::make_shared<facebook::jsi::Object>(result.asObject(*rt));
+            resultId = g_nextJsValueId++;
+            g_jsValues[resultId] = obj;
+        }
+    });
+    return resultId;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeDispose(
+    JNIEnv* env, jclass, jlong resultId) {
+    using namespace facebook::rdma;
+    rdmaCallJs([resultId] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (!rt) return;
+        auto it = g_jsValues.find(resultId);
+        if (it == g_jsValues.end()) return;
+        facebook::jsi::Object& obj = *it->second;
+        facebook::jsi::Value dispose = obj.getProperty(*rt, "dispose");
+        if (dispose.isObject() && dispose.asObject(*rt).isFunction(*rt)) {
+            dispose.asObject(*rt).asFunction(*rt).callWithThis(*rt, obj, nullptr, 0);
+        }
+        g_jsValues.erase(it);
+    });
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeFreeBlock(
+    JNIEnv* env, jclass, jlong blockId) {
+    using namespace facebook::rdma;
+    rdmaCallJs([blockId] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (!rt) return;
+        g_scopeBlocks.erase(blockId);
+    });
 }

@@ -31,6 +31,15 @@ object RdmaComposeHost {
     external fun nativeInvokeScopeBlock(blockId: Long, composer: Composer, changed: Int)
     external fun nativeInvokeCallback(blockId: Long, args: Array<Any?>)
     external fun nativeInvokeLambda(id: Long, args: Array<Any?>): Any?
+
+    // DisposableEffect bridge. `nativeInvokeEffectBody` runs the single-use effect
+    // body on the Hermes thread, stores its returned result object, and returns the
+    // result id; `nativeInvokeDispose` calls `.dispose()` on that result;
+    // `nativeInvokeFreeBlock` releases a block that was registered but never invoked
+    // (abandoned composition).
+    external fun nativeInvokeEffectBody(blockId: Long): Long
+    external fun nativeInvokeDispose(resultId: Long)
+    external fun nativeInvokeFreeBlock(blockId: Long)
 }
 
 class ComposerScopeBlock(private val blockId: Long) : Function2<Composer, Int, Unit> {

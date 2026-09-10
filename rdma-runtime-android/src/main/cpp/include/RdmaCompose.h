@@ -47,6 +47,17 @@ struct ComposeJniCache {
     jmethodID getEmpty = nullptr;
     jfieldID composerCompanionField = nullptr;
 
+    // io.github.dendygrobovshik.kardman.runtime.RdmaEffectsKt.sideEffect (framework
+    // host for the plugin's SideEffect primitive).
+    jclass effectsKt = nullptr;
+    jmethodID sideEffect = nullptr;
+
+    // io.github.dendygrobovshik.kardman.runtime.RdmaEffectsKt.disposableEffect
+    // (framework host for the plugin's DisposableEffect primitive). Returns a
+    // boolean indicating whether the passed block id was adopted by a fresh
+    // observer (used by the JSI bridge to release an unused block).
+    jmethodID disposableEffect = nullptr;
+
     jclass function2Class = nullptr;
     jclass scopeBlockClass = nullptr;
     jmethodID scopeBlockCtor = nullptr;
@@ -149,6 +160,18 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeCallb
 JNIEXPORT jobject JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeLambda(
     JNIEnv* env, jclass, jlong blockId, jobjectArray args);
+
+JNIEXPORT jlong JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeEffectBody(
+    JNIEnv* env, jclass, jlong blockId);
+
+JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeDispose(
+    JNIEnv* env, jclass, jlong resultId);
+
+JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeFreeBlock(
+    JNIEnv* env, jclass, jlong blockId);
 }
 
 } // namespace rdma

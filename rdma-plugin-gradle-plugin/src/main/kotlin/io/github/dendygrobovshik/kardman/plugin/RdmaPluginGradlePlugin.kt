@@ -36,6 +36,8 @@ external object RDMA {
     fun setComposerEmpty(empty: Any)
     fun mutableStateOf(value: dynamic): dynamic
     fun registerBlock(block: dynamic): dynamic
+    fun sideEffect(blockId: dynamic)
+    fun disposableEffect(keys: dynamic, effectFn: dynamic)
 }
 
 fun rdmaMutableStateOf(value: Int): MutableState<Int> =
@@ -46,6 +48,37 @@ fun rdmaMutableStateOf(value: Boolean): MutableState<Boolean> =
 
 fun rdmaMutableStateOf(value: String): MutableState<String> =
     RDMA.mutableStateOf(value).unsafeCast<MutableState<String>>()
+
+fun rdmaMutableIntStateOf(value: Int): MutableState<Int> =
+    RDMA.mutableStateOf(value).unsafeCast<MutableState<Int>>()
+
+fun rdmaSideEffect(block: () -> Unit) {
+    RDMA.sideEffect(RDMA.registerBlock(block))
+}
+
+// Guest-side stub for the `DisposableEffect` DSL. The effect body runs entirely
+// in the plugin (JS); only the wrapped result object crosses back to the kernel,
+// which calls its `dispose` property on `onForgotten`/`onAbandoned`. The result is
+// a plain JS object literal (`{ dispose: fn }`) rather than a Kotlin class so the
+// `dispose` name cannot be dead-code-eliminated or mangled: it is only ever called
+// from C++, never from plugin Kotlin.
+class RdmaDisposableEffectScope internal constructor() {
+    fun onDispose(onDisposeEffect: () -> Unit): dynamic {
+        val result = js("({})")
+        result.dispose = onDisposeEffect
+        return result
+    }
+}
+
+private val RDMA_UNIT_KEY = "@rdma:unit"
+
+@Composable
+fun rdmaDisposableEffect(vararg keys: Any?, effect: RdmaDisposableEffectScope.() -> dynamic) {
+    // Normalize `Unit` to a stable sentinel so `DisposableEffect(Unit)` is not
+    // restarted on every recomposition (the kernel cannot marshal `Unit` itself).
+    val marshalled = Array<Any?>(keys.size) { i -> if (keys[i] === Unit) RDMA_UNIT_KEY else keys[i] }
+    RDMA.disposableEffect(marshalled, { effect(RdmaDisposableEffectScope()) })
+}
 
 fun rdmaRunApp(content: @Composable () -> Unit) {
     RDMA.setComposerEmpty(Composer.Companion.Empty)

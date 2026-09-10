@@ -30,11 +30,30 @@ object ComposeAllowlist {
         "androidx.compose.runtime.Composable",
         "androidx.compose.runtime.remember",
         "androidx.compose.runtime.mutableStateOf",
+        "androidx.compose.runtime.mutableIntStateOf",
         "androidx.compose.runtime.getValue",
         "androidx.compose.runtime.setValue",
         "androidx.compose.runtime.Composer",
         "androidx.compose.runtime.State",
         "androidx.compose.runtime.MutableState",
+        "androidx.compose.runtime.MutableIntState",
+        // Structural helpers that lower to the base Composer protocol (groups,
+        // remember/changed) and therefore work through the proxy unchanged.
+        "androidx.compose.runtime.key",
+        "androidx.compose.runtime.rememberUpdatedState",
+        // Pure annotations (erased at runtime).
+        "androidx.compose.runtime.Stable",
+        "androidx.compose.runtime.Immutable",
+        // Rewritten to the kernel-backed `rdmaSideEffect` bridge.
+        "androidx.compose.runtime.SideEffect",
+        // Rewritten to the kernel-backed `rdmaDisposableEffect` bridge. The
+        // scope/result types and `onDispose` stay in the plugin (pure JS) and are
+        // re-targeted to guest-side stubs by the rewrite; they never cross the
+        // boundary themselves.
+        "androidx.compose.runtime.DisposableEffect",
+        "androidx.compose.runtime.DisposableEffectScope",
+        "androidx.compose.runtime.DisposableEffectResult",
+        "androidx.compose.runtime.DisposableEffectScope.onDispose",
     )
 
     fun isAllowed(fqn: String): Boolean = when {

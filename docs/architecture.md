@@ -166,6 +166,30 @@ FIR rewrite turns `Alignment.Center` into `rdmaAlignmentCenter()` and the guest 
 generates the corresponding stub. The host-side C++ reads the companion singleton and
 wraps the returned `@RDMA` value as a handle.
 
+### Effects (`SideEffect` / `DisposableEffect`)
+
+Effects are **kernel-hosted** for the same reason widgets are: the Compose
+runtime drives their lifecycle (`onRemembered`/`onForgotten`/`onAbandoned`), and
+a guest-side `remember` value is only an opaque `JsValueHolder` the kernel cannot
+interpret. The plugin rewrites each effect into a bridge call:
+
+- `SideEffect { … }` → `rdmaSideEffect { … }`. The guest registers the block and
+  calls `RDMA.sideEffect(blockId)`; the C++ bridge invokes the kernel
+  `sideEffect(blockId)` composable, which composes a real `SideEffect { … }` that
+  forwards the block id back into JS after every commit.
+- `DisposableEffect(keys) { onDispose { … } }` → `rdmaDisposableEffect(keys) { … }`.
+  The guest wraps the body in `{ effect(RdmaDisposableEffectScope()) }` (so the
+  returned result is a plain JS object `{ dispose: fn }`, immune to name mangling
+  and dead-code elimination). `RDMA.disposableEffect(keys, effectFn)` registers the
+  block, marshals the keys, and synchronously composes
+  `disposableEffect(keys, blockId)` in the kernel — a real
+  `remember(keys) { RdmaDisposableEffectObserver(blockId) }`. The observer's
+  `onRemembered` runs the JS body once (`nativeInvokeEffectBody`), `onForgotten`
+  disposes the stored result (`nativeInvokeDispose`), and `onAbandoned` releases
+  the never-invoked block (`nativeInvokeFreeBlock`). The composable returns whether
+  the block was adopted, so the bridge can immediately release a block registered
+  on a recomposition that reused the previous observer.
+
 ## Data Flow
 
 ### Constructor call

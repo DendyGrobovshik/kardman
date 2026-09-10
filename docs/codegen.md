@@ -98,17 +98,23 @@ Rewrite rules (all offsets are against the original source text):
 | `Text(...)` (widget) | `rdmaText(...)` |
 | `runRdmaApp { ... }` | `rdmaRunApp { ... }` |
 | `mutableStateOf(x)` | `rdmaMutableStateOf(x)` |
+| `SideEffect { ... }` | `rdmaSideEffect { ... }` |
+| `DisposableEffect(keys) { ... }` | `rdmaDisposableEffect(keys) { ... }` |
 | `Alignment.Center` (companion `val`) | `rdmaAlignmentCenter()` |
 
 Method calls on `@RDMA` receivers are left untouched — they dispatch dynamically
 on the JS proxy. The `ComposeAllowlist` checker rejects any `androidx.compose.*`
 call/import outside the base protocol (`Composable`, `remember`, `mutableStateOf`,
-`getValue`, `setValue`).
+`getValue`, `setValue`, plus the bridged `SideEffect` and `DisposableEffect`
+symbols). `SideEffect`/`DisposableEffect` are rewritten to the kernel-hosted
+`rdmaSideEffect`/`rdmaDisposableEffect`; their bodies stay in the plugin (JS).
 
 The generated guest-side bridge files (written by the Gradle plugin +
 compiler plugin) complete the picture:
 
 - `RdmaRuntimeBridge.kt` — `external object RDMA` + `rdmaRunApp`/`rdmaMutableStateOf`
+  and the `rdmaSideEffect`/`rdmaDisposableEffect` helpers (the latter carries the
+  guest-side `RdmaDisposableEffectScope` stub)
 - `RdmaWidgetBridge.kt` — per-widget `rdmaXxx` stubs that call `RDMA.composeXxx`
 
 `jsMain` compiles **only** `build/generated/rdma/`, so the JVM-only original
