@@ -43,6 +43,8 @@ object RdmaPluginTransformState {
         "androidx.compose.runtime.mutableIntStateOf",
         "androidx.compose.runtime.SideEffect",
         "androidx.compose.runtime.DisposableEffect",
+        "androidx.compose.runtime.LaunchedEffect",
+        "androidx.compose.runtime.rememberCoroutineScope",
     )
 
     fun configure(manifestPath: String?, outputDir: String?) {
@@ -73,6 +75,8 @@ object RdmaPluginTransformState {
         "androidx.compose.runtime.mutableIntStateOf" -> "rdmaMutableIntStateOf"
         "androidx.compose.runtime.SideEffect" -> "rdmaSideEffect"
         "androidx.compose.runtime.DisposableEffect" -> "rdmaDisposableEffect"
+        "androidx.compose.runtime.LaunchedEffect" -> "rdmaLaunchedEffect"
+        "androidx.compose.runtime.rememberCoroutineScope" -> "rdmaRememberCoroutineScope"
         else -> "rdma" + fqn.substringAfterLast('.').replaceFirstChar { it.uppercase() }
     }
 

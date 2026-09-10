@@ -89,6 +89,45 @@ void initRdmaRuntime(JavaVM* jvm) {
         rt.global().setProperty(rt, "println", std::move(printlnFn));
     }
 
+    // Global setTimeout/clearTimeout shims backing kotlinx-coroutines-js. On JS
+    // (with no `window`/`process`/`navigator`, as in Hermes) `Dispatchers.Default`
+    // and `Dispatchers.Main` are both `SetTimeoutDispatcher` — they dispatch and
+    // resume `delay()` through the global `setTimeout`. The handler is scheduled
+    // onto the Hermes thread via the low-priority self-post queue (rdmaPostJsSelf),
+    // i.e. after any in-flight blocking UI->JS compose work, so coroutine bodies
+    // launched by LaunchedEffect/rememberCoroutineScope run after composition.
+    // Delayed timers are not yet honored (real `delay(ms)` is a follow-up); the
+    // handle returned is a placeholder and clearTimeout is a no-op.
+    {
+        auto& rt = *g_runtime;
+        auto setTimeoutFn = facebook::jsi::Function::createFromHostFunction(
+            rt, facebook::jsi::PropNameID::forAscii(rt, "setTimeout"), 2,
+            [](facebook::jsi::Runtime& r, const facebook::jsi::Value&, const facebook::jsi::Value* args, size_t count) -> facebook::jsi::Value {
+                if (count < 1 || !args[0].isObject() || !args[0].asObject(r).isFunction(r)) {
+                    return facebook::jsi::Value(0.0);
+                }
+                auto fn = std::make_shared<facebook::jsi::Function>(args[0].asObject(r).asFunction(r));
+                facebook::rdma::rdmaPostJsSelf([fn] {
+                    facebook::jsi::Runtime* rt = getRdmaRuntime();
+                    if (!rt) return;
+                    try {
+                        fn->call(*rt, nullptr, 0);
+                    } catch (const facebook::jsi::JSError& e) {
+                        LOGW("JSError in setTimeout handler: %s", e.what());
+                    }
+                });
+                return facebook::jsi::Value(0.0);
+            });
+        rt.global().setProperty(rt, "setTimeout", std::move(setTimeoutFn));
+
+        auto clearTimeoutFn = facebook::jsi::Function::createFromHostFunction(
+            rt, facebook::jsi::PropNameID::forAscii(rt, "clearTimeout"), 1,
+            [](facebook::jsi::Runtime&, const facebook::jsi::Value&, const facebook::jsi::Value*, size_t) -> facebook::jsi::Value {
+                return facebook::jsi::Value::undefined();
+            });
+        rt.global().setProperty(rt, "clearTimeout", std::move(clearTimeoutFn));
+    }
+
     LOGI("RDMA runtime initialized with bridge");
 }
 

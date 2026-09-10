@@ -29,7 +29,13 @@ private const val RDMA_RUNTIME_BRIDGE_SOURCE = """package com.example.plugin
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composer
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.remember
 import kotlin.js.unsafeCast
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 external object RDMA {
     fun registerContent(content: dynamic)
@@ -78,6 +84,34 @@ fun rdmaDisposableEffect(vararg keys: Any?, effect: RdmaDisposableEffectScope.()
     // restarted on every recomposition (the kernel cannot marshal `Unit` itself).
     val marshalled = Array<Any?>(keys.size) { i -> if (keys[i] === Unit) RDMA_UNIT_KEY else keys[i] }
     RDMA.disposableEffect(marshalled, { effect(RdmaDisposableEffectScope()) })
+}
+
+// LaunchedEffect = DisposableEffect with a `suspend` body. Reuses the exact same
+// DisposableEffect bridge: the effect body launches the block on the Hermes-thread
+// `Dispatchers.Main` (deferred to the low-priority queue, so it runs after the
+// current composition) and returns `{ dispose: { job.cancel() } }` so the kernel
+// cancels it on key change / leaving composition.
+@Composable
+fun rdmaLaunchedEffect(vararg keys: Any?, block: suspend CoroutineScope.() -> Unit) {
+    val marshalled = Array<Any?>(keys.size) { i -> if (keys[i] === Unit) RDMA_UNIT_KEY else keys[i] }
+    RDMA.disposableEffect(marshalled, {
+        val job = CoroutineScope(Dispatchers.Main).launch { block() }
+        val result = js("({})")
+        result.dispose = { job.cancel() }
+        result
+    })
+}
+
+// Plugin-local coroutine scope tied to composition lifetime. The scope is
+// remembered (stable across recompositions) and cancelled when this call site
+// leaves the composition. Uses `Dispatchers.Main.immediate` so `launch { }` runs
+// inline on the (already Hermes) thread, matching `rememberCoroutineScope`'s
+// current-thread semantics.
+@Composable
+fun rdmaRememberCoroutineScope(): CoroutineScope {
+    val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+    rdmaDisposableEffect(RDMA_UNIT_KEY) { onDispose { scope.cancel() } }
+    return scope
 }
 
 fun rdmaRunApp(content: @Composable () -> Unit) {

@@ -54,6 +54,13 @@ object ComposeAllowlist {
         "androidx.compose.runtime.DisposableEffectScope",
         "androidx.compose.runtime.DisposableEffectResult",
         "androidx.compose.runtime.DisposableEffectScope.onDispose",
+        // Rewritten to the kernel-backed `rdmaLaunchedEffect` bridge (reuses the
+        // DisposableEffect machinery; the suspend body runs in the plugin on the
+        // Hermes-thread `Dispatchers.Main`).
+        "androidx.compose.runtime.LaunchedEffect",
+        // Rewritten to `rdmaRememberCoroutineScope` (a plugin-local coroutine scope
+        // tied to composition lifetime, cancelled on leave).
+        "androidx.compose.runtime.rememberCoroutineScope",
     )
 
     fun isAllowed(fqn: String): Boolean = when {

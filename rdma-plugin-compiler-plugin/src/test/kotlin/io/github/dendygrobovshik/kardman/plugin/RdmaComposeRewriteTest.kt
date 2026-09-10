@@ -49,6 +49,24 @@ class RdmaComposeRewriteTest {
     }
 
     @Test
+    fun `maps LaunchedEffect to rdmaLaunchedEffect`() {
+        assertEquals(
+            "rdmaLaunchedEffect",
+            RdmaPluginTransformState.bridgeNameFor("androidx.compose.runtime.LaunchedEffect"),
+        )
+        assertTrue(RdmaPluginTransformState.isFunctionQualifiedName("androidx.compose.runtime.LaunchedEffect"))
+    }
+
+    @Test
+    fun `maps rememberCoroutineScope to rdmaRememberCoroutineScope`() {
+        assertEquals(
+            "rdmaRememberCoroutineScope",
+            RdmaPluginTransformState.bridgeNameFor("androidx.compose.runtime.rememberCoroutineScope"),
+        )
+        assertTrue(RdmaPluginTransformState.isFunctionQualifiedName("androidx.compose.runtime.rememberCoroutineScope"))
+    }
+
+    @Test
     fun `structural symbols are allowed but not bridged`() {
         assertTrue(ComposeAllowlist.isAllowed("androidx.compose.runtime.key"))
         assertTrue(ComposeAllowlist.isAllowed("androidx.compose.runtime.rememberUpdatedState"))

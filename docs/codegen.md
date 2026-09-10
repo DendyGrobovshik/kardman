@@ -100,20 +100,26 @@ Rewrite rules (all offsets are against the original source text):
 | `mutableStateOf(x)` | `rdmaMutableStateOf(x)` |
 | `SideEffect { ... }` | `rdmaSideEffect { ... }` |
 | `DisposableEffect(keys) { ... }` | `rdmaDisposableEffect(keys) { ... }` |
+| `LaunchedEffect(keys) { ... }` | `rdmaLaunchedEffect(keys) { ... }` |
+| `rememberCoroutineScope()` | `rdmaRememberCoroutineScope()` |
 | `Alignment.Center` (companion `val`) | `rdmaAlignmentCenter()` |
 
 Method calls on `@RDMA` receivers are left untouched — they dispatch dynamically
 on the JS proxy. The `ComposeAllowlist` checker rejects any `androidx.compose.*`
 call/import outside the base protocol (`Composable`, `remember`, `mutableStateOf`,
-`getValue`, `setValue`, plus the bridged `SideEffect` and `DisposableEffect`
-symbols). `SideEffect`/`DisposableEffect` are rewritten to the kernel-hosted
-`rdmaSideEffect`/`rdmaDisposableEffect`; their bodies stay in the plugin (JS).
+`getValue`, `setValue`, plus the bridged `SideEffect`, `DisposableEffect`,
+`LaunchedEffect` and `rememberCoroutineScope` symbols).
+`SideEffect`/`DisposableEffect`/`LaunchedEffect` are rewritten to the
+kernel-hosted `rdmaSideEffect`/`rdmaDisposableEffect`/`rdmaLaunchedEffect`; their
+bodies stay in the plugin (JS). `LaunchedEffect` reuses the `DisposableEffect`
+bridge and simply launches the `suspend` body on `Dispatchers.Main`.
 
 The generated guest-side bridge files (written by the Gradle plugin +
 compiler plugin) complete the picture:
 
 - `RdmaRuntimeBridge.kt` — `external object RDMA` + `rdmaRunApp`/`rdmaMutableStateOf`
-  and the `rdmaSideEffect`/`rdmaDisposableEffect` helpers (the latter carries the
+  and the `rdmaSideEffect`/`rdmaDisposableEffect`/`rdmaLaunchedEffect`/
+  `rdmaRememberCoroutineScope` helpers (the DisposableEffect ones carry the
   guest-side `RdmaDisposableEffectScope` stub)
 - `RdmaWidgetBridge.kt` — per-widget `rdmaXxx` stubs that call `RDMA.composeXxx`
 

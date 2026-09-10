@@ -166,7 +166,7 @@ FIR rewrite turns `Alignment.Center` into `rdmaAlignmentCenter()` and the guest 
 generates the corresponding stub. The host-side C++ reads the companion singleton and
 wraps the returned `@RDMA` value as a handle.
 
-### Effects (`SideEffect` / `DisposableEffect`)
+### Effects (`SideEffect` / `DisposableEffect` / `LaunchedEffect` / `rememberCoroutineScope`)
 
 Effects are **kernel-hosted** for the same reason widgets are: the Compose
 runtime drives their lifecycle (`onRemembered`/`onForgotten`/`onAbandoned`), and
@@ -189,6 +189,21 @@ interpret. The plugin rewrites each effect into a bridge call:
   the never-invoked block (`nativeInvokeFreeBlock`). The composable returns whether
   the block was adopted, so the bridge can immediately release a block registered
   on a recomposition that reused the previous observer.
+- `LaunchedEffect(keys) { … }` → `rdmaLaunchedEffect(keys) { … }` reuses that same
+  `DisposableEffect` machinery; only the guest body differs — it launches the
+  `suspend` block on `Dispatchers.Main` and returns `{ dispose: { job.cancel() } }`.
+- `rememberCoroutineScope()` → `rdmaRememberCoroutineScope()` — a guest `remember`
+  of `CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)` plus a
+  `rdmaDisposableEffect` on a stable sentinel key that cancels the scope on leave.
+
+### Coroutine scheduling
+
+`Dispatchers.Main`/`Dispatchers.Default` on JS are `setTimeout`-based, and in
+Hermes (no `window`/`process`/`navigator`) the runtime installs a global
+`setTimeout` shim whose handler is scheduled with `rdmaPostJsSelf` — onto the
+**low-priority** JS queue. So a coroutine body runs after the current composition
+(never mid-`rdmaCallJs`), while `Dispatchers.Main.immediate` runs inline
+(`isDispatchNeeded = false`). See `RdmaRuntime.cpp` and [features.md](features.md).
 
 ## Data Flow
 
@@ -255,6 +270,10 @@ UI thread                                Hermes thread
 - **Async** (`rdmaPostJs`) for service callbacks (`httpGetAsync`, `fileCacheReadAsync`, …),
   click callbacks and `nativeInvokeLambda`. These run on the Hermes thread without
   stalling the UI. The JS queue is two-priority: compose/init (`high`) over callbacks (`low`).
+- **Async self-post** (`rdmaPostJsSelf`) — the same low-priority queue, but pushed
+  from the Hermes thread itself. Backs the `setTimeout` shim, i.e. coroutine
+  dispatch (`Dispatchers.Main`/`Default`) and `delay` resumption. A coroutine body
+  therefore runs only after the blocking composition rendezvous has drained.
 - **Async init** (`RdmaBridge.nativeInit`/`nativeEvalAsset`): `nativeInit` populates all
   JNI caches on the UI thread (app-class `FindClass` needs the app classloader) and then
   starts the Hermes thread; `nativeEvalAsset` enqueues evals asynchronously.
@@ -270,7 +289,12 @@ Why the rendezvous exists for `Composer`/state, not just perf isolation:
   Hermes thread; `g_currentComposer` is borrowed into the UI-bound compose op.
 
 Thread ids are captured (`g_uiTid`/`g_jsTid` via `gettid()`) and asserted in debug
-builds in the `rdmaCallJs`/`rdmaCallUi` executors.
+builds in the `rdmaCallJs`/`rdmaCallUi` executors. Additionally, `g_uiInRendezvous`
+is set while the UI thread is inside a blocking `rdmaCallJs`; `rdmaCallUi` asserts
+it (and, in release, returns `undefined` instead of blocking forever), enforcing
+the invariant that a blocking JS→UI call is only legal while the UI thread is
+already at the boundary — a coroutine running async must stay on the direct
+data-path and never rendezvous outside composition.
 
 ## Key Design Decisions
 

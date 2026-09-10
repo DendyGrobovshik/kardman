@@ -79,15 +79,16 @@ upgrade that changes the interface fails fast.
 | `var x by ...` (`getValue`/`setValue`) | state delegation |
 | `SideEffect { ... }` | rewritten to `rdmaSideEffect` (kernel-hosted) |
 | `DisposableEffect(keys) { ... }` | rewritten to `rdmaDisposableEffect` (kernel-hosted) |
+| `LaunchedEffect(keys) { ... }` | rewritten to `rdmaLaunchedEffect` (kernel-hosted, `Dispatchers.Main`) |
+| `rememberCoroutineScope()` | rewritten to `rdmaRememberCoroutineScope` |
 | kernel widgets (`Text`, `Column`, `Button`, `TextField`, ...) | via `@RDMA` |
 
-**Forbidden (compile error):** `LaunchedEffect`, `derivedStateOf`, `snapshotFlow`,
-`rememberCoroutineScope`, `movableContentOf`, `produceState`, animations, and any
-`androidx.compose.*` symbol outside the whitelist.
+**Forbidden (compile error):** `derivedStateOf`, `snapshotFlow`, `movableContentOf`,
+`produceState`, animations, and any `androidx.compose.*` symbol outside the whitelist.
 
 The plugin compiler plugin rejects any call or import of a forbidden compose symbol
 with an error of the form:
 
 ```
-kernel doesn't support 'LaunchedEffect' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
+kernel doesn't support 'derivedStateOf' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
 ```

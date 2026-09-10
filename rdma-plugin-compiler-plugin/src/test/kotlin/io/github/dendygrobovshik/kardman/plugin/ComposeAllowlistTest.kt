@@ -43,6 +43,8 @@ class ComposeAllowlistTest {
             "androidx.compose.runtime.DisposableEffectScope",
             "androidx.compose.runtime.DisposableEffectResult",
             "androidx.compose.runtime.DisposableEffectScope.onDispose",
+            "androidx.compose.runtime.LaunchedEffect",
+            "androidx.compose.runtime.rememberCoroutineScope",
         )
         for (fqn in allowed) {
             assertTrue(ComposeAllowlist.isAllowed(fqn), "$fqn should be allowed")
@@ -64,9 +66,7 @@ class ComposeAllowlistTest {
     @Test
     fun `rejects unsupported compose symbols`() {
         val rejected = listOf(
-            "androidx.compose.runtime.LaunchedEffect",
             "androidx.compose.runtime.derivedStateOf",
-            "androidx.compose.runtime.rememberCoroutineScope",
             "androidx.compose.runtime.collectAsState",
             "androidx.compose.runtime.mutableStateListOf",
             "androidx.compose.runtime.mutableStateMapOf",

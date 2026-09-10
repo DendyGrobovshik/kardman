@@ -80,6 +80,12 @@ void rdmaPostJs(JsTask task);
 // Non-blocking post of a high-priority (compose/init) task to the JS thread.
 void rdmaPostJsHigh(JsTask task);
 
+// Non-blocking self-post of a low-priority (async) task, made from the JS
+// thread itself. Used to schedule coroutine bodies (Dispatchers.Main) after the
+// current compose/init work completes, so they never stall the blocking
+// UI->JS rendezvous.
+void rdmaPostJsSelf(JsTask task);
+
 // Start the Hermes thread (async). Must be called on the UI thread after all
 // JNI caches are initialized. The thread creates the runtime + bridge and then
 // services the queue.

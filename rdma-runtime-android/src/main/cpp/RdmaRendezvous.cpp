@@ -72,6 +72,13 @@ std::atomic<bool> g_runtimeReady{false};
 std::atomic<int> g_evalPending{0};
 std::atomic<bool> g_stopped{false};
 
+// Count of active blocking rdmaCallJs calls on the UI thread (rdmaCallJs can be
+// nested: a widget content lambda composes nativeInvokeScopeBlock inside the
+// outer content composition). rdmaCallUi is only valid while this is > 0: a
+// blocking JS->UI call made while the UI thread is not at the boundary (e.g.
+// from a deferred coroutine) would never be serviced and would deadlock forever.
+std::atomic<int> g_uiInRendezvous{0};
+
 JavaVM* g_jvm = nullptr;
 std::thread g_jsThread;
 
@@ -132,6 +139,16 @@ void executeUiTask(UiRequest& req) {
 } // namespace
 
 RdmaResult rdmaCallUi(UiTask task) {
+    const bool inRendezvous = g_uiInRendezvous.load(std::memory_order_acquire) > 0;
+#ifndef NDEBUG
+    assert(inRendezvous);
+#endif
+    if (!inRendezvous) {
+        LOGW("rdmaCallUi called while the UI thread is not in a rendezvous; "
+             "returning undefined to avoid a deadlock");
+        return RdmaResult::undefined();
+    }
+
     auto req = std::make_shared<UiRequest>();
     req->task = std::move(task);
 
@@ -161,6 +178,10 @@ void rdmaCallJs(JsTask task) {
     auto req = std::make_shared<JsRequest>();
     req->task = std::move(task);
 
+    // Increment before enqueueing so a JS task cannot observe the counter as
+    // zero while the UI thread is about to service it (closes the push/notify
+    // race). rdmaCallJs is reentrant (nested scope blocks), hence a counter.
+    g_uiInRendezvous.fetch_add(1, std::memory_order_release);
     {
         std::unique_lock<std::mutex> lk(g_mutex);
         g_uiToJsHigh.push_back(req);
@@ -181,6 +202,7 @@ void rdmaCallJs(JsTask task) {
             g_cv.wait(lk);
         }
     }
+    g_uiInRendezvous.fetch_sub(1, std::memory_order_release);
 }
 
 void rdmaPostJs(JsTask task) {
@@ -199,6 +221,16 @@ void rdmaPostJsHigh(JsTask task) {
     {
         std::unique_lock<std::mutex> lk(g_mutex);
         g_uiToJsHigh.push_back(req);
+    }
+    g_cv.notify_all();
+}
+
+void rdmaPostJsSelf(JsTask task) {
+    auto req = std::make_shared<JsRequest>();
+    req->task = std::move(task);
+    {
+        std::unique_lock<std::mutex> lk(g_mutex);
+        g_uiToJsLow.push_back(req);
     }
     g_cv.notify_all();
 }

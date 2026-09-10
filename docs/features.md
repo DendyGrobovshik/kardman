@@ -183,9 +183,9 @@ fun main() {
 
 Allowed in the plugin: `@Composable` functions/lambdas, `remember { ... }` (with
 keys), `mutableStateOf` + `getValue`/`setValue` (the `var x by ...` delegation),
-the kernel's `@RDMA` widgets, and two effects — `SideEffect` and
-`DisposableEffect` (both hosted in the kernel, see below). `runRdmaApp { ... }`
-installs the root content.
+the kernel's `@RDMA` widgets, three effects — `SideEffect`, `DisposableEffect` and
+`LaunchedEffect` — and `rememberCoroutineScope()` (all hosted in the kernel, see
+below). `runRdmaApp { ... }` installs the root content.
 
 Lambdas matter here. The compiler distinguishes two kinds of function
 parameters on a widget:
@@ -197,11 +197,11 @@ parameters on a widget:
 
 ### Effects
 
-`SideEffect` and `DisposableEffect` run their bodies in the plugin (JS), but the
-**lifecycle is owned by the kernel**: the Compose runtime must be the one calling
-`onRemembered`/`onForgotten`/`onAbandoned`, and a guest-side `remember` value is
-just an opaque `JsValueHolder` the kernel cannot drive. So each effect is
-rewritten into a kernel-backed bridge:
+`SideEffect`, `DisposableEffect` and `LaunchedEffect` run their bodies in the
+plugin (JS), but the **lifecycle is owned by the kernel**: the Compose runtime
+must be the one calling `onRemembered`/`onForgotten`/`onAbandoned`, and a
+guest-side `remember` value is just an opaque `JsValueHolder` the kernel cannot
+drive. So each effect is rewritten into a kernel-backed bridge:
 
 - `SideEffect { … }` → `rdmaSideEffect { … }` — the kernel composes a real
   `SideEffect` that forwards the block id back into JS after every commit.
@@ -213,16 +213,48 @@ rewritten into a kernel-backed bridge:
   host. Primitive keys are compared faithfully; `Unit` is normalized to a stable
   sentinel; object/`@RDMA`-handle keys are treated as always-changed (a known
   limitation until stable handle identity lands).
+- `LaunchedEffect(keys) { … }` → `rdmaLaunchedEffect(keys) { … }` — the exact same
+  `DisposableEffect` machinery, but the body is a `suspend` block: it is launched
+  on the plugin's `Dispatchers.Main` (the Hermes thread) and the returned result
+  disposes by cancelling the launched `Job`. Key-change and leave-composition
+  semantics therefore match the host's `LaunchedEffect` exactly.
+- `rememberCoroutineScope()` → `rdmaRememberCoroutineScope()` — a plugin-local
+  `CoroutineScope` remembered across recompositions and cancelled when the call
+  site leaves the composition (again via the `DisposableEffect` bridge).
 
 Because the kernel must be able to faithfully execute whatever the plugin
 composes, everything else from `androidx.compose.*` is rejected at compile time.
-Forbidden: `LaunchedEffect`, `derivedStateOf`, `snapshotFlow`,
-`rememberCoroutineScope`, `movableContentOf`, `produceState`, animations, and any
-other Compose symbol outside the allowlist. The error is explicit:
+Forbidden: `derivedStateOf`, `snapshotFlow`, `movableContentOf`, `produceState`,
+animations, and any other Compose symbol outside the allowlist. The error is
+explicit:
 
 ```
-kernel doesn't support 'LaunchedEffect' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
+kernel doesn't support 'derivedStateOf' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
 ```
+
+### Coroutines in the plugin
+
+The plugin is **single-threaded**: it runs entirely on the Hermes thread, and a
+`suspend` function is not a background thread — it is just a resumable function
+on that same thread. `Dispatchers.Main` (and its `immediate` variant) are the
+Hermes-thread event loop, backed by a global `setTimeout` shim that the runtime
+installs and that schedules continuation work onto the low-priority JS queue —
+i.e. after any in-flight composition, never in the middle of it.
+
+- `Dispatchers.Main` always dispatches (deferred), so a `LaunchedEffect` body runs
+  after the current composition.
+- `Dispatchers.Main.immediate` runs inline, so `rememberCoroutineScope().launch { }`
+  starts synchronously, matching the host's current-thread semantics.
+- `Dispatchers.Default` on JS is the same `setTimeout`-based event loop (there is
+  no background thread pool); `Dispatchers.IO` does not exist on JS and is a
+  compile error. Real parallelism lives in the kernel: offload heavy work to an
+  `@RDMA` function rather than a dispatcher.
+- `delay(ms)` is not yet implemented (timers are a separate follow-up); `launch`
+  without `delay` works today.
+
+The plugin must therefore only use **direct** calls inside a coroutine (data-path
+JNI and direct state reads/writes); a blocking JS→UI rendezvous outside the
+active composition would deadlock, so the runtime asserts against it.
 
 ## Dynamic loading
 
@@ -240,12 +272,13 @@ app-update-free updates of both plugin logic and UI.
 and widgets; types `Int`/`Long`/`Float`/`Double`/`Boolean`/`String` (nullable
 allowed), `@RDMA` references, `List<T>`, lambdas, `Unit` returns; UI via the base
 Compose protocol (`remember`/`mutableStateOf`/widgets + content lambdas and
-callbacks) plus the `SideEffect` and `DisposableEffect` effects.
+callbacks) plus the `SideEffect`, `DisposableEffect` and `LaunchedEffect` effects
+and `rememberCoroutineScope` (single-threaded, `Dispatchers.Main`/`.immediate`).
 
 **Not yet** — non-`@RDMA` value types (`enum`, `Array`, `Map`, data classes),
 generics beyond `List<T>`; secondary constructors, named/default arguments;
 overloaded methods, extension and `suspend` functions; block-body overrides;
-`LaunchedEffect`/coroutines, `derivedStateOf`/`snapshotFlow`, animations and
-anything else outside the allowlist; stable identity for object/`@RDMA` effect
-keys; cross-runtime object identity/`equals`, JNI exception propagation,
+`derivedStateOf`/`snapshotFlow`, animations and anything else outside the
+allowlist; `delay(ms)`/timers; stable identity for object/`@RDMA` effect keys;
+cross-runtime object identity/`equals`, JNI exception propagation,
 async/Promise returns, batch transfers.
