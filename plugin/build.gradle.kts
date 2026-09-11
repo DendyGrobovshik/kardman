@@ -18,11 +18,16 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.androidMultiplatformLibrary)
     id("io.github.dendygrobovshik.kardman.rdma-plugin-compiler") version "1.0"
 }
 
 kotlin {
-    jvm()
+    android {
+        namespace = "com.example.plugin"
+        compileSdk = libs.versions.android.compileSdk.get().toInt()
+        minSdk = libs.versions.android.minSdk.get().toInt()
+    }
 
     js {
         browser()
@@ -30,7 +35,7 @@ kotlin {
     }
 
     sourceSets {
-        jvmMain {
+        androidMain {
             kotlin.setSrcDirs(listOf("src/kotlin"))
             dependencies {
                 implementation(project(":kernel"))
@@ -46,12 +51,12 @@ kotlin {
     }
 }
 
-tasks.matching { it.name == "compileKotlinJvm" }.configureEach {
-    dependsOn(":kernel:compileKotlinJvm")
+tasks.matching { it.name == "compileAndroidMain" }.configureEach {
+    dependsOn(":kernel:compileAndroidMain")
 }
 
 tasks.matching { it.name == "compileKotlinJs" }.configureEach {
-    dependsOn("compileKotlinJvm")
+    dependsOn("compileAndroidMain")
 }
 
 tasks.matching { it.name.startsWith("compile") || it.name.startsWith("js") }.configureEach {

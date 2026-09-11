@@ -16,11 +16,16 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.androidMultiplatformLibrary)
     id("io.github.dendygrobovshik.kardman.rdma-kernel-compiler") version "1.0"
 }
 
 kotlin {
-    jvm()
+    android {
+        namespace = "com.example.kernel"
+        compileSdk = libs.versions.android.compileSdk.get().toInt()
+        minSdk = libs.versions.android.minSdk.get().toInt()
+    }
 
     sourceSets {
         commonMain {
@@ -36,6 +41,6 @@ kotlin {
     }
 }
 
-tasks.matching { it.name == "compileKotlinJvm" }.configureEach {
+tasks.matching { it.name.startsWith("compile") && it.name.endsWith("KotlinAndroid") }.configureEach {
     outputs.upToDateWhen { false }
 }

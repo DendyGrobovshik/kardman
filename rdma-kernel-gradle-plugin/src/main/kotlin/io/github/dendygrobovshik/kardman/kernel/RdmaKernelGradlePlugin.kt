@@ -47,7 +47,8 @@ class RdmaKernelGradlePlugin : KotlinCompilerPluginSupportPlugin {
     }
 
     override fun isApplicable(kotlinCompilation: KotlinCompilation<*>): Boolean =
-        kotlinCompilation.platformType == KotlinPlatformType.jvm
+        kotlinCompilation.platformType == KotlinPlatformType.jvm ||
+            kotlinCompilation.platformType == KotlinPlatformType.androidJvm
 
     override fun getCompilerPluginId(): String = "rdma-kernel-compiler-plugin"
 

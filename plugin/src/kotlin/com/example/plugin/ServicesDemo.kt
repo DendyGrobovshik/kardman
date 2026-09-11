@@ -15,27 +15,16 @@
  */
 package com.example.plugin
 
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import com.example.kernel.Button
-import com.example.kernel.Column
-import com.example.kernel.Text
-import com.example.kernel.runRdmaApp
+import com.example.kernel.services.httpGet
+import com.example.kernel.services.platformInfo
 
-@Composable
-fun Counter() {
-    var count by remember { mutableStateOf(0) }
-    Column {
-        Text("Count: $count")
-        Button("Increment", onClick = { count++ })
-    }
-}
+fun runServicesDemo() {
+    val info = platformInfo()
+    println("Platform: os=${info.os} model=${info.deviceModel} version=${info.osVersion}")
 
-fun main() {
-    runPersonDemo()
-    runServicesDemo()
-    runRdmaApp { Counter() }
+    httpGet(
+        "https://example.com",
+        { body: String -> println("HTTP OK: ${body.take(80)}") },
+        { err: String -> println("HTTP ERR: $err") },
+    )
 }
