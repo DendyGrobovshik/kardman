@@ -49,6 +49,7 @@ static thread_local bool g_inComposition = false;
 
 static UserBridgeInstaller g_userBridge = nullptr;
 static UserBridgeJniInit g_userBridgeJniInit = nullptr;
+static ObjectWrapper g_objectWrapper = nullptr;
 
 extern "C" void rdmaSetUserBridgeInstaller(UserBridgeInstaller installer) {
     g_userBridge = installer;
@@ -56,6 +57,21 @@ extern "C" void rdmaSetUserBridgeInstaller(UserBridgeInstaller installer) {
 
 extern "C" void rdmaSetUserBridgeJniInit(UserBridgeJniInit init) {
     g_userBridgeJniInit = init;
+}
+
+extern "C" void rdmaSetObjectWrapper(ObjectWrapper wrapper) {
+    g_objectWrapper = wrapper;
+}
+
+jsi::Value wrapAny(jsi::Runtime& rt, JavaVM* jvm, jobject obj) {
+    JNIEnv* env = getEnv(jvm);
+    if (!env) return jsi::Value::undefined();
+    jsi::Value unboxed = unboxJni(env, rt, obj);
+    if (!unboxed.isUndefined()) return unboxed;
+    if (g_objectWrapper) {
+        return g_objectWrapper(rt, jvm, obj);
+    }
+    return jsi::Value::undefined();
 }
 
 // ---------------------------------------------------------------- JNI cache
@@ -663,7 +679,7 @@ static void runCallback(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal
             jsArgs.reserve(n);
             for (jsize i = 0; i < n; i++) {
                 jobject elem = env->GetObjectArrayElement(argsGlobal, i);
-                jsArgs.push_back(unboxJni(env, rt, elem));
+                jsArgs.push_back(wrapAny(rt, g_composeCache.jvm, elem));
                 if (elem) env->DeleteLocalRef(elem);
             }
         }
@@ -683,7 +699,7 @@ static void runLambda(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal) 
             jsArgs.reserve(n);
             for (jsize i = 0; i < n; i++) {
                 jobject elem = env->GetObjectArrayElement(argsGlobal, i);
-                jsArgs.push_back(unboxJni(env, rt, elem));
+                jsArgs.push_back(wrapAny(rt, g_composeCache.jvm, elem));
                 if (elem) env->DeleteLocalRef(elem);
             }
         }

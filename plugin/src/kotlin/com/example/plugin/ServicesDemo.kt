@@ -24,7 +24,9 @@ fun runServicesDemo() {
 
     httpGet(
         "https://example.com",
-        { body: String -> println("HTTP OK: ${body.take(80)}") },
-        { err: String -> println("HTTP ERR: $err") },
+        { response ->
+            println("HTTP ${response.status}: ${response.body ?: ""}")
+        },
+        { err -> println("HTTP ERR: $err") },
     )
 }

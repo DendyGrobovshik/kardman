@@ -155,6 +155,53 @@ class IntegrationTest {
         assertContains(bridgeCpp, "asFunction")
     }
 
+    @Test
+    fun `wrapUserObject dispatches to createXWrapper by class name`() {
+        val classes = listOf(personInfo, vampierInfo)
+        val cppFiles = generateCpp(classes)
+        val bridgeCpp = cppFiles["RdmaBridge.cpp"] ?: error("Bridge not generated")
+
+        assertContains(bridgeCpp, "jsi::Value wrapUserObject")
+        assertContains(bridgeCpp, """if (name == "com.example.kernel.Person") return createPersonWrapper""")
+        assertContains(bridgeCpp, """if (name == "com.example.kernel.VeryOldVampier") return createVeryOldVampierWrapper""")
+    }
+
+    @Test
+    fun `List property getter wraps via createListHandle`() {
+        val holder = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Holder",
+            qualifiedName = "com.example.kernel.Holder",
+            constructors = listOf(ConstructorInfo(emptyList())),
+            methods = emptyList(),
+            properties = listOf(
+                PropertyInfo("items", "kotlin.collections.List", false, isList = true, listElementType = "com.example.kernel.Person"),
+            ),
+        )
+        val cppFiles = generateCpp(listOf(holder, personInfo))
+        val holderCpp = cppFiles["HolderProxy.cpp"] ?: error("Holder C++ not generated")
+
+        assertContains(holderCpp, "createListHandle")
+        assertContains(holderCpp, "getter_items")
+    }
+
+    @Test
+    fun `List constructor param materializes JS array`() {
+        val wrapper = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Wrapper",
+            qualifiedName = "com.example.kernel.Wrapper",
+            constructors = listOf(ConstructorInfo(listOf(
+                ParameterInfo("items", "kotlin.collections.List", isList = true, listElementType = "com.example.kernel.Person"),
+            ))),
+            methods = emptyList(),
+            properties = emptyList(),
+        )
+        val cppFiles = generateCpp(listOf(wrapper, personInfo))
+        val wrapperCpp = cppFiles["WrapperProxy.cpp"] ?: error("Wrapper C++ not generated")
+
+        assertContains(wrapperCpp, "materializeArray")
+        assertContains(wrapperCpp, "arg_items")
+    }
+
     private fun generateCpp(classes: List<RdmaClassInfo>): Map<String, String> {
         val files = mutableMapOf<String, ByteArrayOutputStream>()
         CppGenerator { fileName, _ ->

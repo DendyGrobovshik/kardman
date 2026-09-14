@@ -18,13 +18,48 @@ package com.example.kernel.services
 import io.github.dendygrobovshik.kardman.RDMA
 
 /**
- * Offloads an HTTP GET to the kernel's IO thread and delivers the response body
- * back to the plugin via [onSuccess]/[onError]. The plugin is single-threaded and
- * has no sockets, so network access must live in the kernel.
+ * Offloads HTTP to the kernel's IO thread and delivers a typed [HttpResponse] back
+ * to the plugin via [onSuccess]/[onError]. The plugin is single-threaded and has no
+ * sockets, so network access must live in the kernel.
  */
 @RDMA
-fun httpGet(url: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) {
-    httpGetImpl(url, onSuccess, onError)
+class HttpHeader(val name: String, val value: String)
+
+@RDMA
+class HttpRequest(
+    val method: String,
+    val url: String,
+    val headers: List<HttpHeader>?,
+    val body: String?,
+)
+
+@RDMA
+class HttpResponse(
+    val status: Int,
+    val headers: List<HttpHeader>?,
+    val body: String?,
+)
+
+@RDMA
+fun httpSend(request: HttpRequest, onSuccess: (HttpResponse) -> Unit, onError: (String) -> Unit) {
+    httpExecute(request.method, request.url, request.headers, request.body, onSuccess, onError)
 }
 
-internal expect fun httpGetImpl(url: String, onSuccess: (String) -> Unit, onError: (String) -> Unit)
+@RDMA
+fun httpGet(url: String, onSuccess: (HttpResponse) -> Unit, onError: (String) -> Unit) {
+    httpExecute("GET", url, null, null, onSuccess, onError)
+}
+
+@RDMA
+fun httpPost(url: String, body: String?, onSuccess: (HttpResponse) -> Unit, onError: (String) -> Unit) {
+    httpExecute("POST", url, null, body, onSuccess, onError)
+}
+
+internal expect fun httpExecute(
+    method: String,
+    url: String,
+    headers: List<HttpHeader>?,
+    body: String?,
+    onSuccess: (HttpResponse) -> Unit,
+    onError: (String) -> Unit,
+)

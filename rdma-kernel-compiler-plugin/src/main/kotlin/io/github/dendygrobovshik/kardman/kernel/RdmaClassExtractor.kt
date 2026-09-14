@@ -104,6 +104,8 @@ object RdmaClassExtractor {
                     type = type.toTypeName(),
                     isMutable = prop.isVar,
                     nullable = type.isNullable(),
+                    isList = type.isList(),
+                    listElementType = type.listElementType(),
                 )
             }
             .toList()

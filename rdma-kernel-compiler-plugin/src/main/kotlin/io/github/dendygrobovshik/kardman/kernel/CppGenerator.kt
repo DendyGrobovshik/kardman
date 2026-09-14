@@ -279,14 +279,21 @@ ${info.className}NativeState::~${info.className}NativeState() {
         for (prop in info.properties) {
             val retType = JniTypeMapper.forType(prop.type)
             val getterName = "get${prop.name.replaceFirstChar { it.uppercase() }}"
-            val returnExpr = when (prop.type) {
-                "kotlin.String" -> {
+            val returnExpr = when {
+                prop.isList -> {
+                    val nullCheck = if (prop.nullable) "if (jret == nullptr) return jsi::Value::null(); " else ""
+                    val elemType = prop.listElementType ?: "kotlin.Any"
+                    "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}); $nullCheck" +
+                        "jobject globalRet = env->NewGlobalRef(jret); env->DeleteLocalRef(jret); " +
+                        "return createListHandle(r, jvm, globalRet, \"$elemType\");"
+                }
+                prop.type == "kotlin.String" -> {
                     "auto jstr = (jstring)env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}); auto cstr = env->GetStringUTFChars(jstr, nullptr); auto result = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jstr, cstr); env->DeleteLocalRef(jstr); return result;"
                 }
-                "kotlin.Int" -> "return jsi::Value((double)env->CallIntMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
-                "kotlin.Boolean" -> "return jsi::Value(env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
-                "kotlin.Double", "kotlin.Float" -> "return jsi::Value(env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
-                "kotlin.Long" -> "return jsi::Value((double)env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
+                prop.type == "kotlin.Int" -> "return jsi::Value((double)env->CallIntMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
+                prop.type == "kotlin.Boolean" -> "return jsi::Value(env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
+                prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "return jsi::Value(env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
+                prop.type == "kotlin.Long" -> "return jsi::Value((double)env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
                 else -> "return jsi::Value::undefined();"
             }
             out.write("""
@@ -301,12 +308,16 @@ static jsi::Value ${info.className}_${getterName}(jsi::Runtime& r, JavaVM* jvm, 
 """)
             if (prop.isMutable) {
                 val setterName = "set${prop.name.replaceFirstChar { it.uppercase() }}"
-                val callExpr = when (prop.type) {
-                    "kotlin.Int" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jint)args[0].getNumber());"
-                    "kotlin.Boolean" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getBool());"
-                    "kotlin.Double", "kotlin.Float" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getNumber());"
-                    "kotlin.Long" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jlong)args[0].getNumber());"
-                    "kotlin.String" -> "auto jstr = env->NewStringUTF(args[0].getString(r).utf8(r).c_str()); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, jstr); env->DeleteLocalRef(jstr);"
+                val callExpr = when {
+                    prop.isList -> {
+                        val elemType = prop.listElementType ?: "kotlin.Any"
+                        "auto listObj = args[0].asObject(r); jobject argList = materializeArray(env, r, jvm, listObj, \"$elemType\"); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, argList);"
+                    }
+                    prop.type == "kotlin.Int" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jint)args[0].getNumber());"
+                    prop.type == "kotlin.Boolean" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getBool());"
+                    prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getNumber());"
+                    prop.type == "kotlin.Long" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jlong)args[0].getNumber());"
+                    prop.type == "kotlin.String" -> "auto jstr = env->NewStringUTF(args[0].getString(r).utf8(r).c_str()); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, jstr); env->DeleteLocalRef(jstr);"
                     else -> ""
                 }
                 out.write("""
@@ -527,6 +538,18 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                 if (type != null) {
                     val extract = type.fromJsi.replace("%d", idx.toString())
                     out.write("    ${type.cppType} cpp_${param.name} = $extract;\n")
+                } else if (param.isList) {
+                    val elemType = param.listElementType ?: "kotlin.Any"
+                    out.write("    jobject arg_${param.name} = nullptr;\n")
+                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("        auto listObj_${param.name} = args[$idx].asObject(rt);\n")
+                    out.write("        if (listObj_${param.name}.hasNativeState(rt)) {\n")
+                    out.write("            auto ns_${param.name} = listObj_${param.name}.getNativeState(rt);\n")
+                    out.write("            if (ns_${param.name}) arg_${param.name} = *(jobject*)((char*)ns_${param.name}.get() + 16);\n")
+                    out.write("        } else {\n")
+                    out.write("            arg_${param.name} = materializeArray(env, rt, jvm, listObj_${param.name}, \"$elemType\");\n")
+                    out.write("        }\n")
+                    out.write("    }\n")
                 } else if (isRdmaClass(param.type, allClasses)) {
                     val rdmaName = rdmaClassByName(param.type, allClasses)!!.className
                     if (param.nullable) {
@@ -556,7 +579,11 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     "kotlin.Boolean" -> "(jboolean)cpp_${param.name}"
                     "kotlin.Double", "kotlin.Float" -> "(jdouble)cpp_${param.name}"
                     "kotlin.Long" -> "(jlong)cpp_${param.name}"
-                    else -> if (isRdmaClass(param.type, allClasses)) "arg_${param.name}" else "nullptr"
+                    else -> when {
+                        param.isList -> "arg_${param.name}"
+                        isRdmaClass(param.type, allClasses) -> "arg_${param.name}"
+                        else -> "nullptr"
+                    }
                 }
             }
             out.write("    jobject localObj = env->NewObject(g_rdmaCache.${cacheVar}.clazz, g_rdmaCache.${cacheVar}.constructor${if (params.isNotEmpty()) ", $params" else ""});\n")
@@ -623,6 +650,12 @@ void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma);
 // UI thread. Registered via rdmaSetUserBridgeJniInit and invoked from
 // initRdmaComposeJniCache() before the Hermes thread starts.
 void initUserBridgeJniCaches(JNIEnv* env);
+
+// Wraps an existing JVM object into a JSI proxy by class name. Registered via
+// rdmaSetObjectWrapper and invoked by the generic runtime to marshal @RDMA
+// objects returned through service-lambda arguments and List elements. Takes
+// ownership of the passed jobject (converts it to a global ref).
+jsi::Value wrapUserObject(jsi::Runtime& rt, JavaVM* jvm, jobject obj);
 
 } // namespace rdma
 } // namespace facebook
@@ -756,6 +789,32 @@ static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std:
         }
         cpp.write("""
     return jsi::Object(rt);
+}
+
+jsi::Value wrapUserObject(jsi::Runtime& rt, JavaVM* jvm, jobject obj) {
+    if (!obj) return jsi::Value::null();
+    JNIEnv* env = getEnv(jvm);
+    if (!env) return jsi::Value::undefined();
+    jclass objClass = env->GetObjectClass(obj);
+    jclass classClass = env->FindClass("java/lang/Class");
+    jmethodID getName = env->GetMethodID(classClass, "getName", "()Ljava/lang/String;");
+    jstring jname = (jstring)env->CallObjectMethod(objClass, getName);
+    env->DeleteLocalRef(objClass);
+    env->DeleteLocalRef(classClass);
+    if (!jname) return jsi::Value::undefined();
+    const char* cname = env->GetStringUTFChars(jname, nullptr);
+    std::string name(cname);
+    env->ReleaseStringUTFChars(jname, cname);
+    env->DeleteLocalRef(jname);
+
+    jobject globalObj = env->NewGlobalRef(obj);
+""")
+        for (info in infos) {
+            cpp.write("""    if (name == "${info.qualifiedName}") return create${info.className}Wrapper(rt, jvm, globalObj);
+""")
+        }
+        cpp.write("""    env->DeleteGlobalRef(globalObj);
+    return jsi::Value::undefined();
 }
 
 } // namespace rdma

@@ -62,6 +62,8 @@ data class PropertyInfo(
     val type: String,
     val isMutable: Boolean,
     val nullable: Boolean = false,
+    val isList: Boolean = false,
+    val listElementType: String? = null,
 )
 
 @Serializable

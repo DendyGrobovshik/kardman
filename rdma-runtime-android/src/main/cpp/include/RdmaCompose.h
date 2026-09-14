@@ -105,6 +105,18 @@ extern "C" void rdmaSetUserBridgeInstaller(UserBridgeInstaller installer);
 typedef void (*UserBridgeJniInit)(JNIEnv* env);
 extern "C" void rdmaSetUserBridgeJniInit(UserBridgeJniInit init);
 
+// User-bridge object-wrapper hook: wraps a JVM object (already a global ref) into
+// a JSI proxy using the user's generated `create<X>Wrapper`. Returns `undefined`
+// for objects it does not recognize. Used by the generic runtime to marshal
+// @RDMA objects that cross the boundary in service-lambda arguments and List
+// elements (the generic runtime only knows primitives/String via `unboxJni`).
+typedef jsi::Value (*ObjectWrapper)(jsi::Runtime& rt, JavaVM* jvm, jobject obj);
+extern "C" void rdmaSetObjectWrapper(ObjectWrapper wrapper);
+
+// Wraps an arbitrary boxed JVM object into a jsi::Value: primitives/String via
+// `unboxJni`, anything else via the registered object wrapper (if any).
+jsi::Value wrapAny(jsi::Runtime& rt, JavaVM* jvm, jobject obj);
+
 // Runs the registered content on the Hermes thread. The passed composer is a
 // global ref owned by the caller (the content task); it is deleted by the caller.
 void invokeRegisteredContent(jsi::Runtime& rt, jobject composerGlobal);

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "ListHandle.h"
+#include "RdmaCompose.h"
 #include <jni.h>
 
 namespace facebook {
@@ -36,9 +37,9 @@ void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject
             jmethodID getMethod = env->GetMethodID(listCls, "get", "(I)Ljava/lang/Object;");
             jobject element = env->CallObjectMethod(state->globalListRef_, getMethod, index);
             if (!element) return jsi::Value::null();
-            jobject globalElem = env->NewGlobalRef(element);
+            jsi::Value result = wrapAny(r, jvm, element);
             env->DeleteLocalRef(element);
-            return jsi::Value::null();
+            return result;
         });
     obj.setProperty(rt, "get", std::move(getFn));
     

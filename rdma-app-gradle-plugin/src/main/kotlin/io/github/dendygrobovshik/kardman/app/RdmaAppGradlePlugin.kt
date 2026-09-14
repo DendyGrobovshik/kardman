@@ -265,6 +265,7 @@ extern "C" JNIEXPORT void JNICALL
 ${p}UserBridge_nativeInstall(JNIEnv* env, jclass) {
     facebook::rdma::rdmaSetUserBridgeInstaller(&facebook::rdma::installUserBridge);
     facebook::rdma::rdmaSetUserBridgeJniInit(&facebook::rdma::initUserBridgeJniCaches);
+    facebook::rdma::rdmaSetObjectWrapper(&facebook::rdma::wrapUserObject);
     LOGI("User bridge installer registered");
 }
 

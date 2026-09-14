@@ -21,22 +21,38 @@ import java.util.concurrent.Executors
 
 private val httpExecutor = Executors.newCachedThreadPool()
 
-internal actual fun httpGetImpl(url: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) {
+internal actual fun httpExecute(
+    method: String,
+    url: String,
+    headers: List<HttpHeader>?,
+    body: String?,
+    onSuccess: (HttpResponse) -> Unit,
+    onError: (String) -> Unit,
+) {
     httpExecutor.submit {
         var connection: HttpURLConnection? = null
         try {
             connection = URL(url).openConnection() as HttpURLConnection
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
-            connection.requestMethod = "GET"
+            connection.requestMethod = method
+
+            headers?.forEach { h -> connection.setRequestProperty(h.name, h.value) }
+
+            if (body != null) {
+                connection.doOutput = true
+                connection.outputStream.bufferedWriter().use { it.write(body) }
+            }
+
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
-            if (code in 200..299) {
-                onSuccess(body)
-            } else {
-                onError("HTTP $code: ${body.take(200)}")
-            }
+            val responseBody = stream?.bufferedReader()?.use { it.readText() } ?: ""
+
+            val responseHeaders = connection.headerFields
+                .filterKeys { it != null }
+                .flatMap { (k, values) -> values.map { HttpHeader(k!!, it) } }
+
+            onSuccess(HttpResponse(code, responseHeaders, responseBody))
         } catch (e: Exception) {
             onError(e.message ?: "unknown error")
         } finally {
