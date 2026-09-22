@@ -23,7 +23,17 @@ import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import io.github.dendygrobovshik.kardman.types.StaticInfo
 import java.io.OutputStream
 
-class CppGenerator(private val output: (String, String) -> OutputStream) {
+class CppGenerator(
+    private val moduleId: String = "",
+    private val output: (String, String) -> OutputStream,
+) {
+
+    /** Suffix appended to module-level generated file names to avoid collisions across kernel modules. */
+    private val fileSuffix: String = if (moduleId.isEmpty()) "" else "_$moduleId"
+
+    /** Inner C++ namespace wrapping this module's generated glue (empty = unnamespaced). */
+    private val nsOpen: String = if (moduleId.isEmpty()) "" else "namespace $moduleId {\n"
+    private val nsClose: String = if (moduleId.isEmpty()) "" else "} // namespace $moduleId\n"
 
     fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo> = emptyList()) {
         val plainFunctions = functions.filter { !it.composable }
@@ -45,6 +55,15 @@ class CppGenerator(private val output: (String, String) -> OutputStream) {
         return allClasses.find { it.qualifiedName == typeName }
     }
 
+    /**
+     * Structural classification: a type that crosses the boundary as an @RDMA object
+     * handle (as opposed to a primitive/Unit, a List, or a function type). Used instead
+     * of `isRdmaClass` so that a module can marshal @RDMA types declared in *other*
+     * kernel modules without knowing their concrete class.
+     */
+    private fun isObjectRef(typeName: String): Boolean =
+        JniTypeMapper.forType(typeName) == null && !typeName.startsWith("kotlin.Function")
+
     private fun jniSignature(type: RdmaTypeRef): String = when (val t = type.type) {
         is RdmaType.UnitType -> "V"
         is RdmaType.Primitive -> JniTypeMapper.jniSignature(t.fqn)
@@ -56,12 +75,15 @@ class CppGenerator(private val output: (String, String) -> OutputStream) {
     private fun jniReturnSignature(type: RdmaTypeRef): String = jniSignature(type)
 
     private fun generateJniCacheHeader(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
-        val out = output("RdmaJniCache.h", "RdmaJniCache.h").bufferedWriter()
+        val out = output("RdmaJniCache$fileSuffix.h", "RdmaJniCache$fileSuffix.h").bufferedWriter()
         out.write("""#pragma once
 #include <jni.h>
 #include <string>
 #include <vector>
 
+namespace facebook {
+namespace rdma {
+$nsOpen
 struct RdmaJniCache {
     JavaVM* jvm = nullptr;
 """)
@@ -95,13 +117,17 @@ struct RdmaJniCache {
             out.write("    jmethodID fn_${fn.name}_method = nullptr;\n")
         }
         out.write("};\n\nextern RdmaJniCache g_rdmaCache;\n\nvoid initJniCache(JNIEnv* env);\n")
+        out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
         out.close()
     }
 
     private fun generateJniCacheCpp(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
-        val out = output("RdmaJniCache.cpp", "RdmaJniCache.cpp").bufferedWriter()
-        out.write("""#include "RdmaJniCache.h"
+        val out = output("RdmaJniCache$fileSuffix.cpp", "RdmaJniCache$fileSuffix.cpp").bufferedWriter()
+        out.write("""#include "RdmaJniCache$fileSuffix.h"
 
+namespace facebook {
+namespace rdma {
+$nsOpen
 RdmaJniCache g_rdmaCache;
 
 void initJniCache(JNIEnv* env) {
@@ -168,6 +194,7 @@ void initJniCache(JNIEnv* env) {
 """)
         }
         out.write("}\n")
+        out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
         out.close()
     }
 
@@ -182,25 +209,19 @@ void initJniCache(JNIEnv* env) {
 
 namespace facebook {
 namespace rdma {
-
-class ${info.className}NativeState : public jsi::NativeState {
+$nsOpen
+class ${info.className}NativeState : public RdmaObjectNativeState {
 public:
     ${info.className}NativeState(JavaVM* jvm, jobject globalRef);
     ~${info.className}NativeState() override;
-    jobject getObject() const { return globalRef_; }
-    JavaVM* getJvm() const { return jvm_; }
     RdmaVtable* vtable_ = nullptr;
-
-private:
-    JavaVM* jvm_;
-    jobject globalRef_;
 };
 
 void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm);
 jsi::Object create${info.className}Instance(jsi::Runtime& rt, JavaVM* jvm, const jsi::Value* args, size_t count);
 jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobject globalObj);
 
-} // namespace rdma
+$nsClose} // namespace rdma
 } // namespace facebook
 """)
         out.close()
@@ -211,8 +232,9 @@ jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobjec
         val cacheVar = "${info.className.lowercase()}_cache"
 
         out.write("""#include "${info.className}Proxy.h"
-#include "RdmaJniCache.h"
+#include "RdmaJniCache$fileSuffix.h"
 #include "ListHandle.h"
+#include "RdmaCompose.h"
 """)
         // Include headers for @RDMA types used as parameters or return values
         val referencedRdmaTypes = mutableSetOf<String>()
@@ -245,7 +267,7 @@ jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobjec
 
 namespace facebook {
 namespace rdma {
-""")
+$nsOpen""")
         // Forward-declare wrapper functions for @RDMA return types
         for (method in info.methods) {
             if (isRdmaClass(method.returnType, allClasses)) {
@@ -256,22 +278,9 @@ namespace rdma {
 
         out.write("""
 ${info.className}NativeState::${info.className}NativeState(JavaVM* jvm, jobject globalRef)
-    : jvm_(jvm), globalRef_(globalRef) {}
+    : RdmaObjectNativeState(jvm, globalRef) {}
 
 ${info.className}NativeState::~${info.className}NativeState() {
-    if (globalRef_ != nullptr && jvm_ != nullptr) {
-        JNIEnv* env = nullptr;
-        jint res = jvm_->GetEnv((void**)&env, JNI_VERSION_1_6);
-        bool isAttached = false;
-        if (res == JNI_EDETACHED) {
-            res = jvm_->AttachCurrentThread(&env, nullptr);
-            if (res == JNI_OK) isAttached = true;
-        }
-        if (env != nullptr) {
-            env->DeleteGlobalRef(globalRef_);
-        }
-        if (isAttached) jvm_->DetachCurrentThread();
-    }
     delete vtable_;
 }
 """)
@@ -377,18 +386,17 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     out.write("            arg_${param.name} = materializeArray(env, r, jvm, listObj, \"${param.listElementType ?: ""}\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
-                } else if (isRdmaClass(param.type, allClasses)) {
-                    val rdmaName = rdmaClassByName(param.type, allClasses)!!.className
+                } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
                         out.write("    if (!args[$idx].isNull()) {\n")
                         out.write("        auto argObj_${param.name} = args[$idx].asObject(r);\n")
-                        out.write("        auto argState_${param.name} = std::static_pointer_cast<${rdmaName}NativeState>(argObj_${param.name}.getNativeState(r));\n")
+                        out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(r));\n")
                         out.write("        arg_${param.name} = argState_${param.name}->getObject();\n")
                         out.write("    }\n")
                     } else {
                         out.write("    auto argObj_${param.name} = args[$idx].asObject(r);\n")
-                        out.write("    auto argState_${param.name} = std::static_pointer_cast<${rdmaName}NativeState>(argObj_${param.name}.getNativeState(r));\n")
+                        out.write("    auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(r));\n")
                         out.write("    jobject arg_${param.name} = argState_${param.name}->getObject();\n")
                     }
                 }
@@ -412,7 +420,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     "kotlin.Long" -> "(jlong)cpp_${param.name}"
                     else -> when {
                         param.isList -> "arg_${param.name}"
-                        isRdmaClass(param.type, allClasses) -> "arg_${param.name}"
+                        isObjectRef(param.type) -> "arg_${param.name}"
                         else -> "nullptr"
                     }
                 }
@@ -434,8 +442,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     "kotlin.Boolean" -> "auto result = env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
                     "kotlin.Double", "kotlin.Float" -> "auto result = env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
                     "kotlin.Long" -> "auto result = env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
-                    else -> if (isRdmaClass(method.returnType, allClasses) || method.isList) {
-                        val rdma = rdmaClassByName(method.returnType, allClasses)
+                    else -> if (isObjectRef(method.returnType) || method.isList) {
                         "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
                     } else ""
                 }
@@ -469,7 +476,9 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                                 out.write("    env->DeleteLocalRef(jret);\n")
                                 out.write("    return create${rdma.className}Wrapper(r, jvm, globalRet);\n")
                             } else {
-                                out.write("    return jsi::Value::undefined();\n")
+                                out.write("    auto ret = wrapAny(r, jvm, jret);\n")
+                                out.write("    env->DeleteLocalRef(jret);\n")
+                                out.write("    return ret;\n")
                             }
                         }
                     }
@@ -550,18 +559,17 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     out.write("            arg_${param.name} = materializeArray(env, rt, jvm, listObj_${param.name}, \"$elemType\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
-                } else if (isRdmaClass(param.type, allClasses)) {
-                    val rdmaName = rdmaClassByName(param.type, allClasses)!!.className
+                } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
                         out.write("    if (!args[$idx].isNull() && args[$idx].isObject() && args[$idx].asObject(rt).hasNativeState(rt)) {\n")
                         out.write("        auto argObj_${param.name} = args[$idx].asObject(rt);\n")
-                        out.write("        auto argState_${param.name} = std::static_pointer_cast<${rdmaName}NativeState>(argObj_${param.name}.getNativeState(rt));\n")
+                        out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(rt));\n")
                         out.write("        if (argState_${param.name}) arg_${param.name} = argState_${param.name}->getObject();\n")
                         out.write("    }\n")
                     } else {
                         out.write("    auto argObj_${param.name} = args[$idx].asObject(rt);\n")
-                        out.write("    auto argState_${param.name} = std::static_pointer_cast<${rdmaName}NativeState>(argObj_${param.name}.getNativeState(rt));\n")
+                        out.write("    auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(rt));\n")
                         out.write("    jobject arg_${param.name} = argState_${param.name}->getObject();\n")
                     }
                 }
@@ -581,7 +589,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     "kotlin.Long" -> "(jlong)cpp_${param.name}"
                     else -> when {
                         param.isList -> "arg_${param.name}"
-                        isRdmaClass(param.type, allClasses) -> "arg_${param.name}"
+                        isObjectRef(param.type) -> "arg_${param.name}"
                         else -> "nullptr"
                     }
                 }
@@ -629,19 +637,19 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
         }
         out.write("    return jsObj;\n}\n\n")
 
-        out.write("} // namespace rdma\n} // namespace facebook\n")
+        out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
         out.close()
     }
 
     private fun generateBridge(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
-        val out = output("RdmaBridge.h", "RdmaBridge.h").bufferedWriter()
+        val out = output("RdmaBridge$fileSuffix.h", "RdmaBridge$fileSuffix.h").bufferedWriter()
         out.write("""#pragma once
 #include <jsi/jsi.h>
 #include <jni.h>
 
 namespace facebook {
 namespace rdma {
-
+$nsOpen
 // Installed into the shared `RDMA` namespace by the generic runtime, via the
 // user-bridge hook (see RdmaCompose.h / rdmaSetUserBridgeInstaller).
 void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma);
@@ -657,18 +665,23 @@ void initUserBridgeJniCaches(JNIEnv* env);
 // ownership of the passed jobject (converts it to a global ref).
 jsi::Value wrapUserObject(jsi::Runtime& rt, JavaVM* jvm, jobject obj);
 
-} // namespace rdma
+// Creates a subclass instance for the given class name, dispatching to this
+// module's `create<X>Instance`. Returns `undefined` if the class does not belong
+// to this module (the aggregate bridge chains these across modules).
+jsi::Value createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides);
+
+$nsClose} // namespace rdma
 } // namespace facebook
 """)
         out.close()
 
-        val cpp = output("RdmaBridge.cpp", "RdmaBridge.cpp").bufferedWriter()
-        cpp.write("""#include "RdmaBridge.h"
-#include "RdmaJniCache.h"
+        val cpp = output("RdmaBridge$fileSuffix.cpp", "RdmaBridge$fileSuffix.cpp").bufferedWriter()
+        cpp.write("""#include "RdmaBridge$fileSuffix.h"
+#include "RdmaJniCache$fileSuffix.h"
 #include "RdmaVtable.h"
 #include "ListHandle.h"
 #include "RdmaCompose.h"
-#include "RdmaWidgetBridge.h"
+#include "RdmaWidgetBridge$fileSuffix.h"
 """)
         for (info in infos) {
             cpp.write("#include \"${info.className}Proxy.h\"\n")
@@ -681,9 +694,7 @@ jsi::Value wrapUserObject(jsi::Runtime& rt, JavaVM* jvm, jobject obj);
 
 namespace facebook {
 namespace rdma {
-
-static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides);
-
+$nsOpen
 jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType);
 jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object& jsObj, const std::string& elementType);
 """)
@@ -735,24 +746,11 @@ void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
             }
         }
         cpp.write("""
-    {
-        auto createOverridesFn = jsi::Function::createFromHostFunction(
-            rt, jsi::PropNameID::forAscii(rt, "createWithOverrides"), 3,
-            [jvm](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                if (count < 3) return jsi::Value::undefined();
-                std::string className = args[0].getString(r).utf8(r);
-                jsi::Array ctorArgs = args[1].asObject(r).asArray(r);
-                jsi::Object overrides = args[2].asObject(r);
-                return createWithOverrides(r, jvm, className, ctorArgs, overrides);
-            }
-        );
-        rdma.setProperty(rt, "createWithOverrides", std::move(createOverridesFn));
-    }
     installRdmaWidgetBridge(rt, jvm, rdma);
     LOGI("RDMA user bridge installed successfully");
 }
 
-static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides) {
+jsi::Value createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides) {
     size_t argCount = ctorArgs.size(rt);
     std::vector<jsi::Value> argsVec;
     argsVec.reserve(argCount);
@@ -788,7 +786,7 @@ static jsi::Object createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std:
 """)
         }
         cpp.write("""
-    return jsi::Object(rt);
+    return jsi::Value::undefined();
 }
 
 jsi::Value wrapUserObject(jsi::Runtime& rt, JavaVM* jvm, jobject obj) {
@@ -817,7 +815,7 @@ jsi::Value wrapUserObject(jsi::Runtime& rt, JavaVM* jvm, jobject obj) {
     return jsi::Value::undefined();
 }
 
-} // namespace rdma
+$nsClose} // namespace rdma
 } // namespace facebook
 """)
         cpp.close()
@@ -859,19 +857,26 @@ static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Va
     private fun staticImpl(info: RdmaClassInfo, static: StaticInfo, allClasses: List<RdmaClassInfo>): String {
         val cacheVar = "${info.className.lowercase()}_cache"
         val body = when {
-            isRdmaClass(static.type, allClasses) -> {
-                val rdma = rdmaClassByName(static.type, allClasses)!!
+            isObjectRef(static.type) -> {
+                val rdma = rdmaClassByName(static.type, allClasses)
                 val nullCheck = if (static.nullable) {
                     "    if (jret == nullptr) { env->DeleteLocalRef(companion); return jsi::Value::null(); }\n"
                 } else ""
+                val wrapExpr = if (rdma != null) {
+                    "    jobject globalRet = env->NewGlobalRef(jret);\n" +
+                        "    env->DeleteLocalRef(jret);\n" +
+                        "    env->DeleteLocalRef(companion);\n" +
+                        "    return create${rdma.className}Wrapper(r, jvm, globalRet);\n"
+                } else {
+                    "    auto ret = wrapAny(r, jvm, jret);\n" +
+                        "    env->DeleteLocalRef(jret);\n" +
+                        "    env->DeleteLocalRef(companion);\n" +
+                        "    return ret;\n"
+                }
                 """
     jobject companion = env->GetStaticObjectField(g_rdmaCache.$cacheVar.clazz, g_rdmaCache.$cacheVar.companionField);
     jobject jret = env->CallObjectMethod(companion, g_rdmaCache.$cacheVar.static_get_${static.name});
-$nullCheck    jobject globalRet = env->NewGlobalRef(jret);
-    env->DeleteLocalRef(jret);
-    env->DeleteLocalRef(companion);
-    return create${rdma.className}Wrapper(r, jvm, globalRet);
-"""
+$nullCheck$wrapExpr"""
             }
             static.type == "kotlin.String" -> {
                 val nullCheck = if (static.nullable) {
@@ -942,11 +947,10 @@ $body}
                 }
             }
             is RdmaType.Ref -> {
-                val cls = allClasses.find { it.qualifiedName == t.fqn }?.className ?: return ""
                 "    jobject arg_${p.name} = nullptr;\n" +
                     "    if (!args[$i].isNull()) {\n" +
                     "        auto argObj_${p.name} = args[$i].asObject(r);\n" +
-                    "        auto argState_${p.name} = std::static_pointer_cast<${cls}NativeState>(argObj_${p.name}.getNativeState(r));\n" +
+                    "        auto argState_${p.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${p.name}.getNativeState(r));\n" +
                     "        arg_${p.name} = argState_${p.name}->getObject();\n" +
                     "    }\n"
             }
@@ -1014,7 +1018,9 @@ $body}
             is RdmaType.Ref -> {
                 val cls = allClasses.find { it.qualifiedName == t.fqn }?.className
                 if (cls == null) {
-                    "    return jsi::Value::undefined();\n"
+                    "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                        (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
+                        "    auto ret = wrapAny(r, jvm, jret);\n    env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
                 } else {
                     "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
                         (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +

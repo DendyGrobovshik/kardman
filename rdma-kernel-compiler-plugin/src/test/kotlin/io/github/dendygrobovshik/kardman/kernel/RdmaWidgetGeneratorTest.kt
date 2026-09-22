@@ -63,13 +63,14 @@ class RdmaWidgetGeneratorTest {
     }
 
     @Test
-    fun `cpp includes Proxy headers and marshals refs`() {
+    fun `cpp marshals refs via common base state without concrete proxy headers`() {
         val (cpp, _) = generate(listOf(textWidget()))
         val bridge = cpp["RdmaWidgetBridge.cpp"] ?: error("RdmaWidgetBridge.cpp not generated")
-        assertContains(bridge, "#include \"ColorProxy.h\"")
-        assertContains(bridge, "#include \"DpProxy.h\"")
-        assertContains(bridge, "static_pointer_cast<ColorNativeState>")
-        assertContains(bridge, "static_pointer_cast<DpNativeState>")
+        assertTrue(!bridge.contains("ColorProxy.h"), "should not include concrete proxy header")
+        assertTrue(!bridge.contains("DpProxy.h"), "should not include concrete proxy header")
+        assertContains(bridge, "static_pointer_cast<RdmaObjectNativeState>")
+        assertTrue(!bridge.contains("ColorNativeState"), "should not reference concrete native state")
+        assertTrue(!bridge.contains("DpNativeState"), "should not reference concrete native state")
         assertContains(bridge, "hasNativeState(r)")
     }
 
@@ -87,5 +88,13 @@ class RdmaWidgetGeneratorTest {
         val (cpp, _) = generate(listOf(textWidget()))
         val bridge = cpp["RdmaWidgetBridge.cpp"] ?: error("not generated")
         assertTrue(bridge.contains("jobject cpp_p1 = nullptr;"))
+    }
+
+    @Test
+    fun `empty widget set skips FindClass to avoid missing Kt class`() {
+        val (cpp, _) = generate(emptyList())
+        val bridge = cpp["RdmaWidgetBridge.cpp"] ?: error("not generated")
+        assertTrue(!bridge.contains("FindClass"), "no widgets => no FindClass for the empty entries class")
+        assertContains(bridge, "void initWidgetJniCache(JNIEnv* env) {")
     }
 }

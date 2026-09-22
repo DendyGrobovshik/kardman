@@ -82,7 +82,7 @@ jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object
     
     size_t len = 0;
     jsi::Array backingArray(rt, 0);
-    int path = 0; // 0=none, 1=jsArray, 2=length/size, 3=array_1 (Kotlin ArrayList)
+    int path = 0; // 0=none, 1=jsArray, 2=length/size, 3=backing array (Kotlin List)
     if (jsObj.isArray(rt)) {
         backingArray = jsObj.asArray(rt);
         len = backingArray.size(rt);
@@ -96,13 +96,27 @@ jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object
             len = (size_t)lp.getNumber();
             path = 2;
         } else {
+            // Kotlin/JS List (ArrayList): it wraps a backing JS array in an own field.
+            // The field name is `array_1` in development output but minified in
+            // production (e.g. `l1_1`), so instead of hardcoding the name, look for
+            // the first own property that is a JS array.
             auto array1 = jsObj.getProperty(rt, "array_1");
-            if (array1.isObject()) {
-                auto a1obj = array1.asObject(rt);
-                if (a1obj.isArray(rt)) {
-                    backingArray = a1obj.asArray(rt);
-                    len = backingArray.size(rt);
-                    path = 3;
+            if (array1.isObject() && array1.asObject(rt).isArray(rt)) {
+                backingArray = array1.asObject(rt).asArray(rt);
+                len = backingArray.size(rt);
+                path = 3;
+            } else {
+                auto names = jsObj.getPropertyNames(rt);
+                size_t n = names.size(rt);
+                for (size_t i = 0; i < n; i++) {
+                    auto name = names.getValueAtIndex(rt, i).getString(rt).utf8(rt);
+                    auto val = jsObj.getProperty(rt, name.c_str());
+                    if (val.isObject() && val.asObject(rt).isArray(rt)) {
+                        backingArray = val.asObject(rt).asArray(rt);
+                        len = backingArray.size(rt);
+                        path = 3;
+                        break;
+                    }
                 }
             }
         }
@@ -126,7 +140,8 @@ jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object
             if (eo.hasNativeState(rt)) {
                 auto ns = eo.getNativeState(rt);
                 if (ns) {
-                    jobject je = *(jobject*)((char*)ns.get() + 24);
+                    auto objState = std::static_pointer_cast<RdmaObjectNativeState>(ns);
+                    jobject je = objState->getObject();
                     if (je) env->CallBooleanMethod(localList, addMethod, je);
                 }
             }

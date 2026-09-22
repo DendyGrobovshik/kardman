@@ -49,14 +49,16 @@ plugins {
 }
 
 include(":androidApp")
-include(":kernel")
+include(":kernel:internal")
+include(":kernel:user:alice")
 include(":rdma-annotation")
 include(":rdma-types")
 include(":rdma-kernel-compiler-plugin")
 include(":rdma-kernel-gradle-plugin")
 include(":rdma-app-gradle-plugin")
 include(":rdma-runtime-android")
-include(":plugin")
+include(":plugin:alice:counter")
+include(":plugin:bob:services")
 include(":rdma-plugin-compiler-plugin")
 include(":rdma-plugin-gradle-plugin")
 include(":rdma-tests")

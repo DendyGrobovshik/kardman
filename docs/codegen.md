@@ -22,14 +22,64 @@ the runtime data flow (what happens after generation) see
 
 Code generation happens in two independent stages:
 
-1. **Kernel side** — an IR compiler plugin scans the `@RDMA` declarations in
-   `:kernel` and emits C++ JNI/JSI glue, Kotlin vtable scaffolding, a JSON
-   manifest, and the base Compose protocol proxy.
+1. **Kernel side** — an IR compiler plugin scans the `@RDMA` declarations in each
+   kernel module (`:kernel:internal`, `:kernel:user:*`, …) and emits C++ JNI/JSI glue,
+   Kotlin vtable scaffolding, a JSON manifest, and the base Compose protocol proxy.
 2. **Plugin side** — a FIR compiler plugin resolves the plugin's original source
-   against `:kernel` and rewrites it into bridge calls, emitting `*_rdma.kt`.
+   against the merged manifest of the kernel modules visible to it and rewrites it
+   into bridge calls, emitting `*_rdma.kt`.
 
-The two stages are connected by `rdma_manifest.json`: the kernel plugin writes
-it, the plugin plugin reads it to know which classes/functions are bridgeable.
+The two stages are connected by `rdma_manifest.json`: each kernel module writes its own;
+the plugin gradle plugin merges the manifests of the visible modules (internal + the
+plugin's own user module) and passes them to the plugin compiler plugin.
+
+### Multi-module namespacing + aggregate bridge
+
+Each kernel module's generated C++ is wrapped in its own `facebook::rdma::<moduleId>`
+namespace and its module-level files are suffixed (`RdmaBridge_internal.cpp`,
+`RdmaJniCache_user_alice.cpp`, …) so multiple modules can be compiled into one
+`librdma_user.so` without symbol/file collisions. The `rdma-app` plugin additionally
+generates `RdmaBridgeAggregate.cpp`, which composes the per-module
+`installUserBridge`/`initUserBridgeJniCaches`/`wrapUserObject` and owns the global
+`createWithOverrides`/`wrapUserObject` dispatch (the runtime hooks accept a single
+bridge). The `rdmaVtableDispatch` JNI export is emitted once per kernel module package.
+
+### Cross-module `@RDMA` references
+
+A kernel module's `@RDMA` signature may reference an `@RDMA` type declared in
+**another** kernel module (e.g. a widget in `:kernel:user:*` taking a `Color`/`Dp`
+from `:kernel:internal`). The generated glue must marshal such a type without
+knowing its concrete C++ class — that class lives in the *other* module's namespace
+and header set, which is invisible at this module's generation time.
+
+To stay decoupled, the codegen is **type-erased**:
+
+- every generated `{Class}NativeState` derives from a shared `RdmaObjectNativeState`
+  (`rdma-runtime-android` header), which owns the global JVM ref and exposes a
+  **non-virtual inline** `getObject()`;
+- a `Ref` **parameter** is unpacked via
+  `std::static_pointer_cast<RdmaObjectNativeState>(obj.getNativeState(r))->getObject()`
+  — no concrete type, no cross-module include;
+- a `Ref` **return** from the *same* module keeps the fast concrete
+  `create{Class}Wrapper`; a cross-module return falls back to `wrapAny(...)`, which
+  dispatches by runtime class name through the aggregate `wrapUserObject`.
+
+Structural type classification (primitive / `List` / `Function*` / "everything else
+is a handle") is what decides the marshal path — the codegen never needs the
+referenced module's FQN set. The only cross-module lookup is in the **validator**,
+which resolves the referenced FQN via `pluginContext.referenceClass(...)` and checks
+for the `@RDMA` annotation to reject non-bridgeable types.
+
+#### Why this is zero-overhead
+
+`RdmaObjectNativeState` introduces **no virtual call**: `getObject()` is a plain
+inline member load, and under single inheritance `std::static_pointer_cast` to the
+base is a no-op (base sub-object at offset 0). The emitted machine code for
+unpacking a parameter is therefore identical to the previous
+`static_pointer_cast<ConcreteNativeState>` + inline accessor — the only difference
+is the compile-time type name. The fast `create{Class}Wrapper` path is preserved
+for same-module returns; `wrapAny` (which does an extra `GetObjectClass` +
+class-name comparison) is used only for cross-module returns, which are rare.
 
 ## Stage 1 — kernel (IR) generation
 

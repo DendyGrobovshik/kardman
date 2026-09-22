@@ -24,17 +24,34 @@ import org.jetbrains.kotlin.gradle.plugin.SubpluginArtifact
 import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
 import java.io.File
 
-private const val DEFAULT_KERNEL_PACKAGE = "com.example.kernel"
+private const val DEFAULT_KERNEL_PROJECT = ":kernel"
+private const val DEFAULT_KERNEL_ROOT_PACKAGE = "com.example.kernel"
+
+/** The package of this kernel module, derived from its project path. */
+private fun Project.kernelPackage(): String {
+    val rootPackage = findProperty("rdmaKernelRootPackage")?.toString()
+        ?: rootProject.findProperty("rdmaKernelRootPackage")?.toString()
+        ?: DEFAULT_KERNEL_ROOT_PACKAGE
+    val container = findProperty("rdmaKernelProject")?.toString()
+        ?: rootProject.findProperty("rdmaKernelProject")?.toString()
+        ?: DEFAULT_KERNEL_PROJECT
+    val suffix = path.removePrefix(container).removePrefix(":").replace(':', '.')
+    return if (suffix.isEmpty()) rootPackage else "$rootPackage.$suffix"
+}
+
+/** A sanitized, filesystem/C++-safe identifier for this kernel module. */
+private fun Project.kernelModuleId(): String {
+    val container = findProperty("rdmaKernelProject")?.toString()
+        ?: rootProject.findProperty("rdmaKernelProject")?.toString()
+        ?: DEFAULT_KERNEL_PROJECT
+    val suffix = path.removePrefix(container).removePrefix(":").replace(':', '_').replace('.', '_')
+    return if (suffix.isEmpty()) "default" else suffix
+}
 
 private fun vtableSource(kernelPackage: String) = """package $kernelPackage
 
 external fun rdmaVtableDispatch(vtablePtr: Long, vtableId: Int): Any?
 """
-
-private fun Project.kernelPackage(): String =
-    findProperty("rdmaKernelPackage")?.toString()
-        ?: rootProject.findProperty("rdmaKernelPackage")?.toString()
-        ?: DEFAULT_KERNEL_PACKAGE
 
 class RdmaKernelGradlePlugin : KotlinCompilerPluginSupportPlugin {
 
@@ -63,6 +80,7 @@ class RdmaKernelGradlePlugin : KotlinCompilerPluginSupportPlugin {
                 SubpluginOption("jsonOutputDir", "${project.buildDir}/generated/rdma"),
                 SubpluginOption("kotlinOutputDir", "${project.buildDir}/generated/rdma/widget-kotlin"),
                 SubpluginOption("kernelPackage", project.kernelPackage()),
+                SubpluginOption("moduleId", project.kernelModuleId()),
             )
         }
     }

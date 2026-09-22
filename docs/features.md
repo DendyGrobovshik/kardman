@@ -270,9 +270,10 @@ app-update-free updates of both plugin logic and UI.
 **Supported** — `@RDMA` classes (incl. `open` + plugin subclasses), properties
 (`val`/`var`), public methods, companion statics, `@RDMA` top-level functions
 and widgets; types `Int`/`Long`/`Float`/`Double`/`Boolean`/`String` (nullable
-allowed), `@RDMA` references, `List<T>`, lambdas, `Unit` returns; UI via the base
-Compose protocol (`remember`/`mutableStateOf`/widgets + content lambdas and
-callbacks) plus the `SideEffect`, `DisposableEffect` and `LaunchedEffect` effects
+allowed), `@RDMA` references (incl. cross-module), `List<T>`, lambdas, `Unit`
+returns; UI via the base Compose protocol (`remember`/`mutableStateOf`/widgets +
+content lambdas and callbacks) plus the `SideEffect`, `DisposableEffect` and
+`LaunchedEffect` effects
 and `rememberCoroutineScope` (single-threaded, `Dispatchers.Main`/`.immediate`).
 
 **Not yet** — non-`@RDMA` value types (`enum`, `Array`, `Map`, data classes),

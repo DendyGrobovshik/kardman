@@ -79,7 +79,7 @@ class IntegrationTest {
         val cppFiles = generateCpp(classes)
 
         val personCpp = cppFiles["PersonProxy.cpp"] ?: error("Person C++ not generated")
-        assertContains(personCpp, "std::static_pointer_cast<VeryOldVampierNativeState>")
+        assertContains(personCpp, "std::static_pointer_cast<RdmaObjectNativeState>")
         assertContains(personCpp, "getNativeState")
         assertContains(personCpp, "getObject()")
         assertContains(personCpp, "arg_vampier")
@@ -135,8 +135,8 @@ class IntegrationTest {
         val bridgeCpp = cppFiles["RdmaBridge.cpp"] ?: error("Bridge not generated")
 
         assertContains(bridgeCpp, "createWithOverrides")
-        assertContains(bridgeCpp, """PropNameID::forAscii(rt, "createWithOverrides")""")
-        assertContains(bridgeCpp, "rdma.setProperty")
+        // The `createWithOverrides` HostFunction is registered by the aggregate bridge
+        // (app-side), not by the per-module bridge; the module only emits its definition.
         assertContains(bridgeCpp, "RdmaVtable")
         assertContains(bridgeCpp, "GetFieldID")
         assertContains(bridgeCpp, "\"__vtable\"")

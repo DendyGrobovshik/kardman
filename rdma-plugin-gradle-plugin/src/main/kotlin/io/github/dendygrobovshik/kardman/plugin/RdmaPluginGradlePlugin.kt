@@ -24,7 +24,35 @@ import org.jetbrains.kotlin.gradle.plugin.SubpluginArtifact
 import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
 import java.io.File
 
-private const val RDMA_RUNTIME_BRIDGE_SOURCE = """package com.example.plugin
+private const val DEFAULT_PLUGIN_PROJECT = ":plugin"
+private const val DEFAULT_PLUGIN_ROOT_PACKAGE = "com.example.plugin"
+private const val DEFAULT_KERNEL_PROJECT = ":kernel"
+private const val DEFAULT_KERNEL_ROOT_PACKAGE = "com.example.kernel"
+
+/** The package of this plugin module, derived from its username path segment. */
+private fun Project.pluginPackage(): String {
+    val rootPackage = findProperty("rdmaPluginRootPackage")?.toString()
+        ?: rootProject.findProperty("rdmaPluginRootPackage")?.toString()
+        ?: DEFAULT_PLUGIN_ROOT_PACKAGE
+    val username = pluginUsername()
+    return if (username.isEmpty()) rootPackage else "$rootPackage.$username"
+}
+
+/** The username segment of this plugin module (first path segment after the plugin container). */
+private fun Project.pluginUsername(): String {
+    val container = findProperty("rdmaPluginProject")?.toString()
+        ?: rootProject.findProperty("rdmaPluginProject")?.toString()
+        ?: DEFAULT_PLUGIN_PROJECT
+    return path.removePrefix(container).removePrefix(":").substringBefore(':')
+}
+
+/** Package of a kernel module identified by its project path. */
+private fun kernelPackageOf(root: Project, kernelContainer: String, kernelPath: String, rootPackage: String): String {
+    val suffix = kernelPath.removePrefix(kernelContainer).removePrefix(":").replace(':', '.')
+    return if (suffix.isEmpty()) rootPackage else "$rootPackage.$suffix"
+}
+
+private fun runtimeBridgeSource(pluginPackage: String) = """package $pluginPackage
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composer
@@ -128,7 +156,7 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
         // `RdmaWidgetBridge.kt`.
         val dir = File(target.buildDir, "generated/rdma")
         dir.mkdirs()
-        File(dir, "RdmaRuntimeBridge.kt").writeText(RDMA_RUNTIME_BRIDGE_SOURCE)
+        File(dir, "RdmaRuntimeBridge.kt").writeText(runtimeBridgeSource(target.pluginPackage()))
     }
 
     override fun isApplicable(kotlinCompilation: KotlinCompilation<*>): Boolean =
@@ -143,11 +171,40 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
     override fun applyToCompilation(kotlinCompilation: KotlinCompilation<*>): Provider<List<SubpluginOption>> {
         val project = kotlinCompilation.project
         return project.provider {
-            val manifestPath = (project.findProperty("rdmaManifest") as? String)
-                ?: "${project.rootProject.projectDir}/kernel/build/generated/rdma/rdma_manifest.json"
             val outputDir = "${project.buildDir}/generated/rdma"
+            val pluginPackage = project.pluginPackage()
+
+            val kernelContainer = project.findProperty("rdmaKernelProject")?.toString()
+                ?: project.rootProject.findProperty("rdmaKernelProject")?.toString()
+                ?: DEFAULT_KERNEL_PROJECT
+            val kernelRootPackage = project.findProperty("rdmaKernelRootPackage")?.toString()
+                ?: project.rootProject.findProperty("rdmaKernelRootPackage")?.toString()
+                ?: DEFAULT_KERNEL_ROOT_PACKAGE
+
+            // Internal kernel modules are always visible; the plugin additionally sees
+            // its own user module `:kernel:user:<username>`.
+            val internals = (project.findProperty("rdmaKernelInternals")?.toString()
+                ?: project.rootProject.findProperty("rdmaKernelInternals")?.toString()
+                ?: "").split(',').map { it.trim() }.filter { it.isNotEmpty() }
+            val username = project.pluginUsername()
+            val ownModule = if (username.isEmpty()) null else "$kernelContainer:user:$username"
+
+            val visiblePaths = internals + listOfNotNull(ownModule)
+            val manifestPaths = visiblePaths.mapNotNull { kernelPath ->
+                project.rootProject.findProject(kernelPath)?.let { kp ->
+                    File(kp.buildDir, "generated/rdma/rdma_manifest.json").absolutePath
+                }
+            }
+
+            val runRdmaAppFqn = internals.firstOrNull()?.let { internalPath ->
+                "${kernelPackageOf(project.rootProject, kernelContainer, internalPath, kernelRootPackage)}.runRdmaApp"
+            }
+
             listOf(
-                SubpluginOption("rdmaManifest", manifestPath),
+                SubpluginOption("rdmaManifest", manifestPaths.joinToString(File.pathSeparator)),
+                SubpluginOption("pluginPackage", pluginPackage),
+                SubpluginOption("runRdmaAppFqn", runRdmaAppFqn ?: ""),
+                SubpluginOption("kernelRootPackage", kernelRootPackage),
                 SubpluginOption("rdmaOutputDir", outputDir),
             )
         }

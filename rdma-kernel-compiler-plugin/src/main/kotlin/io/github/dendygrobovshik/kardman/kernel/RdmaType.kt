@@ -64,12 +64,12 @@ object RdmaTypeParser {
 }
 
 object RdmaTypeValidator {
-    fun validate(type: RdmaTypeRef, rdmaClasses: Set<String>): List<String> {
+    fun validate(type: RdmaTypeRef, isRdmaClass: (String) -> Boolean): List<String> {
         val errors = mutableListOf<String>()
         fun check(t: RdmaType, path: String) {
             when (t) {
                 is RdmaType.Primitive, is RdmaType.UnitType -> Unit
-                is RdmaType.Ref -> if (t.fqn !in rdmaClasses) {
+                is RdmaType.Ref -> if (!isRdmaClass(t.fqn)) {
                     errors += "$path: '${t.fqn}' is not a @RDMA type; only @RDMA classes, primitives, functions and lists can cross the runtime boundary"
                 }
                 is RdmaType.ListType -> check(t.element.type, "$path[]")
@@ -83,12 +83,12 @@ object RdmaTypeValidator {
         return errors
     }
 
-    fun validateFunction(function: RdmaFunctionInfo, rdmaClasses: Set<String>): List<String> {
+    fun validateFunction(function: RdmaFunctionInfo, isRdmaClass: (String) -> Boolean): List<String> {
         val errors = mutableListOf<String>()
         function.parameters.forEach { p ->
-            errors += validate(p.type, rdmaClasses).map { "function ${function.qualifiedName}: parameter '${p.name}' $it" }
+            errors += validate(p.type, isRdmaClass).map { "function ${function.qualifiedName}: parameter '${p.name}' $it" }
         }
-        errors += validate(function.returnType, rdmaClasses).map { "function ${function.qualifiedName}: $it" }
+        errors += validate(function.returnType, isRdmaClass).map { "function ${function.qualifiedName}: $it" }
         return errors
     }
 }

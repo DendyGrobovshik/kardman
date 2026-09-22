@@ -41,16 +41,17 @@ class MainActivity : ComponentActivity() {
         RdmaBridge.nativeInit(assets)
 
         val dependencies = listOf(
-            "kotlin/kotlin-kotlin-stdlib.js",
-            "kotlin/kotlinx-atomicfu.js",
-            "kotlin/kotlinx-coroutines-core.js",
-            "kotlin/androidx-collection-collection.js",
-            "kotlin/androidx-compose-runtime-runtime.js",
+            "kotlin/kotlin-kotlin-stdlib.hbc",
+            "kotlin/kotlinx-atomicfu.hbc",
+            "kotlin/kotlinx-coroutines-core.hbc",
+            "kotlin/androidx-collection-collection.hbc",
+            "kotlin/androidx-compose-runtime-runtime.hbc",
         )
         for (dep in dependencies) {
             RdmaBridge.nativeEvalAsset(dep)
         }
-        RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin.js")
+        RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin-alice-counter.hbc")
+        RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin-bob-services.hbc")
 
         setContent {
             var ready by remember { mutableStateOf(RdmaBridge.nativeIsReady()) }

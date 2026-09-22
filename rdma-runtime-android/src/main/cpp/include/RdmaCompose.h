@@ -22,6 +22,7 @@
 #include <cstdint>
 
 #include "RdmaRendezvous.h"
+#include "RdmaNativeState.h"
 
 namespace facebook {
 namespace rdma {

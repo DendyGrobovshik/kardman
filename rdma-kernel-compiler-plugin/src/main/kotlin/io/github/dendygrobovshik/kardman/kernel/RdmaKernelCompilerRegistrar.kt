@@ -27,6 +27,9 @@ import org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi
 import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.config.CompilerConfigurationKey
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+import org.jetbrains.kotlin.ir.util.hasAnnotation
+import org.jetbrains.kotlin.name.ClassId
+import org.jetbrains.kotlin.name.FqName
 import java.io.File
 
 object RdmaKernelKeys {
@@ -34,7 +37,10 @@ object RdmaKernelKeys {
     val JSON_OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("jsonOutputDir")
     val KOTLIN_OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("kotlinOutputDir")
     val KERNEL_PACKAGE: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("kernelPackage")
+    val MODULE_ID: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("moduleId")
 }
+
+private val RDMA_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RDMA")
 
 class RdmaKernelCommandLineProcessor : CommandLineProcessor {
     override val pluginId: String = "rdma-kernel-compiler-plugin"
@@ -44,6 +50,7 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
         CliOption("jsonOutputDir", "<dir>", "Output directory for rdma_manifest.json", required = false),
         CliOption("kotlinOutputDir", "<dir>", "Output directory for generated Kotlin widget entries", required = false),
         CliOption("kernelPackage", "<package>", "Package name of the user's kernel module", required = false),
+        CliOption("moduleId", "<id>", "Sanitized identifier used to namespace this kernel module's generated C++", required = false),
     )
 
     override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
@@ -52,6 +59,7 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
             "jsonOutputDir" -> configuration.put(RdmaKernelKeys.JSON_OUTPUT_DIR, value)
             "kotlinOutputDir" -> configuration.put(RdmaKernelKeys.KOTLIN_OUTPUT_DIR, value)
             "kernelPackage" -> configuration.put(RdmaKernelKeys.KERNEL_PACKAGE, value)
+            "moduleId" -> configuration.put(RdmaKernelKeys.MODULE_ID, value)
         }
     }
 }
@@ -67,7 +75,8 @@ class RdmaKernelCompilerRegistrar : CompilerPluginRegistrar() {
         val jsonDir = configuration.get(RdmaKernelKeys.JSON_OUTPUT_DIR)
         val kotlinDir = configuration.get(RdmaKernelKeys.KOTLIN_OUTPUT_DIR)
         val kernelPackage = configuration.get(RdmaKernelKeys.KERNEL_PACKAGE)
-        IrGenerationExtension.registerExtension(RdmaKernelGenerationExtension(cppDir, jsonDir, kotlinDir, kernelPackage))
+        val moduleId = configuration.get(RdmaKernelKeys.MODULE_ID)
+        IrGenerationExtension.registerExtension(RdmaKernelGenerationExtension(cppDir, jsonDir, kotlinDir, kernelPackage, moduleId))
     }
 }
 
@@ -76,15 +85,28 @@ class RdmaKernelGenerationExtension(
     private val jsonOutputDir: String?,
     private val kotlinOutputDir: String?,
     private val kernelPackage: String?,
+    private val moduleId: String?,
 ) : IrGenerationExtension {
 
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
+        val publicApiErrors = RdmaPublicApiChecker.check(moduleFragment)
+        if (publicApiErrors.isNotEmpty()) {
+            error("Non-@RDMA public declarations in kernel module:\n" + publicApiErrors.joinToString("\n"))
+        }
+
         val classes = RdmaClassExtractor.extractWithClasses(moduleFragment)
         val classInfos = classes.map { it.info }
         val rdmaClassFqns = classInfos.map { it.qualifiedName }.toSet()
 
         val functions = RdmaFunctionExtractor.extract(moduleFragment)
-        val errors = functions.flatMap { RdmaTypeValidator.validateFunction(it, rdmaClassFqns) }
+        // A type is bridgeable if it is an @RDMA class declared in this module, or an
+        // @RDMA class resolved from a dependency (another kernel module) via the plugin
+        // context. This is what makes cross-module @RDMA references legal.
+        val isRdmaClass: (String) -> Boolean = { fqn ->
+            fqn in rdmaClassFqns ||
+                pluginContext.referenceClass(ClassId.topLevel(FqName(fqn)))?.owner?.hasAnnotation(RDMA_ANNOTATION) == true
+        }
+        val errors = functions.flatMap { RdmaTypeValidator.validateFunction(it, isRdmaClass) }
         if (errors.isNotEmpty()) {
             error("Invalid @RDMA types crossing the runtime boundary:\n" + errors.joinToString("\n"))
         }
@@ -116,12 +138,14 @@ class RdmaKernelGenerationExtension(
         // Typed per-widget bridge (Variant A): generated Kotlin entries + C++ HostFunctions.
         val widgets = functions.filter { it.composable }
         val pkg = kernelPackage ?: "com.example.kernel"
+        val modId = moduleId ?: ""
         cppOutputDir?.let { cppDir ->
             kotlinOutputDir?.let { kotlinDir ->
                 RdmaWidgetGenerator(
                     { fileName, _ -> File(cppDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
                     { fileName, _ -> File(kotlinDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
                     pkg,
+                    modId,
                 ).generate(widgets)
             }
         }
@@ -129,7 +153,7 @@ class RdmaKernelGenerationExtension(
         if (classes.isEmpty() && functions.isEmpty()) return
 
         cppOutputDir?.let { dir ->
-            CppGenerator { fileName, _ ->
+            CppGenerator(modId) { fileName, _ ->
                 File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
             }.generate(classInfos, functions)
         }

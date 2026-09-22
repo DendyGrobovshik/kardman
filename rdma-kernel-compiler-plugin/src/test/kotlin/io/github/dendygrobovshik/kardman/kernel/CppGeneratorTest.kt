@@ -24,6 +24,7 @@ import io.github.dendygrobovshik.kardman.types.StaticInfo
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class CppGeneratorTest {
@@ -154,6 +155,45 @@ class CppGeneratorTest {
         assertContains(cpp, "= nullptr")
         assertContains(cpp, "isNull()")
         assertContains(cpp, "return jsi::Value::null()")
+    }
+
+    @Test
+    fun `cross-module RDMA param marshals via base state and return via wrapAny`() {
+        val info = RdmaClassInfo(
+            packageName = "com.example.kernel.user.clive", className = "Widget",
+            qualifiedName = "com.example.kernel.user.clive.Widget",
+            constructors = listOf(ConstructorInfo(listOf(
+                ParameterInfo("color", "com.example.kernel.internal.Color")
+            ))),
+            methods = listOf(MethodInfo("getColor", "com.example.kernel.internal.Color", emptyList())),
+            properties = emptyList()
+        )
+
+        val generated = generate(listOf(info))
+        val cpp = generated["WidgetProxy.cpp"] ?: error("Not generated")
+
+        // Cross-module param is marshaled through the module-independent base state.
+        assertContains(cpp, "static_pointer_cast<RdmaObjectNativeState>")
+        assertFalse(cpp.contains("ColorNativeState"), "should not reference a concrete type from another module")
+
+        // Cross-module return dispatches at runtime by class name.
+        assertContains(cpp, "wrapAny(r, jvm, jret)")
+        assertFalse(cpp.contains("createColorWrapper"), "should not reference a concrete wrapper from another module")
+    }
+
+    @Test
+    fun `same-module RDMA return keeps fast concrete wrapper`() {
+        val person = createPerson()
+        val info = person.copy(
+            methods = listOf(MethodInfo("fight", "com.example.kernel.Person", listOf(
+                ParameterInfo("opponent", "com.example.kernel.Person")
+            )))
+        )
+
+        val generated = generate(listOf(info))
+        val cpp = generated["PersonProxy.cpp"] ?: error("Not generated")
+
+        assertContains(cpp, "createPersonWrapper")
     }
 
     private fun createPerson() = RdmaClassInfo(

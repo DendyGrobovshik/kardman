@@ -41,13 +41,13 @@ class RdmaTypeValidatorTest {
                 RdmaTypeRef(RdmaType.UnitType),
             )
         )
-        assertTrue(RdmaTypeValidator.validate(type, setOf("com.example.kernel.Person")).isEmpty())
+        assertTrue(RdmaTypeValidator.validate(type) { it == "com.example.kernel.Person" }.isEmpty())
     }
 
     @Test
     fun `non-RDMA type is rejected`() {
         val type = RdmaTypeRef(RdmaType.Ref("com.example.kernel.NotRDMA"))
-        val errors = RdmaTypeValidator.validate(type, setOf("com.example.kernel.Person"))
+        val errors = RdmaTypeValidator.validate(type) { it == "com.example.kernel.Person" }
         assertEquals(1, errors.size)
         assertContains(errors[0], "NotRDMA")
     }
@@ -62,7 +62,7 @@ class RdmaTypeValidatorTest {
             parameters = listOf(RdmaParameterInfo("x", RdmaTypeRef(RdmaType.Ref("com.example.Unknown")))),
             returnType = RdmaTypeRef(RdmaType.UnitType),
         )
-        val errors = RdmaTypeValidator.validateFunction(fn, setOf("com.example.kernel.Person"))
+        val errors = RdmaTypeValidator.validateFunction(fn) { it == "com.example.kernel.Person" }
         assertTrue(errors.isNotEmpty())
         assertContains(errors[0], "com.example.Unknown")
     }
@@ -83,7 +83,7 @@ class RdmaTypeValidatorTest {
             ),
             returnType = RdmaTypeRef(RdmaType.UnitType),
         )
-        assertTrue(RdmaTypeValidator.validateFunction(fn, setOf("com.example.kernel.Person")).isEmpty())
+        assertTrue(RdmaTypeValidator.validateFunction(fn) { it == "com.example.kernel.Person" }.isEmpty())
     }
 }
 

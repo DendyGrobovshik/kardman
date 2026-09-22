@@ -35,7 +35,9 @@ import org.jetbrains.kotlin.fir.symbols.impl.FirPropertySymbol
 import org.jetbrains.kotlin.fir.types.ConeClassLikeType
 import org.jetbrains.kotlin.fir.types.coneTypeSafe
 import org.jetbrains.kotlin.diagnostics.DiagnosticReporter
+import org.jetbrains.kotlin.diagnostics.reportOn
 import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
+import org.jetbrains.kotlin.fir.analysis.diagnostics.FirErrors
 
 class RdmaPluginAdditionalCheckersExtension(session: FirSession) : FirAdditionalCheckersExtension(session) {
 
@@ -72,7 +74,19 @@ object RdmaPluginFileChecker : FirDeclarationChecker<FirFile>(MppCheckerKind.Com
 
         for (imp in declaration.imports) {
             val fqn = imp.importedFqName?.asString() ?: continue
-            if (!RdmaPluginTransformState.isBridgeableQualifiedName(fqn)) continue
+            if (!RdmaPluginTransformState.isBridgeableQualifiedName(fqn)) {
+                if (RdmaPluginTransformState.isKernelPackage(fqn)) {
+                    val src = imp.source
+                    if (src != null) {
+                        reporter.reportOn(
+                            src,
+                            FirErrors.UNSUPPORTED,
+                            "Kernel symbol '$fqn' is not visible to this plugin (only internal kernel modules and your own user module are accessible)",
+                        )
+                    }
+                }
+                continue
+            }
             val src = imp.source ?: continue
             RdmaPluginTransformState.addEdit(path, src.startOffset, endWithNewline(text, src.endOffset), "")
         }

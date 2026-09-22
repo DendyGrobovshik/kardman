@@ -31,12 +31,17 @@ class RdmaWidgetGenerator(
     private val cppOutput: (String, String) -> OutputStream,
     private val kotlinOutput: (String, String) -> OutputStream,
     kernelPackage: String = "com.example.kernel",
+    moduleId: String = "",
 ) {
 
     // Package of the generated host-side widget entries (RdmaWidgetEntries.kt).
     // This is user code, so it must not live in the framework runtime package.
     private val widgetEntriesPackage = "$kernelPackage.rdma"
-    private val widgetEntriesClass = "$widgetEntriesPackage.RdmaWidgetEntriesKt"
+    private val fileSuffix: String = if (moduleId.isEmpty()) "" else "_$moduleId"
+    private val entriesFileBase = "RdmaWidgetEntries$fileSuffix"
+    private val widgetEntriesClass = "$widgetEntriesPackage.${entriesFileBase}Kt"
+    private val nsOpen: String = if (moduleId.isEmpty()) "" else "namespace $moduleId {\n"
+    private val nsClose: String = if (moduleId.isEmpty()) "" else "} // namespace $moduleId\n"
 
     private sealed class Param {
         data class Value(val name: String, val jvmType: String) : Param()
@@ -121,7 +126,7 @@ class RdmaWidgetGenerator(
     // ---------------------------------------------------------- Kotlin entries
 
     private fun generateKotlinEntries(widgets: List<RdmaFunctionInfo>) {
-        val out = kotlinOutput("RdmaWidgetEntries.kt", "RdmaWidgetEntries.kt").bufferedWriter()
+        val out = kotlinOutput("$entriesFileBase.kt", "$entriesFileBase.kt").bufferedWriter()
         out.write("""package $widgetEntriesPackage
 
 import androidx.compose.runtime.Composable
@@ -187,14 +192,14 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
     // ---------------------------------------------------------------- C++ glue
 
     private fun generateCppHeader(widgets: List<RdmaFunctionInfo>) {
-        val out = cppOutput("RdmaWidgetBridge.h", "RdmaWidgetBridge.h").bufferedWriter()
+        val out = cppOutput("RdmaWidgetBridge$fileSuffix.h", "RdmaWidgetBridge$fileSuffix.h").bufferedWriter()
         out.write("""#pragma once
 #include <jni.h>
 #include <jsi/jsi.h>
 
 namespace facebook {
 namespace rdma {
-
+$nsOpen
 struct WidgetJniCache {
     jclass entriesClass = nullptr;
 """)
@@ -209,38 +214,33 @@ void initWidgetJniCache(JNIEnv* env);
 
 void installRdmaWidgetBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma);
 
-} // namespace rdma
+$nsClose} // namespace rdma
 } // namespace facebook
 """)
         out.close()
     }
 
     private fun generateCpp(widgets: List<RdmaFunctionInfo>) {
-        val out = cppOutput("RdmaWidgetBridge.cpp", "RdmaWidgetBridge.cpp").bufferedWriter()
-        val refFqns = widgets
-            .flatMap { classify(it).filterIsInstance<Param.Ref>().map { r -> r.fqn } }
-            .distinct()
-            .sorted()
-        out.write("""#include "RdmaWidgetBridge.h"
+        val out = cppOutput("RdmaWidgetBridge$fileSuffix.cpp", "RdmaWidgetBridge$fileSuffix.cpp").bufferedWriter()
+        out.write("""#include "RdmaWidgetBridge$fileSuffix.h"
 #include "RdmaCompose.h"
-""")
-        for (ref in refFqns) {
-            out.write("#include \"${simpleName(ref)}Proxy.h\"\n")
-        }
-        out.write("""
+
 #include <string>
 #include <memory>
 
 namespace facebook {
 namespace rdma {
-
+$nsOpen
 WidgetJniCache g_widgetCache;
 
 void initWidgetJniCache(JNIEnv* env) {
-    jclass local = env->FindClass("${widgetEntriesClass.replace('.', '/')}");
+""")
+        if (widgets.isNotEmpty()) {
+            out.write("""    jclass local = env->FindClass("${widgetEntriesClass.replace('.', '/')}");
     g_widgetCache.entriesClass = (jclass)env->NewGlobalRef(local);
     env->DeleteLocalRef(local);
 """)
+        }
         for (fn in widgets) {
             val params = classify(fn)
             val sig = params.joinToString("") { it.jniType() } +
@@ -256,7 +256,7 @@ void installRdmaWidgetBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
         }
         out.write("""}
 
-} // namespace rdma
+$nsClose} // namespace rdma
 } // namespace facebook
 """)
         out.close()
@@ -330,7 +330,7 @@ $cleanups
             "                jobject cpp_p$i = nullptr;\n" +
                 "                if (count > $i && args[$i].isObject() && args[$i].asObject(r).hasNativeState(r)) {\n" +
                 "                    auto argObj_$i = args[$i].asObject(r);\n" +
-                "                    auto argState_$i = std::static_pointer_cast<${simpleName(p.fqn)}NativeState>(argObj_$i.getNativeState(r));\n" +
+                "                    auto argState_$i = std::static_pointer_cast<RdmaObjectNativeState>(argObj_$i.getNativeState(r));\n" +
                 "                    if (argState_$i) cpp_p$i = argState_$i->getObject();\n" +
                 "                }\n"
         is Param.Content, is Param.Callback ->

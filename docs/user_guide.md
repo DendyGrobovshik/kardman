@@ -113,6 +113,25 @@ at build time:
 For what is and isn't supported yet (types, constructors, properties, methods,
 plugin transformation), see [features.md](features.md).
 
+### Cross-module `@RDMA` references
+
+A kernel module may reference an `@RDMA` type declared in another kernel module —
+e.g. a widget in `:kernel:user:<user>` taking a `Color`/`Dp` from `:kernel:internal`.
+The generated glue marshals such types without knowing their concrete class (see
+[codegen.md](codegen.md) for the type-erased mechanism), so cross-module references
+"just work" as long as the referencing module depends on the owning module via
+Gradle. The only check the kernel compiler performs is that the referenced FQN is
+itself annotated `@RDMA` (resolved through the dependency classpath); a non-`@RDMA`
+type in an `@RDMA` signature remains a build error.
+
+### Kernel public-API rule
+
+A kernel module's non-`@RDMA` **concrete classes** must be `internal`/`private` —
+a public non-`@RDMA` class could otherwise leak into an `@RDMA` signature. This
+rule does **not** apply to `interface`/`object`/top-level `val` declarations
+(e.g. a host-side `KernelServiceProvider` interface or a `KernelServices` singleton
+registry) or to the framework entry point `runRdmaApp`, which are public by design.
+
 ## Use the framework in your own project
 
 The framework modules are published as `io.github.dendygrobovshik.kardman:*:1.0`.
@@ -149,12 +168,21 @@ To consume them from a separate project:
 4. **Set the module paths/packages** in `gradle.properties` (single source of truth):
 
    ```properties
-   rdmaKernelPackage=com.example.kernel
+   rdmaKernelRootPackage=com.example.kernel
    rdmaKernelProject=:kernel
+   rdmaKernelInternals=:kernel:internal
+   rdmaPluginRootPackage=com.example.plugin
    rdmaPluginProject=:plugin
    # optional: AOT-compile the plugin JS to Hermes bytecode (.hbc)
    rdmaHermesc=tools/hermesc
    ```
+
+   Kernel and plugin modules are nested subprojects of the container projects above.
+   Each kernel module's package is derived from its path (`:kernel:user:alice` →
+   `com.example.kernel.user.alice`); each plugin module's package is
+   `rdmaPluginRootPackage.<username>` (the first path segment after `:plugin`). A plugin
+   sees the framework-owned `rdmaKernelInternals` modules plus its own `:kernel:user:<username>`
+   module, and nothing else.
 
 5. **In `MainActivity`**, register the user bridge and init the runtime (async):
 

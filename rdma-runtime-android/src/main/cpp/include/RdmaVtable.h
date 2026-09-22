@@ -15,8 +15,11 @@
  */
 #pragma once
 #include <jsi/jsi.h>
+#include <jni.h>
 #include <vector>
 #include <memory>
+
+#include "RdmaNativeState.h"
 
 struct RdmaVtable {
     std::vector<std::shared_ptr<facebook::jsi::Function>> entries;

@@ -28,6 +28,9 @@ data class RdmaSubclass(
 
 object RdmaPluginTransformState {
     var outputDir: String = ""
+    var pluginPackage: String = "com.example.plugin"
+    var runRdmaAppFqn: String = "com.example.kernel.runRdmaApp"
+    var kernelRootPackage: String = ""
     var types: List<RdmaPluginType> = emptyList()
         private set
     var functions: List<RdmaPluginFunction> = emptyList()
@@ -37,8 +40,7 @@ object RdmaPluginTransformState {
     private val edits = mutableMapOf<String, MutableList<SourceEdit>>()
     private val subclasses = mutableMapOf<String, RdmaSubclass>()
 
-    private val extraBridgeable = setOf(
-        "com.example.kernel.runRdmaApp",
+    private val composeBridgeable = setOf(
         "androidx.compose.runtime.mutableStateOf",
         "androidx.compose.runtime.mutableIntStateOf",
         "androidx.compose.runtime.SideEffect",
@@ -47,16 +49,23 @@ object RdmaPluginTransformState {
         "androidx.compose.runtime.rememberCoroutineScope",
     )
 
-    fun configure(manifestPath: String?, outputDir: String?) {
+    fun configure(manifestPaths: List<String>, pluginPackage: String?, runRdmaAppFqn: String?, kernelRootPackage: String?, outputDir: String?) {
         outputDir?.let { this.outputDir = it }
-        manifestPath?.let { path ->
+        pluginPackage?.let { this.pluginPackage = it }
+        runRdmaAppFqn?.let { this.runRdmaAppFqn = it }
+        kernelRootPackage?.let { this.kernelRootPackage = it }
+        val allTypes = mutableListOf<RdmaPluginType>()
+        val allFunctions = mutableListOf<RdmaPluginFunction>()
+        for (path in manifestPaths) {
             val file = File(path)
             if (file.exists()) {
                 val manifest = RdmaPluginConfig.parseManifest(file.readText())
-                types = manifest.classes
-                functions = manifest.functions
+                allTypes += manifest.classes
+                allFunctions += manifest.functions
             }
         }
+        types = allTypes
+        functions = allFunctions
     }
 
     fun typeByQualifiedName(fqn: String): RdmaPluginType? = types.find { it.qualifiedName == fqn }
@@ -64,13 +73,16 @@ object RdmaPluginTransformState {
     fun isClassQualifiedName(fqn: String): Boolean = types.any { it.qualifiedName == fqn }
 
     fun isFunctionQualifiedName(fqn: String): Boolean =
-        functions.any { it.qualifiedName == fqn } || fqn in extraBridgeable
+        functions.any { it.qualifiedName == fqn } || fqn == runRdmaAppFqn || fqn in composeBridgeable
 
     fun isBridgeableQualifiedName(fqn: String): Boolean =
         isClassQualifiedName(fqn) || isFunctionQualifiedName(fqn)
 
+    fun isKernelPackage(fqn: String): Boolean =
+        kernelRootPackage.isNotEmpty() && (fqn == kernelRootPackage || fqn.startsWith("$kernelRootPackage."))
+
     fun bridgeNameFor(fqn: String): String = when (fqn) {
-        "com.example.kernel.runRdmaApp" -> "rdmaRunApp"
+        runRdmaAppFqn -> "rdmaRunApp"
         "androidx.compose.runtime.mutableStateOf" -> "rdmaMutableStateOf"
         "androidx.compose.runtime.mutableIntStateOf" -> "rdmaMutableIntStateOf"
         "androidx.compose.runtime.SideEffect" -> "rdmaSideEffect"
@@ -177,7 +189,7 @@ object RdmaPluginTransformState {
 
     internal fun buildStaticBridge(statics: List<Pair<RdmaPluginType, String>>): String {
         val sb = StringBuilder()
-        sb.appendLine("package com.example.plugin")
+        sb.appendLine("package $pluginPackage")
         sb.appendLine()
         for ((type, name) in statics) {
             sb.appendLine("fun ${staticBridgeNameFor(type.simpleName, name)}(): dynamic = js(\"RDMA\").${staticJsName(type.simpleName, name)}()")
@@ -188,7 +200,7 @@ object RdmaPluginTransformState {
 
     internal fun buildFunctionBridge(plainFunctions: List<RdmaPluginFunction>): String {
         val sb = StringBuilder()
-        sb.appendLine("package com.example.plugin")
+        sb.appendLine("package $pluginPackage")
         sb.appendLine()
         for (fn in plainFunctions) {
             if (fn.composable) continue
@@ -212,7 +224,7 @@ object RdmaPluginTransformState {
 
     internal fun buildWidgetBridge(widgets: List<RdmaPluginFunction>): String {
         val sb = StringBuilder()
-        sb.appendLine("package com.example.plugin")
+        sb.appendLine("package $pluginPackage")
         sb.appendLine()
         sb.appendLine("import androidx.compose.runtime.Composable")
         sb.appendLine()
