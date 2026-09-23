@@ -24,5 +24,7 @@ object RdmaBridge {
 
     external fun nativeInit(assetManager: AssetManager)
     external fun nativeEvalAsset(assetPath: String)
+    external fun nativeEvalFile(filePath: String)
+    external fun nativeEvalBytes(bytes: ByteArray)
     external fun nativeIsReady(): Boolean
 }

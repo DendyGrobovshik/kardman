@@ -1,0 +1,14 @@
+{
+    "moduleId": "user_alice",
+    "hashes": {
+        "com.example.kernel.user.alice.Person": "241937e3a2c209f93054c185b805ed6813e7a4a95f1502076fd4f32d6a285399",
+        "com.example.kernel.user.alice.Person.name": "cf9c8cd434d7472f0a131710df192be43ece78e9140881f538b434bdabb467cc",
+        "com.example.kernel.user.alice.Person.age": "ac80bc8e141f297f8922a9b4e6a8dd52135b2ffaf947f4edd109d0aaea5a895b",
+        "com.example.kernel.user.alice.Person.status": "13698c45817dca48019a53d983e689c366ab6b921802401e589f7693888f5a65",
+        "com.example.kernel.user.alice.Person.greet": "fb4f8703eb13f8d331934aafc28bc574a8c1eff55bd32ba0308f74f955df700b",
+        "com.example.kernel.user.alice.Person.toString": "4c9d6f6c3bce36b926ed1a862cd7759ffb3c079aaf0614d95cc48f21557cee16",
+        "com.example.kernel.user.alice.Person.fight": "26f9ff65d18dd7713bc49a149fc4195b1800bbc23046a313f70cc138ce14f6bb",
+        "com.example.kernel.user.alice.Person.getFriends": "6cecead627acc4cdd12e98ca395bfe20010a5acbfdf94f12dbefcffa2cad9832",
+        "com.example.kernel.user.alice.Person.nameFriends": "10f1fbb73dc8c7ae7a0c657edcce52c2b6275ac3ff82975e5ce26eacf7d5765d"
+    }
+}

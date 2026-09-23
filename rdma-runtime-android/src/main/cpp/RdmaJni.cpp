@@ -19,6 +19,8 @@
 #include <android/asset_manager.h>
 #include <android/asset_manager_jni.h>
 #include <jsi/jsi.h>
+#include <fstream>
+#include <iterator>
 
 #include "RdmaRendezvous.h"
 #include "RdmaCompose.h"
@@ -82,4 +84,30 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalAsset(JNIEnv
         // true only after all enqueued evals finish.
         facebook::rdma::rdmaEvalAsset(code);
     }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalFile(JNIEnv* env, jclass, jstring filePath) {
+    const char* path = env->GetStringUTFChars(filePath, nullptr);
+    std::ifstream in(path, std::ios::binary);
+    env->ReleaseStringUTFChars(filePath, path);
+    if (!in) {
+        LOGI("nativeEvalFile: failed to open %s", path);
+        return;
+    }
+    std::string code((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (!code.empty()) {
+        facebook::rdma::rdmaEvalAsset(code);
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalBytes(JNIEnv* env, jclass, jbyteArray bytes) {
+    if (bytes == nullptr) return;
+    jsize length = env->GetArrayLength(bytes);
+    if (length <= 0) return;
+    std::string code;
+    code.resize(static_cast<size_t>(length));
+    env->GetByteArrayRegion(bytes, 0, length, reinterpret_cast<jbyte*>(&code[0]));
+    facebook::rdma::rdmaEvalAsset(code);
 }

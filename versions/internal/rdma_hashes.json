@@ -1,0 +1,32 @@
+{
+    "moduleId": "internal",
+    "hashes": {
+        "com.example.kernel.internal.services.httpExecutor": "1717d421e81f34670c2aaa85c65ea1ba7b58457f1bf0195f55549decf22cf946",
+        "com.example.kernel.internal.services.httpExecute": "61385f5586c941d2057e7c7ab0f0b212b78c12cd11344b2b7eeedcae1a028800",
+        "com.example.kernel.internal.services.buildPlatformInfo": "f3c97830cd9b2fba3a40d56f0fa46c1795227d4476cbac5899321606d238a3fa",
+        "com.example.kernel.internal.Text": "4be74be39a6f263c4babae00fa7eb8c8a77eb1e918a64107878e6510ae19dc9d",
+        "com.example.kernel.internal.Column": "14a6c65e0a832f7e37f0b4e2d6e033fadb7d249ad6006e9cbb3c548e7395110e",
+        "com.example.kernel.internal.Button": "06cf5a6e74c9ff87cb04830e8b6dabb29394c927361bf57807f46bdd753a84f4",
+        "com.example.kernel.internal.runRdmaApp": "6bbb41f07054bb4289e3f18fab808fa9e50f411eccdfebcdae8c88414cc92e10",
+        "com.example.kernel.internal.services.HttpHeader": "3d33298bb9f61c05a997512159392e59ff214c2c6b38f838a242cb510ca537b9",
+        "com.example.kernel.internal.services.HttpHeader.name": "cf9c8cd434d7472f0a131710df192be43ece78e9140881f538b434bdabb467cc",
+        "com.example.kernel.internal.services.HttpHeader.value": "4b1fe9567ccf3e0d413d21126a08d9b6095902dafb568f205a27d8efd6d03972",
+        "com.example.kernel.internal.services.HttpRequest": "a3ab3426eca818ce934c6de811a60a81a6cdb4d07fd20b78a0411aca7188e7cf",
+        "com.example.kernel.internal.services.HttpRequest.method": "c7e8be2edf872ae5f7562a35afd8f2890a38644ed158df5271881501c162570a",
+        "com.example.kernel.internal.services.HttpRequest.url": "3fe36560145b52d37675a98e9d3f88781dc67e0f3225db52eda13ceefb115875",
+        "com.example.kernel.internal.services.HttpRequest.headers": "3a618040c03ea19ca95d0b7fe209c43b90ca175aaef79520eadd597ac65ff8d2",
+        "com.example.kernel.internal.services.HttpRequest.body": "194f87b1cd759af7643223b0218887eae6dea77787f57459c126a56ce7364436",
+        "com.example.kernel.internal.services.HttpResponse": "52c8c98573c10f954ac143e20cc312e89757965d462a61a79106f934a26bbac7",
+        "com.example.kernel.internal.services.HttpResponse.status": "d4169ce9fc4c2562cd06561a9994d1aec61dce8ecc22ee926ae6e11a6fd628ff",
+        "com.example.kernel.internal.services.HttpResponse.headers": "3a618040c03ea19ca95d0b7fe209c43b90ca175aaef79520eadd597ac65ff8d2",
+        "com.example.kernel.internal.services.HttpResponse.body": "194f87b1cd759af7643223b0218887eae6dea77787f57459c126a56ce7364436",
+        "com.example.kernel.internal.services.httpSend": "a1360bb55eaae63dcc19ac1daa06e28f1726fef19e849fedab604480ea6b0b68",
+        "com.example.kernel.internal.services.httpGet": "ab565fab9592ce0a22bcea3558ec3c932c802ddf358eea807655fe2b9dd95d3b",
+        "com.example.kernel.internal.services.httpPost": "be1b7ba67a9329d6184123e19e4d2f18bd2ffe35e6141f44b110c384baf761d5",
+        "com.example.kernel.internal.services.PlatformInfo": "c79405eebfebfc3c6122d30bb8e37f4c815ce1ffb1dd0b03e75b977a3fb36345",
+        "com.example.kernel.internal.services.PlatformInfo.os": "2278289e915078f6c5a5e70cdc43c3ddc338e5bdadf8735406a2bfd46589f046",
+        "com.example.kernel.internal.services.PlatformInfo.deviceModel": "7d065e36dea68f3b98ab916ed97da10bb4aed3ecf1474ccd2544ecf2d17fd588",
+        "com.example.kernel.internal.services.PlatformInfo.osVersion": "edeed7ccd8d17deb51b17b68fafeded556f32fc5a303daa6fb365b16f7b06f46",
+        "com.example.kernel.internal.services.platformInfo": "a629147ba77946f8922f3ff5cc6aae822d0d56d579da89b01db51b816da70179"
+    }
+}

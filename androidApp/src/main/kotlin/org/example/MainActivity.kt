@@ -29,6 +29,7 @@ import com.example.kernel.UserBridge
 import io.github.dendygrobovshik.kardman.runtime.RdmaBridge
 import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 import kotlinx.coroutines.delay
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,6 +54,8 @@ class MainActivity : ComponentActivity() {
         RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin-alice-counter.hbc")
         RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin-bob-services.hbc")
 
+        loadDevPolyfills()
+
         setContent {
             var ready by remember { mutableStateOf(RdmaBridge.nativeIsReady()) }
             LaunchedEffect(Unit) {
@@ -66,5 +69,19 @@ class MainActivity : ComponentActivity() {
                 RdmaComposeHost.Content()
             }
         }
+    }
+
+    /**
+     * Dev-only polyfill loader. Evaluates any `.hbc` bundles dropped into
+     * `filesDir/rdma/` (via `adb push`) after the built-in bundles, so they
+     * override the native `@RDMA` implementations without rebuilding the app.
+     * This is the local stand-in for the future network bundle source.
+     */
+    private fun loadDevPolyfills() {
+        val dir = File(filesDir, "rdma")
+        if (!dir.isDirectory) return
+        dir.listFiles { f -> f.isFile && f.extension == "hbc" }
+            ?.sortedBy { it.name }
+            ?.forEach { RdmaBridge.nativeEvalFile(it.absolutePath) }
     }
 }

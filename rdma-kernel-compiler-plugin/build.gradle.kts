@@ -44,3 +44,20 @@ publishing {
         }
     }
 }
+
+fun releaseTask(name: String, command: String) = tasks.register<JavaExec>(name) {
+    group = "rdma"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.github.dendygrobovshik.kardman.kernel.RdmaReleaseCli")
+    args(
+        command,
+        project.findProperty("analysisJson")?.toString()
+            ?: error("pass -PanalysisJson=/path/to/rdma_analysis.json"),
+        project.findProperty("versionsDir")?.toString()
+            ?: error("pass -PversionsDir=/path/to/versions"),
+        project.findProperty("polyfillOutDir")?.toString() ?: "",
+    )
+}
+
+releaseTask("staticRelease", "static-release")
+releaseTask("dynamicRelease", "dynamic-release")

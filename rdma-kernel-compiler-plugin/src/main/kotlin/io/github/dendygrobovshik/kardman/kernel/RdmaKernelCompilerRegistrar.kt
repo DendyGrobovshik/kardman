@@ -15,6 +15,7 @@
  */
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.RdmaAnalysis
 import io.github.dendygrobovshik.kardman.types.RdmaManifest
 import kotlinx.serialization.json.Json
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
@@ -161,6 +162,11 @@ class RdmaKernelGenerationExtension(
         jsonOutputDir?.let { dir ->
             val json = Json.encodeToString(RdmaManifest.serializer(), RdmaManifest(classInfos, functions))
             File(dir, "rdma_manifest.json").also { it.parentFile.mkdirs() }.writeText(json)
+
+            val index = RdmaSymbolIndexer.index(moduleFragment)
+            val analysis = RdmaAnalysis(moduleId ?: "", index.declarations, index.uses)
+            val analysisJson = Json.encodeToString(RdmaAnalysis.serializer(), analysis)
+            File(dir, "rdma_analysis.json").also { it.parentFile.mkdirs() }.writeText(analysisJson)
         }
 
         val transformer = RdmaVtableTransformer(pluginContext, pkg)
