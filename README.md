@@ -119,6 +119,7 @@ project are in the [user guide](docs/user_guide.md).
 | `:rdma-plugin-gradle-plugin` | Gradle wrapper that wires `:rdma-plugin-compiler-plugin` into the plugin module's JVM resolve compilation and generates the guest-side widget bridge |
 | `:rdma-app-gradle-plugin` | Gradle plugin applied to the app: generates the user bridge + aggregate bridge and compiles the generated C++ into `librdma_user.so` |
 | `:rdma-runtime-android` | Android AAR: generic Hermes runtime + JNI bridge + C++ glue (exported as a prefab) |
+| `:rdma-store` | JVM store: plugin registry + re-sync reconciliation + P1–P4 state machine (§7.2–7.4, §8) |
 | `:kernel:internal` | Framework-owned `@RDMA` classes/widgets (standard functionality) |
 | `:kernel:user:alice` | User `alice`'s own kernel module (`@RDMA` classes) |
 | `:plugin:alice:counter` | Plugin of user `alice` (Kotlin/JS), compiles to JS executed in Hermes |

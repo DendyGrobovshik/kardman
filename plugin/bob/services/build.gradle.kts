@@ -32,6 +32,9 @@ kotlin {
     js {
         browser()
         binaries.executable()
+        compilerOptions {
+            freeCompilerArgs.add("-Xir-minimized-member-names=false")
+        }
     }
 
     sourceSets {

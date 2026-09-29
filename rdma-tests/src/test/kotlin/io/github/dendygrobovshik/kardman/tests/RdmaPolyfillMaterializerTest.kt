@@ -22,10 +22,12 @@ import io.github.dendygrobovshik.kardman.types.RdmaAnalysis
 import io.github.dendygrobovshik.kardman.types.RdmaDeclaration
 import io.github.dendygrobovshik.kardman.types.RdmaSourceRange
 import io.github.dendygrobovshik.kardman.types.RdmaSymbolKind
+import io.github.dendygrobovshik.kardman.types.RdmaSymbolSources
 import io.github.dendygrobovshik.kardman.types.RdmaUse
 import org.junit.Test
 import java.io.File
 import kotlin.test.assertContains
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -90,7 +92,7 @@ class RdmaPolyfillMaterializerTest {
     fun `generates external object for boundaries`() {
         val output = materialize(setOf("com.example.kernel.foo"), setOf("com.example.kernel.foo", "com.example.kernel.boo"))
         assertContains(output, "external object RDMA {")
-        assertContains(output, "fun goo(x: Int): Int")
+        assertContains(output, "fun goo(p0: dynamic): dynamic")
     }
 
     @Test
@@ -108,5 +110,26 @@ class RdmaPolyfillMaterializerTest {
         } finally {
             dir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun `materializes a removed class with a create factory`() {
+        val classSrc = """
+            |@RDMA
+            |class Person(val name: String, val age: Int) {
+            |    fun greet(): String = "hi " + name
+            |}
+        """.trimMargin()
+        val snapshot = RdmaSymbolSources("m", mapOf("com.example.kernel.Person" to classSrc))
+        val analysis = RdmaAnalysis(
+            "m",
+            listOf(RdmaDeclaration("com.example.kernel.Person", RdmaSymbolKind.CLASS, "h", true, null)),
+        )
+        val files = RdmaPolyfillMaterializer.materializeRemovedClasses(analysis, listOf("com.example.kernel.Person"), snapshot)
+        assertEquals(1, files.size)
+        assertContains(files[0].content, "class Person")
+        assertContains(files[0].content, "createPerson")
+        assertContains(files[0].content, "new Person(...args)")
+        assertFalse(files[0].content.contains("@RDMA"), "annotation must be stripped")
     }
 }

@@ -16,6 +16,7 @@
 package io.github.dendygrobovshik.kardman.kernel
 
 import io.github.dendygrobovshik.kardman.types.RdmaDeclaration
+import io.github.dendygrobovshik.kardman.types.RdmaPolyfill
 import io.github.dendygrobovshik.kardman.types.RdmaSourceRange
 import io.github.dendygrobovshik.kardman.types.RdmaSymbolKind
 import io.github.dendygrobovshik.kardman.types.RdmaUse
@@ -43,6 +44,7 @@ import java.util.IdentityHashMap
 data class RdmaIndexResult(
     val declarations: List<RdmaDeclaration>,
     val uses: List<RdmaUse>,
+    val polyfills: List<RdmaPolyfill> = emptyList(),
 )
 
 /**
@@ -54,9 +56,13 @@ data class RdmaIndexResult(
  */
 object RdmaSymbolIndexer {
     private val RDMA_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RDMA")
+    private val COMPOSABLE_ANNOTATION = FqName("androidx.compose.runtime.Composable")
+    private val DEPRECATED_ANNOTATION = FqName("kotlin.Deprecated")
+    private val POLYFILL_TARGET_REGEX = Regex("@Polyfill\\s*\\(\\s*for\\s*=\\s*\"([^\"]+)\"")
 
     fun index(moduleFragment: IrModuleFragment): RdmaIndexResult {
         val declarations = mutableListOf<RdmaDeclaration>()
+        val polyfills = mutableListOf<RdmaPolyfill>()
         val irToNode = IdentityHashMap<IrDeclaration, String>()
         val sources = IdentityHashMap<IrFile, String>()
 
@@ -64,7 +70,7 @@ object RdmaSymbolIndexer {
             val text = readSource(file) ?: continue
             sources[file] = text
             for (decl in file.declarations) {
-                indexDeclaration(decl, text, file.fileEntry.name, enclosingRdma = false, memberOfClass = false, declarations, irToNode)
+                indexDeclaration(decl, text, file.fileEntry.name, enclosingRdma = false, memberOfClass = false, declarations, polyfills, irToNode)
             }
         }
 
@@ -76,7 +82,7 @@ object RdmaSymbolIndexer {
             }
         }
 
-        return RdmaIndexResult(declarations, uses)
+        return RdmaIndexResult(declarations, uses, polyfills)
     }
 
     private fun readSource(file: IrFile): String? {
@@ -91,6 +97,12 @@ object RdmaSymbolIndexer {
         }
     }
 
+    /** Returns the `for = "…"` target of a `@Polyfill` annotation, or null if not annotated. */
+    private fun readPolyfillTarget(text: String, start: Int, end: Int): String? {
+        val head = text.substring(start, minOf(end, start + 512))
+        return POLYFILL_TARGET_REGEX.find(head)?.groupValues?.get(1)
+    }
+
     private fun indexDeclaration(
         decl: IrDeclaration,
         text: String,
@@ -98,6 +110,7 @@ object RdmaSymbolIndexer {
         enclosingRdma: Boolean,
         memberOfClass: Boolean,
         out: MutableList<RdmaDeclaration>,
+        polyfills: MutableList<RdmaPolyfill>,
         irToNode: MutableMap<IrDeclaration, String>,
     ) {
         if (decl.origin != IrDeclarationOrigin.DEFINED) return
@@ -117,6 +130,7 @@ object RdmaSymbolIndexer {
                     hash = RdmaContentHasher.sha256(text.substring(start, headerEnd)),
                     isRdma = selfRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
+                    deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
                 )
                 irToNode[decl] = fqn
                 for (member in decl.declarations) {
@@ -128,14 +142,25 @@ object RdmaSymbolIndexer {
                 if (decl.isExternal) return
                 val end = decl.endOffset
                 if (end < start) return
-                val isRdma = enclosingRdma || decl.hasAnnotation(RDMA_ANNOTATION)
                 val fqn = decl.fqNameWhenAvailable?.asString() ?: decl.name.asString()
+                // A `@Polyfill` function is not public API: it is recorded for the materializer
+                // but excluded from the hashed declarations and the usage graph (§6.3).
+                if (!memberOfClass) {
+                    val target = readPolyfillTarget(text, start, end)
+                    if (target != null) {
+                        polyfills += RdmaPolyfill(target, fqn, RdmaSourceRange(path, start, end))
+                        return
+                    }
+                }
+                val isRdma = enclosingRdma || decl.hasAnnotation(RDMA_ANNOTATION)
                 out += RdmaDeclaration(
                     fqn = fqn,
                     kind = if (memberOfClass) RdmaSymbolKind.CLASS_METHOD else RdmaSymbolKind.TOP_LEVEL_FUNCTION,
                     hash = RdmaContentHasher.sha256(text.substring(start, end)),
                     isRdma = isRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
+                    emulatable = !decl.hasAnnotation(COMPOSABLE_ANNOTATION),
+                    deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
                 )
                 irToNode[decl] = fqn
             }
@@ -151,6 +176,7 @@ object RdmaSymbolIndexer {
                     hash = RdmaContentHasher.sha256(text.substring(start, end)),
                     isRdma = isRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
+                    isMutable = decl.isVar,
                 )
                 irToNode[decl] = fqn
             }
@@ -185,6 +211,7 @@ object RdmaSymbolIndexer {
                     hash = RdmaContentHasher.sha256(text.substring(start, headerEnd)),
                     isRdma = selfRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
+                    deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
                 )
                 irToNode[decl] = fqn
                 for (member in decl.declarations) {
@@ -203,6 +230,8 @@ object RdmaSymbolIndexer {
                     hash = RdmaContentHasher.sha256(text.substring(start, end)),
                     isRdma = enclosingRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
+                    emulatable = !decl.hasAnnotation(COMPOSABLE_ANNOTATION),
+                    deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
                 )
                 irToNode[decl] = containerFqn
             }
@@ -217,6 +246,7 @@ object RdmaSymbolIndexer {
                     hash = RdmaContentHasher.sha256(text.substring(start, end)),
                     isRdma = enclosingRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
+                    isMutable = decl.isVar,
                 )
                 irToNode[decl] = containerFqn
             }

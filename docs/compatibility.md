@@ -196,6 +196,7 @@ fun foo_polyfill(...): ... = { /* emulatable implementation via @RDMA primitives
 
 - Naming convention: the `_polyfill` suffix.
 - A `@Polyfill` declaration is **not part** of the public `@RDMA` surface (excluded from the manifest, plugins don't see it). The materializer picks it up only when the bound symbol needs a JS version.
+- A `@Polyfill` function must be **non-public** (`internal` or `private`): the kernel public-API rule rejects public non-`@RDMA` declarations.
 - Written by the **module owner**.
 - **Tests are mandatory** and are the **symbol's contract**: the native, the auto-polyfill and the manual polyfill must all pass the **same** suite. The native refined its semantics → a test appeared → it runs automatically for the manual polyfill too, otherwise the release fails (see §10). That's how a manual polyfill doesn't drift.
 

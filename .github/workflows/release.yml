@@ -1,0 +1,67 @@
+name: release
+
+# CI is the single writer of the changelog (§2.1, §9). This workflow runs the
+# release order — build → checks → tests → write — and never runs for local dev.
+#
+#   gh workflow run release.yml \
+#     -f command=dynamic-release \
+#     -f analysisJson=kernel/user/alice/build/generated/rdma/rdma_analysis.json \
+#     -f versionsDir=versions \
+#     -f internalModules=internal \
+#     -f hotfix=false
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "static-release | dynamic-release | hotfix-release"
+        required: true
+        default: "dynamic-release"
+      analysisJson:
+        description: "Path to the freshly emitted rdma_analysis.json"
+        required: true
+      versionsDir:
+        description: "Directory holding versions/changelog.json"
+        required: true
+        default: "versions"
+      internalModules:
+        description: "Comma-separated framework-owned module ids"
+        required: false
+        default: "internal"
+      polyfillOutDir:
+        description: "Where to write polyfill sources"
+        required: false
+        default: "build/polyfill"
+      telemetryFile:
+        description: "Optional host-version telemetry for the coverage warning"
+        required: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build + test (hard gate)
+        run: ./gradlew :rdma-tests:test :rdma-kernel-compiler-plugin:test :rdma-store:test
+
+      - name: Release (changelog write is the commit point)
+        run: |
+          ./scripts/release.sh \
+            "${{ github.event.inputs.command }}" \
+            "${{ github.event.inputs.analysisJson }}" \
+            "${{ github.event.inputs.versionsDir }}" \
+            "${{ github.event.inputs.polyfillOutDir }}" \
+            "${{ github.event.inputs.internalModules }}" \
+            "${{ github.event.inputs.telemetryFile }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: polyfills
+          path: ${{ github.event.inputs.polyfillOutDir }}

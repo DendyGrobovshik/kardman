@@ -20,8 +20,10 @@ import java.security.MessageDigest
 
 /** SHA-256 content hash over a declaration's raw source text (no normalization, "as is"). */
 object RdmaContentHasher {
-    fun sha256(text: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+    fun sha256(text: String): String = sha256Bytes(text.toByteArray(Charsets.UTF_8))
+
+    fun sha256Bytes(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         return digest.joinToString("") { "%02x".format(it) }
     }
 }

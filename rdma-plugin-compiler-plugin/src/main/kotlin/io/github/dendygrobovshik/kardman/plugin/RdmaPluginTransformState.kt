@@ -15,6 +15,10 @@
  */
 package io.github.dendygrobovshik.kardman.plugin
 
+import io.github.dendygrobovshik.kardman.types.RdmaPluginContract
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
 import java.io.File
 
 data class SourceEdit(val start: Int, val end: Int, val replacement: String)
@@ -31,6 +35,13 @@ object RdmaPluginTransformState {
     var pluginPackage: String = "com.example.plugin"
     var runRdmaAppFqn: String = "com.example.kernel.runRdmaApp"
     var kernelRootPackage: String = ""
+    var pluginId: String = ""
+    var pluginVersion: Int = 1
+    var builtAgainst: Int = 0
+    var moduleDeps: List<String> = emptyList()
+        private set
+    var floorMap: Map<String, Int> = emptyMap()
+        private set
     var types: List<RdmaPluginType> = emptyList()
         private set
     var functions: List<RdmaPluginFunction> = emptyList()
@@ -39,6 +50,7 @@ object RdmaPluginTransformState {
     private val fileTexts = mutableMapOf<String, String>()
     private val edits = mutableMapOf<String, MutableList<SourceEdit>>()
     private val subclasses = mutableMapOf<String, RdmaSubclass>()
+    private val usedSymbols = sortedSetOf<String>()
 
     private val composeBridgeable = setOf(
         "androidx.compose.runtime.mutableStateOf",
@@ -49,11 +61,28 @@ object RdmaPluginTransformState {
         "androidx.compose.runtime.rememberCoroutineScope",
     )
 
-    fun configure(manifestPaths: List<String>, pluginPackage: String?, runRdmaAppFqn: String?, kernelRootPackage: String?, outputDir: String?) {
+    fun configure(
+        manifestPaths: List<String>,
+        pluginPackage: String?,
+        runRdmaAppFqn: String?,
+        kernelRootPackage: String?,
+        outputDir: String?,
+        pluginId: String?,
+        pluginVersion: Int?,
+        builtAgainst: Int?,
+        moduleDeps: List<String>,
+        floorMap: Map<String, Int>,
+    ) {
         outputDir?.let { this.outputDir = it }
         pluginPackage?.let { this.pluginPackage = it }
         runRdmaAppFqn?.let { this.runRdmaAppFqn = it }
         kernelRootPackage?.let { this.kernelRootPackage = it }
+        pluginId?.let { this.pluginId = it }
+        pluginVersion?.let { this.pluginVersion = it }
+        builtAgainst?.let { this.builtAgainst = it }
+        this.moduleDeps = moduleDeps
+        this.floorMap = floorMap
+        usedSymbols.clear()
         val allTypes = mutableListOf<RdmaPluginType>()
         val allFunctions = mutableListOf<RdmaPluginFunction>()
         for (path in manifestPaths) {
@@ -66,6 +95,10 @@ object RdmaPluginTransformState {
         }
         types = allTypes
         functions = allFunctions
+    }
+
+    fun recordUsedSymbol(fqn: String) {
+        usedSymbols.add(fqn)
     }
 
     fun typeByQualifiedName(fqn: String): RdmaPluginType? = types.find { it.qualifiedName == fqn }
@@ -152,6 +185,23 @@ object RdmaPluginTransformState {
         writeFunctionBridge(outDir)
         writeWidgetBridge(outDir)
         writeStaticBridge(outDir)
+        writeContract(outDir)
+    }
+
+    private fun writeContract(outDir: File) {
+        if (pluginId.isBlank()) return
+        val minHost = usedSymbols.maxOfOrNull { floorMap[it] ?: 0 } ?: 0
+        val contract = RdmaPluginContract(
+            pluginId = pluginId,
+            version = pluginVersion,
+            builtAgainst = builtAgainst,
+            minHost = minHost,
+            moduleDeps = moduleDeps,
+            usedSymbols = usedSymbols.toList(),
+        )
+        val json = Json { prettyPrint = true }
+        outDir.mkdirs()
+        File(outDir, "plugin.json").writeText(json.encodeToString(RdmaPluginContract.serializer(), contract))
     }
 
     private fun writeFunctionBridge(outDir: File) {

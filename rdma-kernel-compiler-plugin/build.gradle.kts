@@ -56,8 +56,26 @@ fun releaseTask(name: String, command: String) = tasks.register<JavaExec>(name) 
         project.findProperty("versionsDir")?.toString()
             ?: error("pass -PversionsDir=/path/to/versions"),
         project.findProperty("polyfillOutDir")?.toString() ?: "",
+        project.findProperty("internalModules")?.toString() ?: "internal",
+        project.findProperty("telemetryFile")?.toString() ?: "",
     )
 }
 
 releaseTask("staticRelease", "static-release")
 releaseTask("dynamicRelease", "dynamic-release")
+releaseTask("hotfixRelease", "hotfix-release")
+
+tasks.register<JavaExec>("pluginRelease") {
+    group = "rdma"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.github.dendygrobovshik.kardman.kernel.RdmaReleaseCli")
+    args(
+        "plugin-release",
+        project.findProperty("pluginJson")?.toString()
+            ?: error("pass -PpluginJson=/path/to/plugin.json"),
+        project.findProperty("versionsDir")?.toString()
+            ?: error("pass -PversionsDir=/path/to/versions"),
+        project.findProperty("bundlePath")?.toString()
+            ?: error("pass -PbundlePath=/path/to/plugin.hbc"),
+    )
+}

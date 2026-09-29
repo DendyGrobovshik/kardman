@@ -47,6 +47,16 @@ data class RdmaSourceRange(
  *
  * The [hash] is computed over the class header (signature/members signature) for classes and over
  * the whole declaration for everything else, so class-member changes are detected independently.
+ *
+ * [emulatable] is `false` when the symbol is fundamentally native and cannot have a JS polyfill
+ * (e.g. a `@Composable` widget that talks to the native Compose protocol); such symbols are
+ * non-emulatable anchors that set the `floor`/`minHost` bound (§5.2, §5.3).
+ *
+ * [deprecated] is `true` when the declaration is annotated with Kotlin's `@Deprecated` — the
+ * mandatory first step before removal (§7.1, S3).
+ *
+ * [isMutable] is `true` for `var` properties; used by shared-state detection (§6.5) to decide
+ * whether a polyfill can be cut into delta pieces.
  */
 @Serializable
 data class RdmaDeclaration(
@@ -55,6 +65,9 @@ data class RdmaDeclaration(
     val hash: String,
     val isRdma: Boolean,
     val sourceRange: RdmaSourceRange? = null,
+    val emulatable: Boolean = true,
+    val deprecated: Boolean = false,
+    val isMutable: Boolean = false,
 )
 
 /** A directed "uses" edge: `from` references `to`. Both are collapsed polyfill-node fqns. */
@@ -62,6 +75,17 @@ data class RdmaDeclaration(
 data class RdmaUse(
     val from: String,
     val to: String,
+)
+
+/**
+ * A manual polyfill (§6.3): a `@Polyfill(for = [target])` function that reimplements a kernel
+ * symbol the auto-materializer cannot compile to JS. Not part of the public `@RDMA` surface.
+ */
+@Serializable
+data class RdmaPolyfill(
+    val target: String,
+    val fqn: String,
+    val sourceRange: RdmaSourceRange? = null,
 )
 
 /**
@@ -74,6 +98,7 @@ data class RdmaAnalysis(
     val moduleId: String,
     val declarations: List<RdmaDeclaration> = emptyList(),
     val uses: List<RdmaUse> = emptyList(),
+    val polyfills: List<RdmaPolyfill> = emptyList(),
 )
 
 /** The committed baseline in `versions/<moduleId>/rdma_hashes.json`. */

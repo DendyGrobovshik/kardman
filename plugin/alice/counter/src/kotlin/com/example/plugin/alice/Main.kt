@@ -16,12 +16,14 @@
 package com.example.plugin.alice
 
 import com.example.kernel.user.alice.Person
+import com.example.kernel.user.alice.aliceTagline
 
 class Cyborg(name: String, age: Int) : Person(name, age) {
     override fun greet(): String = "I am a cyborg!"
 }
 
 fun runPersonDemo() {
+    println("Tagline: ${aliceTagline()}")
     val obi = Person("Оби-Ван Кеноби", 38)
     println(obi.greet())
     println(obi.toString())

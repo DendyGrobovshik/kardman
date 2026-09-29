@@ -61,12 +61,16 @@ class RdmaAppGradlePlugin : Plugin<Project> {
 
         // Enumerate kernel/plugin modules by project path (stable at configuration time).
         // Gradle auto-creates the intermediate container projects (`:plugin:alice`, …),
-        // so only count projects that actually have a build script.
+        // so only count projects that actually have a build script. A plugin module may opt
+        // out of being baked into the app (`rdmaBakeInApp=false`) — it is then delivered
+        // through the store only (dynamic plugin scenario).
         val subprojects = target.rootProject.subprojects
             .filter { it.buildFile.exists() }
+        val kernelModulePaths = subprojects.map { it.path }.filter { it.startsWith("$kernelContainer:") }
+        val pluginModulePaths = subprojects
+            .filter { it.findProperty("rdmaBakeInApp")?.toString() != "false" }
             .map { it.path }
-        val kernelModulePaths = subprojects.filter { it.startsWith("$kernelContainer:") }
-        val pluginModulePaths = subprojects.filter { it.startsWith("$pluginContainer:") }
+            .filter { it.startsWith("$pluginContainer:") }
 
         fun moduleIdOf(path: String, container: String): String {
             val suffix = path.removePrefix(container).removePrefix(":").replace(':', '_').replace('.', '_')

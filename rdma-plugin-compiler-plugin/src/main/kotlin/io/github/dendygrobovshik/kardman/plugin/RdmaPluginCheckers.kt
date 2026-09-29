@@ -149,6 +149,7 @@ object RdmaPluginFunctionCallChecker : FirExpressionChecker<FirFunctionCall>(Mpp
 
         val subclass = RdmaPluginTransformState.subclassByQualifiedName(fqn)
         if (subclass != null) {
+            RdmaPluginTransformState.recordUsedSymbol(fqn)
             val overridesJs = subclass.overrides.joinToString(", ") { (n, b) ->
                 "$n: function() { return $b; }"
             }
@@ -166,6 +167,7 @@ object RdmaPluginFunctionCallChecker : FirExpressionChecker<FirFunctionCall>(Mpp
         }
 
         val type = RdmaPluginTransformState.typeByQualifiedName(fqn) ?: return
+        RdmaPluginTransformState.recordUsedSymbol(fqn)
         val args = argTexts.mapIndexed { i, argText ->
             val paramType = type.constructorParams.getOrNull(i)?.second
             if (paramType == "kotlin.String") {
@@ -187,6 +189,7 @@ object RdmaPluginWidgetCallChecker : FirExpressionChecker<FirFunctionCall>(MppCh
         val callableId = symbol.callableId ?: return
         val fqn = callableId.asSingleFqName().asString()
         if (!RdmaPluginTransformState.isFunctionQualifiedName(fqn)) return
+        RdmaPluginTransformState.recordUsedSymbol(fqn)
         val nameSrc = expression.calleeReference.source ?: return
         val path = filePathOf(context) ?: return
         val bridgeName = RdmaPluginTransformState.bridgeNameFor(fqn)
@@ -207,6 +210,7 @@ object RdmaPluginPropertyAccessChecker : FirExpressionChecker<FirPropertyAccessE
             val type = RdmaPluginTransformState.typeByQualifiedName(outerFqn) ?: return
             val propName = symbol.name.asString()
             if (propName !in type.statics) return
+            RdmaPluginTransformState.recordUsedSymbol(outerFqn)
             val accessSrc = expression.source ?: return
             val path = filePathOf(context) ?: return
             val bridge = RdmaPluginTransformState.staticBridgeNameFor(type.simpleName, propName)
@@ -218,6 +222,7 @@ object RdmaPluginPropertyAccessChecker : FirExpressionChecker<FirPropertyAccessE
         val type = RdmaPluginTransformState.typeByQualifiedName(fqn) ?: return
         val propName = symbol.name.asString()
         if (type.properties.none { it.first == propName }) return
+        RdmaPluginTransformState.recordUsedSymbol(fqn)
         val accessSrc = expression.source ?: return
         val nameSrc = expression.calleeReference.source ?: return
         val path = filePathOf(context) ?: return
@@ -244,6 +249,7 @@ object RdmaPluginVariableAssignmentChecker : FirExpressionChecker<FirVariableAss
         val propName = symbol.name.asString()
         val prop = type.properties.find { it.first == propName } ?: return
         if (!prop.second) return
+        RdmaPluginTransformState.recordUsedSymbol(fqn)
         val src = expression.source ?: return
         val nameSrc = lValue.calleeReference.source ?: return
         val rValueSrc = expression.rValue.source ?: return

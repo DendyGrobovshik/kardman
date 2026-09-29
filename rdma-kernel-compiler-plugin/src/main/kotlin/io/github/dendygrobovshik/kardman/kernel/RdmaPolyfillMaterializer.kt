@@ -17,7 +17,9 @@ package io.github.dendygrobovshik.kardman.kernel
 
 import io.github.dendygrobovshik.kardman.types.RdmaAnalysis
 import io.github.dendygrobovshik.kardman.types.RdmaDeclaration
+import io.github.dendygrobovshik.kardman.types.RdmaPolyfill
 import io.github.dendygrobovshik.kardman.types.RdmaSymbolKind
+import io.github.dendygrobovshik.kardman.types.RdmaSymbolSources
 import java.io.File
 import java.util.regex.Pattern
 
@@ -43,14 +45,24 @@ object RdmaPolyfillMaterializer {
 
     fun materialize(analysis: RdmaAnalysis, result: PolyfillResult): List<PolyfillSourceFile> {
         if (result.isEmpty) return emptyList()
+        val manualByTarget = analysis.polyfills.associateBy { it.target }
+        val manualEntries = result.entries.filter { it in manualByTarget }.toSet()
+        return materializeAuto(analysis, result, manualEntries) +
+            materializeManual(analysis, manualEntries, manualByTarget)
+    }
+
+    private fun materializeAuto(analysis: RdmaAnalysis, result: PolyfillResult, manualEntries: Set<String>): List<PolyfillSourceFile> {
+        val entries = result.entries - manualEntries
+        val nodes = result.nodes - manualEntries
+        if (nodes.isEmpty()) return emptyList()
 
         val declsByNode = analysis.declarations
             .filter { it.kind != RdmaSymbolKind.CLASS_METHOD && it.kind != RdmaSymbolKind.CLASS_PROPERTY }
-            .filter { RdmaSubgraph.nodeOf(it) in result.nodes }
+            .filter { RdmaSubgraph.nodeOf(it) in nodes }
 
         val externalFunctions = analysis.declarations
             .filter { it.isRdma && it.kind == RdmaSymbolKind.TOP_LEVEL_FUNCTION }
-            .filter { it.fqn !in result.entries }
+            .filter { it.fqn !in entries }
 
         val externalObject = buildExternalObject(externalFunctions)
 
@@ -64,7 +76,7 @@ object RdmaPolyfillMaterializer {
             val header = extractHeader(text)
             val body = decls.sortedBy { it.sourceRange?.start ?: Int.MAX_VALUE }
                 .joinToString("\n\n") { decl ->
-                    stripRdmaAnnotation(rewriteRdmaCalls(sliceDeclaration(text, decl), externalFunctions))
+                    stripPolyfillAnnotation(stripRdmaAnnotation(rewriteRdmaCalls(sliceDeclaration(text, decl), externalFunctions)))
                 }
 
             val content = buildString {
@@ -73,7 +85,7 @@ object RdmaPolyfillMaterializer {
                 append(body.trimEnd())
                 if (index == 0) {
                     append("\n\n")
-                    append(registrationBlock(result.entries, analysis))
+                    append(registrationBlock(entries, analysis))
                 }
                 append("\n")
             }
@@ -83,39 +95,105 @@ object RdmaPolyfillMaterializer {
         return files
     }
 
+    /**
+     * Materializes manual polyfills (§6.3): a `@Polyfill(for = "X") fun x_polyfill(...)` replaces
+     * the auto-materialized `X`. The polyfill function is emitted as-is (its `@RDMA` calls are
+     * rewritten to `RDMA.*`) and registered on the target name.
+     */
+    private fun materializeManual(
+        analysis: RdmaAnalysis,
+        manualEntries: Set<String>,
+        manualByTarget: Map<String, RdmaPolyfill>,
+    ): List<PolyfillSourceFile> {
+        if (manualEntries.isEmpty()) return emptyList()
+        val declByFqn = analysis.declarations.associateBy { it.fqn }
+
+        val externalFunctions = analysis.declarations
+            .filter { it.isRdma && it.kind == RdmaSymbolKind.TOP_LEVEL_FUNCTION }
+            .filter { it.fqn !in manualEntries }
+        val externalObject = buildExternalObject(externalFunctions)
+
+        val files = mutableListOf<PolyfillSourceFile>()
+        var index = 0
+        for (target in manualEntries.sorted()) {
+            val polyfill = manualByTarget[target] ?: continue
+            val range = polyfill.sourceRange ?: continue
+            val text = runCatching { File(range.file).readText() }.getOrNull() ?: continue
+            val header = extractHeader(text)
+            val body = stripPolyfillAnnotation(stripRdmaAnnotation(rewriteRdmaCalls(text.substring(range.start, range.end), externalFunctions)))
+            val targetName = target.substringAfterLast('.')
+            val polyfillName = polyfill.fqn.substringAfterLast('.')
+
+            val content = buildString {
+                if (header.isNotBlank()) append(header.trimEnd()).append("\n\n")
+                if (index == 0 && externalObject.isNotBlank()) append(externalObject).append("\n\n")
+                append(body.trimEnd())
+                append("\n\n")
+                append("private val __rdmaPolyfillRegistration = run {\n")
+                append("    js(\"RDMA\").$targetName = ::$polyfillName\n")
+                append("    Unit\n")
+                append("}\n")
+            }
+            files += PolyfillSourceFile("PolyfillManual$index.kt", content)
+            index++
+        }
+        return files
+    }
+
     private fun buildExternalObject(externalFunctions: List<RdmaDeclaration>): String {
         if (externalFunctions.isEmpty()) return ""
         val members = externalFunctions
             .sortedBy { it.fqn }
-            .joinToString("\n") { decl ->
-                val sig = signatureOf(decl.fqn.substringAfterLast('.'), decl)
-                if (sig.isBlank()) "" else "    $sig"
-            }
-            .lines().filter { it.isNotBlank() }.joinToString("\n")
+            .mapNotNull { decl -> dynamicSignature(decl)?.let { "    $it" } }
+            .joinToString("\n")
+        if (members.isEmpty()) return ""
         return "external object RDMA {\n$members\n}"
     }
 
-    private fun signatureOf(name: String, decl: RdmaDeclaration): String {
-        val range = decl.sourceRange ?: return ""
-        val file = File(range.file)
-        val text = runCatching { file.readText() }.getOrNull() ?: return ""
+    /**
+     * A dynamic-typed declaration of an external `@RDMA` top-level function. The polyfill only
+     * *calls* these (the `RDMA.<name>(...)` rewrite), so the exact parameter types are irrelevant
+     * at runtime (JS is dynamic) and are erased to `dynamic` so the emitted module compiles
+     * standalone, without the kernel's Kotlin types in scope.
+     */
+    private fun dynamicSignature(decl: RdmaDeclaration): String? {
+        val range = decl.sourceRange ?: return null
+        val text = runCatching { File(range.file).readText() }.getOrNull() ?: return null
         val full = text.substring(range.start, range.end)
-        // Locate "fun " and cut at the body (top-level '=' or '{').
         val funIdx = full.indexOf("fun ")
-        if (funIdx < 0) return ""
-        val body = full.substring(funIdx)
-        var paren = 0
+        if (funIdx < 0) return null
+        val after = full.substring(funIdx)
+        val open = after.indexOf('(')
+        if (open < 0) return null
+
+        // Walk the parameter list tracking nested (), <> and [] so commas inside generics or
+        // lambda types don't split the list.
+        val params = mutableListOf<String>()
+        val current = StringBuilder()
+        var depth = 0
+        var angle = 0
         var bracket = 0
-        for (i in body.indices) {
-            when (body[i]) {
-                '(' -> paren++
-                ')' -> paren--
-                '[' -> bracket++
-                ']' -> bracket--
-                '=', '{' -> if (paren == 0 && bracket == 0) return body.substring(0, i).trimEnd()
+        var i = open + 1
+        while (i < after.length) {
+            val c = after[i]
+            when {
+                c == '(' -> { depth++; current.append(c) }
+                c == ')' -> {
+                    if (depth == 0) { if (current.isNotBlank()) params.add(current.toString().trim()); break }
+                    depth--; current.append(c)
+                }
+                c == '<' -> { angle++; current.append(c) }
+                c == '>' -> { angle--; current.append(c) }
+                c == '[' -> { bracket++; current.append(c) }
+                c == ']' -> { bracket--; current.append(c) }
+                c == ',' && depth == 0 && angle == 0 && bracket == 0 -> { params.add(current.toString().trim()); current.clear() }
+                else -> current.append(c)
             }
+            i++
         }
-        return body.trimEnd()
+        val name = decl.fqn.substringAfterLast('.')
+        val signature = params.mapIndexed { idx, _ -> "p$idx: dynamic" }.joinToString(", ")
+        return "fun $name($signature): dynamic"
     }
 
     private fun sliceDeclaration(text: String, decl: RdmaDeclaration): String {
@@ -131,6 +209,9 @@ object RdmaPolyfillMaterializer {
 
     private fun stripRdmaAnnotation(source: String): String =
         source.replace(Regex("@RDMA\\b\\s*"), "")
+
+    private fun stripPolyfillAnnotation(source: String): String =
+        source.replace(Regex("@Polyfill\\s*\\([^)]*\\)\\s*"), "")
 
     private fun rewriteRdmaCalls(source: String, externalFunctions: List<RdmaDeclaration>): String {
         var result = source
@@ -156,5 +237,104 @@ object RdmaPolyfillMaterializer {
             append("\n    Unit\n")
             append("}")
         }
+    }
+
+    /**
+     * Materializes the `R` polyfill — re-providing removed `@RDMA` symbols from their last-known
+     * source (snapshotted at the previous release) so old plugins keep working on a new host
+     * (§5.1, §7.1 S4).
+     *
+     * Only top-level `@RDMA` functions are re-provided (the same boundary as the F materializer);
+     * class re-provisioning is a follow-up.
+     */
+    fun materializeRemoved(
+        analysis: RdmaAnalysis,
+        removedFunctions: List<String>,
+        snapshot: RdmaSymbolSources,
+    ): List<PolyfillSourceFile> {
+        if (removedFunctions.isEmpty()) return emptyList()
+        val manualByTarget = analysis.polyfills.associateBy { it.target }
+        val manual = removedFunctions.filter { it in manualByTarget }.toSet()
+        val snapshotOnly = removedFunctions.filter { it !in manualByTarget }
+        return materializeManual(analysis, manual, manualByTarget) +
+            materializeRemovedFromSnapshot(analysis, snapshotOnly, snapshot)
+    }
+
+    /**
+     * Materializes the `R` polyfill for removed `@RDMA` classes (§5.1, §7.1 S4): re-emits the
+     * class from its last-known source and re-registers `RDMA.create<Name>` as a JS factory
+     * (`new Name(...)`), so old plugins that `RDMA.create<Name>(...)` keep working.
+     *
+     * Concrete classes are re-provided. Open-method/vtable dispatch and companion statics of a
+     * removed class are still a follow-up (they live in the native bridge, not the JS class).
+     */
+    fun materializeRemovedClasses(
+        analysis: RdmaAnalysis,
+        removedClasses: List<String>,
+        snapshot: RdmaSymbolSources,
+    ): List<PolyfillSourceFile> {
+        if (removedClasses.isEmpty()) return emptyList()
+
+        val externalFunctions = analysis.declarations
+            .filter { it.isRdma && it.kind == RdmaSymbolKind.TOP_LEVEL_FUNCTION }
+            .filter { it.fqn !in removedClasses }
+        val externalObject = buildExternalObject(externalFunctions)
+
+        val files = mutableListOf<PolyfillSourceFile>()
+        var index = 0
+        for (fqn in removedClasses.sorted()) {
+            val snippet = snapshot.sources[fqn] ?: continue
+            val simpleName = fqn.substringAfterLast('.')
+            val body = stripRdmaAnnotation(rewriteRdmaCalls(snippet, externalFunctions))
+            val content = buildString {
+                append(body.trimEnd())
+                append("\n\n")
+                if (index == 0 && externalObject.isNotBlank()) {
+                    append(externalObject).append("\n\n")
+                }
+                append("private val __rdmaClassRegistration = run {\n")
+                append("    js(\"RDMA\").create$simpleName = js(\"(...args) => new $simpleName(...args)\")\n")
+                append("    Unit\n")
+                append("}\n")
+            }
+            files += PolyfillSourceFile("PolyfillRClass$index.kt", content)
+            index++
+        }
+        return files
+    }
+
+    private fun materializeRemovedFromSnapshot(
+        analysis: RdmaAnalysis,
+        removedFunctions: List<String>,
+        snapshot: RdmaSymbolSources,
+    ): List<PolyfillSourceFile> {
+        if (removedFunctions.isEmpty()) return emptyList()
+
+        val externalFunctions = analysis.declarations
+            .filter { it.isRdma && it.kind == RdmaSymbolKind.TOP_LEVEL_FUNCTION }
+            .filter { it.fqn !in removedFunctions }
+        val externalObject = buildExternalObject(externalFunctions)
+
+        val files = mutableListOf<PolyfillSourceFile>()
+        var index = 0
+        for (fqn in removedFunctions.sorted()) {
+            val snippet = snapshot.sources[fqn] ?: continue
+            val body = stripRdmaAnnotation(rewriteRdmaCalls(snippet, externalFunctions))
+            val name = fqn.substringAfterLast('.')
+            val content = buildString {
+                append(body.trimEnd())
+                append("\n\n")
+                if (index == 0 && externalObject.isNotBlank()) {
+                    append(externalObject).append("\n\n")
+                }
+                append("private val __rdmaPolyfillRegistration = run {\n")
+                append("    js(\"RDMA\").$name = ::$name\n")
+                append("    Unit\n")
+                append("}\n")
+            }
+            files += PolyfillSourceFile("PolyfillR$index.kt", content)
+            index++
+        }
+        return files
     }
 }

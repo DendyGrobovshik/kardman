@@ -21,9 +21,10 @@ import kotlinx.serialization.json.Json
 import java.io.File
 
 /**
- * Read/write of the committed baseline in `versions/<moduleId>/rdma_hashes.json`. The baseline
- * records the hashes of the kernel symbols baked into the native host; `static-release` rewrites
- * it, `dynamic-release` diffs against it.
+ * Read/write of the per-module native-state snapshot in `versions/<moduleId>/rdma_hashes.json`.
+ * This file is a *derived* artifact: the source of truth is the changelog (§2.1), folded at `H`
+ * by [RdmaChangelog]. `static-release` rewrites it after moving `H`; `dynamic-release` reads the
+ * native state from the changelog, not from here.
  */
 object RdmaBaseline {
     private val json = Json { prettyPrint = true }

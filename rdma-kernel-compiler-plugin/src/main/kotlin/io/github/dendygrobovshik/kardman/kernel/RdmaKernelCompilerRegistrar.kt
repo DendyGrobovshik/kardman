@@ -164,7 +164,7 @@ class RdmaKernelGenerationExtension(
             File(dir, "rdma_manifest.json").also { it.parentFile.mkdirs() }.writeText(json)
 
             val index = RdmaSymbolIndexer.index(moduleFragment)
-            val analysis = RdmaAnalysis(moduleId ?: "", index.declarations, index.uses)
+            val analysis = RdmaAnalysis(moduleId ?: "", index.declarations, index.uses, index.polyfills)
             val analysisJson = Json.encodeToString(RdmaAnalysis.serializer(), analysis)
             File(dir, "rdma_analysis.json").also { it.parentFile.mkdirs() }.writeText(analysisJson)
         }

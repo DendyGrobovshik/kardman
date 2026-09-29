@@ -22,6 +22,8 @@ import org.jetbrains.kotlin.gradle.plugin.KotlinCompilerPluginSupportPlugin
 import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 import org.jetbrains.kotlin.gradle.plugin.SubpluginArtifact
 import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
+import groovy.json.JsonSlurper
+import groovy.json.JsonOutput
 import java.io.File
 
 private const val DEFAULT_PLUGIN_PROJECT = ":plugin"
@@ -50,6 +52,55 @@ private fun Project.pluginUsername(): String {
 private fun kernelPackageOf(root: Project, kernelContainer: String, kernelPath: String, rootPackage: String): String {
     val suffix = kernelPath.removePrefix(kernelContainer).removePrefix(":").replace(':', '.')
     return if (suffix.isEmpty()) rootPackage else "$rootPackage.$suffix"
+}
+
+/** Sanitized module id of a kernel module path (mirrors `RdmaKernelGradlePlugin.kernelModuleId`). */
+private fun kernelModuleIdOf(kernelContainer: String, kernelPath: String): String {
+    val suffix = kernelPath.removePrefix(kernelContainer).removePrefix(":").replace(':', '_').replace('.', '_')
+    return if (suffix.isEmpty()) "default" else suffix
+}
+
+/** Stable plugin id from the project path, e.g. `:plugin:alice:counter` → `alice:counter`. */
+private fun Project.pluginId(): String {
+    val container = findProperty("rdmaPluginProject")?.toString()
+        ?: rootProject.findProperty("rdmaPluginProject")?.toString()
+        ?: DEFAULT_PLUGIN_PROJECT
+    val suffix = path.removePrefix(container).removePrefix(":")
+    return suffix.replace(':', '.').replaceFirst('.', ':')
+}
+
+/** Latest kernel version from `versions/changelog.json` (the `builtAgainst` value). */
+private fun Project.builtAgainstVersion(): Int {
+    val changelog = File(rootProject.projectDir, "versions/changelog.json")
+    if (!changelog.isFile) return 0
+    return try {
+        val parsed = JsonSlurper().parseText(changelog.readText()) as Map<*, *>
+        val entries = parsed["entries"] as? List<*> ?: return 0
+        entries.mapNotNull { (it as? Map<*, *>)?.get("version") as? Number }.maxOfOrNull { it.toInt() } ?: 0
+    } catch (e: Exception) {
+        0
+    }
+}
+
+/** Merged floor map (node FQN → floor) over the visible kernel modules. */
+private fun Project.floorMap(kernelContainer: String, visiblePaths: List<String>): Map<String, Int> {
+    val merged = mutableMapOf<String, Int>()
+    for (kernelPath in visiblePaths) {
+        val moduleId = kernelModuleIdOf(kernelContainer, kernelPath)
+        val file = File(rootProject.projectDir, "versions/$moduleId/rdma_floor.json")
+        if (!file.isFile) continue
+        try {
+            val parsed = JsonSlurper().parseText(file.readText()) as Map<*, *>
+            for ((k, v) in parsed) {
+                val key = k as? String ?: continue
+                val value = (v as? Number)?.toInt() ?: continue
+                merged[key] = maxOf(merged[key] ?: 0, value)
+            }
+        } catch (e: Exception) {
+            // ignore a malformed floor file — minHost simply falls back to 0
+        }
+    }
+    return merged
 }
 
 private fun runtimeBridgeSource(pluginPackage: String) = """package $pluginPackage
@@ -200,12 +251,25 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
                 "${kernelPackageOf(project.rootProject, kernelContainer, internalPath, kernelRootPackage)}.runRdmaApp"
             }
 
+            val moduleDeps = visiblePaths.map { kernelModuleIdOf(kernelContainer, it) }
+            val pluginId = project.pluginId()
+            val pluginVersion = (project.findProperty("rdmaPluginVersion")?.toString()
+                ?: project.rootProject.findProperty("rdmaPluginVersion")?.toString()
+                ?: "1").toIntOrNull() ?: 1
+            val builtAgainst = project.builtAgainstVersion()
+            val floorMapJson = JsonOutput.toJson(project.floorMap(kernelContainer, visiblePaths))
+
             listOf(
                 SubpluginOption("rdmaManifest", manifestPaths.joinToString(File.pathSeparator)),
                 SubpluginOption("pluginPackage", pluginPackage),
                 SubpluginOption("runRdmaAppFqn", runRdmaAppFqn ?: ""),
                 SubpluginOption("kernelRootPackage", kernelRootPackage),
                 SubpluginOption("rdmaOutputDir", outputDir),
+                SubpluginOption("pluginId", pluginId),
+                SubpluginOption("pluginVersion", pluginVersion.toString()),
+                SubpluginOption("builtAgainst", builtAgainst.toString()),
+                SubpluginOption("rdmaModuleDeps", moduleDeps.joinToString(File.pathSeparator)),
+                SubpluginOption("rdmaFloorMap", floorMapJson),
             )
         }
     }
