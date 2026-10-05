@@ -13,14 +13,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 -->
-# User Guide
+# Setup
 
-Kardman is a framework that lets you dynamically load code and UI logic into a
-mobile application. It connects two runtimes — **Kotlin (kernel)** and
-**JavaScript (plugin)** — without serialization: `@RDMA` objects always live in
-kernel memory, and the plugin uses them as ordinary objects that are really
-proxies over JSI + JNI. Compose UI logic is proxied the same way, so dynamically
-loaded UI mutates the compose tree in the kernel.
+How to get the framework running: install the prerequisites, build and run the
+demo, then wire the framework into your own project. For an overview of what the
+framework *is*, see the root [README.md](../../README.md); for what you can build
+with it, see [features.md](features.md).
 
 ## Prerequisites
 
@@ -45,11 +43,11 @@ One command builds everything:
 
 This script does three things:
 
-1. **Sets up Hermes** (see [`scripts/setup-hermes.sh`](../scripts/setup-hermes.sh)):
+1. **Sets up Hermes** (see [`scripts/setup-hermes.sh`](../../scripts/setup-hermes.sh)):
    - clones Hermes (default `static_h` branch of `facebook/hermes`) into `.hermes-src/`
    - builds the Android AAR and publishes `com.facebook.hermes:hermes-android` to `mavenLocal`
    - copies the JSI headers into `rdma-runtime-android/src/main/cpp/include/jsi/`
-2. **Publishes the framework** to `mavenLocal` (see [`scripts/publish.sh`](../scripts/publish.sh)) —
+2. **Publishes the framework** to `mavenLocal` (see [`scripts/publish.sh`](../../scripts/publish.sh)) —
    the demo app consumes the `rdma-app` Gradle plugin by id from `mavenLocal`.
 3. **Assembles the demo APK**: `./gradlew :androidApp:assembleDebug`, which runs the
    entire pipeline:
@@ -61,7 +59,7 @@ This script does three things:
 
 The Hermes build is heavy the first time (it compiles libhermes for every ABI);
 it is cached afterwards. Override any setting via env vars — see the header of
-[`setup-hermes.sh`](../scripts/setup-hermes.sh).
+[`setup-hermes.sh`](../../scripts/setup-hermes.sh).
 
 Install the result on a device/emulator:
 
@@ -89,7 +87,7 @@ rm -rf kernel/build plugin/build rdma-runtime-android/.cxx .gradle/configuration
 
 ## How to use
 
-Concrete code snippets live in the [README](../README.md); this is the workflow in
+Concrete code snippets live in the [README](../../README.md); this is the workflow in
 words. You write ordinary Kotlin and the compiler plugins turn it into proxy calls
 at build time:
 
@@ -118,7 +116,7 @@ plugin transformation), see [features.md](features.md).
 A kernel module may reference an `@RDMA` type declared in another kernel module —
 e.g. a widget in `:kernel:user:<user>` taking a `Color`/`Dp` from `:kernel:internal`.
 The generated glue marshals such types without knowing their concrete class (see
-[codegen.md](codegen.md) for the type-erased mechanism), so cross-module references
+[codegen.md](../codegen.md) for the type-erased mechanism), so cross-module references
 "just work" as long as the referencing module depends on the owning module via
 Gradle. The only check the kernel compiler performs is that the referenced FQN is
 itself annotated `@RDMA` (resolved through the dependency classpath); a non-`@RDMA`

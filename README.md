@@ -104,7 +104,7 @@ While working with `Dog` object overridden method will be called from both plugi
 ## Getting started
 
 Prerequisites, running the demo and how to wire the framework into your own
-project are in the [user guide](docs/user_guide.md).
+project are in the [user guide](docs/user_guide/getting_started.md).
 
 ## Project modules
 
@@ -119,12 +119,14 @@ project are in the [user guide](docs/user_guide.md).
 | `:rdma-plugin-gradle-plugin` | Gradle wrapper that wires `:rdma-plugin-compiler-plugin` into the plugin module's JVM resolve compilation and generates the guest-side widget bridge |
 | `:rdma-app-gradle-plugin` | Gradle plugin applied to the app: generates the user bridge + aggregate bridge and compiles the generated C++ into `librdma_user.so` |
 | `:rdma-runtime-android` | Android AAR: generic Hermes runtime + JNI bridge + C++ glue (exported as a prefab) |
+| `:rdma-runtime-ios` | iOS static framework: generic Hermes runtime + C ABI bridge + C++ core (`librdma_core.a`) |
 | `:rdma-store` | JVM store: plugin registry + re-sync reconciliation + P1–P4 state machine (§7.2–7.4, §8) |
 | `:kernel:internal` | Framework-owned `@RDMA` classes/widgets (standard functionality) |
 | `:kernel:user:alice` | User `alice`'s own kernel module (`@RDMA` classes) |
 | `:plugin:alice:counter` | Plugin of user `alice` (Kotlin/JS), compiles to JS executed in Hermes |
 | `:plugin:bob:services` | Plugin of user `bob` (Kotlin/JS) |
 | `:androidApp` | Android app — initializes Hermes, loads plugin JS |
+| `:iosApp` | iOS app — initializes Hermes, loads plugin `.hbc` |
 | `:rdma-tests` | JVM tests asserting on generated C++ output |
 
 The framework (all modules except the `:kernel:*` and `:plugin:*` modules and `:androidApp`)
@@ -140,13 +142,27 @@ runtime through the `installUserBridge` hook.
 
 ## Docs
 
-- [User guide](docs/user_guide.md)
-- [Features](docs/features.md)
+User guides (`docs/user_guide/`):
+
+- [Getting started](docs/user_guide/getting_started.md) — where to go next
+- [Setup](docs/user_guide/setup.md) — prerequisites, demo, integration
+- [Features](docs/user_guide/features.md)
+- [Releases & operations](docs/user_guide/releases.md)
+- [Contributing](docs/user_guide/contribution.md)
+
+Architecture & reference (`docs/`):
+
 - [Architecture](docs/architecture.md)
+- [Bridges](docs/bridges.md)
 - [Modules](docs/modules_architecture.md)
 - [Code generation](docs/codegen.md)
-- [Contributing](docs/contribution.md)
-- [Design concept](docs/ORIGINAL_DESIGN.md)
+- [Boundary types](docs/types.md)
+
+Design intent (`docs/design/`):
+
+- [Design concept](docs/design/ORIGINAL_DESIGN.md)
+- [Versioning & compatibility](docs/design/compatibility.md)
+- [iOS design](docs/design/ios_design.md)
 
 # Лицензия / License
 

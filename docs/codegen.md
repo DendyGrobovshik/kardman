@@ -135,7 +135,8 @@ framework runtime, not the user bridge.
 
 The `capi` backend replaces JNI with a **function-pointer registry** because a
 Kotlin/Native framework cannot export C symbols for `@CName` functions (they are
-exported only as Objective-C methods). See [ios_design.md](ios_design.md).
+exported only as Objective-C methods). See [ios_design.md](design/ios_design.md)
+for the design intent and [bridges.md](bridges.md) for the current implementation.
 
 Concretely, for each kernel module the backend emits:
 

@@ -58,6 +58,7 @@ things it elides, detailed later:
 
 Per-module details: [modules_architecture.md](modules_architecture.md).
 Code generation: [codegen.md](codegen.md).
+The bridge (JNI vs C ABI): [bridges.md](bridges.md).
 
 ## UI Widget Layer (Redwood-like)
 
@@ -203,7 +204,7 @@ Hermes (no `window`/`process`/`navigator`) the runtime installs a global
 `setTimeout` shim whose handler is scheduled with `rdmaPostJsSelf` — onto the
 **low-priority** JS queue. So a coroutine body runs after the current composition
 (never mid-`rdmaCallJs`), while `Dispatchers.Main.immediate` runs inline
-(`isDispatchNeeded = false`). See `RdmaRuntime.cpp` and [features.md](features.md).
+(`isDispatchNeeded = false`). See `RdmaRuntime.cpp` and [features.md](user_guide/features.md).
 
 ## Data Flow
 
@@ -283,8 +284,11 @@ Why the rendezvous exists for `Composer`/state, not just perf isolation:
 
 - `SnapshotMutableState` must be **created** and **read** on the UI thread inside the
   active composition snapshot. `RDMA.mutableStateOf` and `StateProxyHost.get_value`
-  therefore marshal to the UI thread during composition; `set_value` is direct
-  (thread-safe) and triggers recomposition from the Hermes thread.
+  therefore marshal to the UI thread during composition. State **writes** are
+  platform-specific: on Android `set_value` is a direct thread-safe JVM write, but
+  on iOS it must be posted back to the main thread, otherwise the Kotlin/Native
+  snapshot observation is bypassed and no recomposition happens — see
+  [bridges.md](bridges.md#state-creation-reads-and-writes).
 - `g_currentComposer` / `g_scopeBlocks` / `g_jsValues` / `g_empty` are owned by the
   Hermes thread; `g_currentComposer` is borrowed into the UI-bound compose op.
 

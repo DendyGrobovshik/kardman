@@ -20,6 +20,10 @@ This document describes how the framework adds a second native host — **iOS
 user-facing model is unchanged: plugin code still looks like plain Kotlin and
 never sees the implementation details of either platform.
 
+> **Note:** this is the original *design intent*. The current bridge
+> implementation, including the platform-specific state-write threading, lives in
+> [bridges.md](../bridges.md).
+
 ## Overview
 
 RDMAHermes connects two runtimes:
@@ -136,8 +140,10 @@ calls `rdmaVtableSet(obj, ptr)` and the IR-injected dispatch reads
 
 Kotlin/Native (2.4) uses the new memory manager: a shared heap where mutable
 objects are reachable from any thread (JVM-like semantics). No freezing or
-thread confinement. The data path therefore stays direct on the Hermes thread,
-exactly as with JNI.
+thread confinement. The **data path** (constructors, properties, methods) stays
+direct on the Hermes thread, exactly as with JNI. State **writes** are the one
+exception: on iOS they must be posted back to the main thread — see
+[bridges.md](../bridges.md#state-creation-reads-and-writes).
 
 The two-thread rendezvous (main ↔ Hermes) is unchanged and still exists only
 because the Compose runtime is single-threaded on the main thread. On iOS the
@@ -176,7 +182,7 @@ Mirrors the Android split into a reusable runtime and a per-app bridge:
   `ios/generated/RdmaComposerProxy.cpp`) is compiled with `clang++` by a Gradle
   `Exec` task into `librdma_core.a` and linked via `linkerOpts`; the shim imports
   the C++-provided entry points through a cinterop `rdma.def`.
-- `hermes.framework` — prebuilt XCFramework (0.76.x), built reproducibly by
+- `hermes.xcframework` — prebuilt XCFramework (0.76.x), built reproducibly by
   `scripts/setup-hermes-ios.sh`.
 - a per-app generated bridge (the `RdmaCAbi_<mod>`, `RdmaWidgetBridge_<mod>`,
   per-class proxies) compiled by the `rdma-app` plugin's `buildRdmaUserCAbi`
@@ -206,4 +212,5 @@ On iOS the entry point is SwiftUI hosting
 - `rdma-app-gradle-plugin` — gains an iOS path mirroring the Android wiring.
 - `rdma-types`, `:plugin:*`, `rdma-annotation` — unchanged.
 
-See also: [architecture.md](architecture.md), [codegen.md](codegen.md).
+See also: [architecture.md](../architecture.md), [codegen.md](../codegen.md),
+[bridges.md](../bridges.md).

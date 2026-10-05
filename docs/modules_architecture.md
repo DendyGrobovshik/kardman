@@ -163,6 +163,50 @@ The generic runtime AAR ships `librdma_runtime.so` (Hermes + JNI + base Compose 
 `RdmaComposerProxy`, state/lambda proxies) plus public headers (`RdmaCompose.h`,
 `ListHandle.h`, `RdmaVtable.h`, `jsi/`) exported as a prefab.
 
+### `:rdma-runtime-ios`
+
+Kotlin Multiplatform module (`iosArm64` + `iosSimulatorArm64`), the iOS analog of
+`:rdma-runtime-android`. It ships the reusable static framework (`rdmaRuntime`) and
+the C++ core compiled to `librdma_core.a`, and hosts the function-pointer registry
+(see [bridges.md](bridges.md)).
+
+**Kotlin layer** (`src/iosShared/kotlin/`):
+- `RdmaBridge.kt` — `nativeInit()` / `nativeEvalBytes(...)` / `nativeIsReady()`
+- `RdmaComposeHost.kt` — host-side `Content()` and
+  `nativeInvokeScopeBlock`/`nativeInvokeCallback`/`nativeInvokeLambda` marshaling
+- `CAbiShim.kt` — the C-compatible shim (`rdma_composer_*`,
+  `rdma_stateGetValue`/`rdma_stateSetValue`, `rdma_mutableStateOf`, value
+  boxing/unboxing, `typeIdOf`, array/list helpers) + `@EagerInitialization`
+  registration
+- `RdmaEffects.kt`, `RdmaLambda.kt` — effect/lambda shims
+
+**C++ layer** (`rdma-runtime/src/main/cpp/`, shared with Android):
+- `common/RdmaRuntime.cpp`, `common/RdmaRendezvous.cpp`
+- `ios/RdmaComposeCAbi.cpp` — C ABI entry points (`rdma_nativeInvoke*`,
+  `rdma_registerFunction`/`rdma_lookupFunction`, `StateProxyHostCAbi`,
+  `ScopeUpdateScopeProxyHostCAbi`, the JSI bridge install)
+- `ios/generated/RdmaComposerProxy.cpp` — generated `Composer` proxy (no composer
+  crossing)
+
+**Why the sources live in `src/iosShared/kotlin`:** the shim crosses into the
+per-target cinterop (`io.github…ios.cinterop`), which is not visible to the shared
+`iosMain` metadata compilation. The sources therefore live in a shared physical
+directory wired into both `iosArm64Main` and `iosSimulatorArm64Main`; `iosMain`
+stays empty so the metadata compiles trivially.
+
+**Build & packaging:** a Gradle `Exec` task compiles the core sources with
+`clang++` into `librdma_core.a` (both archs) and links it via `linkerOpts`, along
+with the prebuilt Hermes `hermes.xcframework`. `packageNativeSdk` zips the C++
+headers + `librdma_core.a` (both archs) + `hermes.xcframework` into a
+`rdma-runtime-ios-native` artifact published to mavenLocal; a consumer app resolves
+and extracts it (via `ditto -x -k`, which preserves xcframework symlinks) and links
+its per-app `librdma_user.a` against it.
+
+Two iOS build gotchas worth knowing: `packageNativeSdk` declares no `inputs.files`,
+so after the first run Gradle marks it `UP-TO-DATE` even when `librdma_core.a`
+changed (delete the zip or `--rerun-tasks` to republish); and the Kotlin daemon
+caches a republished compiler plugin, so changed plugins need `./gradlew --stop`.
+
 ### `:rdma-app-gradle-plugin`
 
 Gradle plugin applied to the user's app module. It owns all the app-side wiring, so the

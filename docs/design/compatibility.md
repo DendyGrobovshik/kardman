@@ -315,7 +315,9 @@ Separate documents: a guide for users (including LLM), examples, performance, wh
 
 ## 12. Operations (outside versioning)
 
-The questions below concern the runtime/infrastructure and are described in a separate document; here they are only pointers:
+The questions below concern the runtime/infrastructure and are only pointers here;
+the user-facing release commands and store endpoints are in
+[releases.md](../user_guide/releases.md):
 
 - **Offline / store outage**: a fallback (basic versions baked into the cache), behavior without network.
 - **re-sync scale**: backoff/exponential delay against a "once a minute" storm.

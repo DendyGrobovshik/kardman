@@ -18,9 +18,9 @@ limitations under the License.
 This document explains *what you can do* with the framework and, just as
 importantly, *how to think about it*. It is a narrative, not a reference dump —
 the compiler plugins give you a model where both sides look like plain Kotlin.
-For the runtime mechanics see [architecture.md](architecture.md); for the formal
-type contract see [types.md](types.md); for how the code gets generated see
-[codegen.md](codegen.md).
+For the runtime mechanics see [architecture.md](../architecture.md); for the formal
+type contract see [types.md](../types.md); for how the code gets generated see
+[codegen.md](../codegen.md).
 
 ## The mental model
 
@@ -108,7 +108,7 @@ Two of these deserve a note:
 
 This is where the model really pays off. The plugin writes idiomatic Kotlin, and
 the FIR compiler plugin rewrites it. The table shows a few representative
-rewrites (full list in [codegen.md](codegen.md)):
+rewrites (full list in [codegen.md](../codegen.md)):
 
 | You write | The compiler emits |
 |---|---|
@@ -130,7 +130,7 @@ What falls out of this:
   pass through unchanged and dispatch on the JS proxy.
 - **Inheritance** — subclass a kernel `open` class and override its `open`
   methods. Overridden methods are called from *both* the plugin and the kernel
-  (via the vtable — see [codegen.md](codegen.md)). Overrides currently need an
+  (via the vtable — see [codegen.md](../codegen.md)). Overrides currently need an
   expression body (`= expr`).
 - **Statics** — companion `val`s become singleton getters.
 
@@ -253,8 +253,10 @@ i.e. after any in-flight composition, never in the middle of it.
   without `delay` works today.
 
 The plugin must therefore only use **direct** calls inside a coroutine (data-path
-JNI and direct state reads/writes); a blocking JS→UI rendezvous outside the
-active composition would deadlock, so the runtime asserts against it.
+calls and state reads/writes); a blocking JS→UI rendezvous outside the active
+composition would deadlock, so the runtime asserts against it. State writes are
+still safe — the runtime marshals them to the UI thread where needed (see
+[bridges.md](../bridges.md#state-creation-reads-and-writes)).
 
 ## Dynamic loading
 
