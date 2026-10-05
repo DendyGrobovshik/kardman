@@ -39,6 +39,7 @@ object RdmaKernelKeys {
     val KOTLIN_OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("kotlinOutputDir")
     val KERNEL_PACKAGE: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("kernelPackage")
     val MODULE_ID: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("moduleId")
+    val BACKEND: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("backend")
 }
 
 private val RDMA_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RDMA")
@@ -47,6 +48,7 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
     override val pluginId: String = "rdma-kernel-compiler-plugin"
 
     override val pluginOptions: Collection<AbstractCliOption> = listOf(
+        CliOption("backend", "<jni|capi>", "Native bridge backend: JNI (jvm/android) or C ABI (native)", required = false),
         CliOption("cppOutputDir", "<dir>", "Output directory for generated C++ glue", required = false),
         CliOption("jsonOutputDir", "<dir>", "Output directory for rdma_manifest.json", required = false),
         CliOption("kotlinOutputDir", "<dir>", "Output directory for generated Kotlin widget entries", required = false),
@@ -56,6 +58,7 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
 
     override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
         when (option.optionName) {
+            "backend" -> configuration.put(RdmaKernelKeys.BACKEND, value)
             "cppOutputDir" -> configuration.put(RdmaKernelKeys.CPP_OUTPUT_DIR, value)
             "jsonOutputDir" -> configuration.put(RdmaKernelKeys.JSON_OUTPUT_DIR, value)
             "kotlinOutputDir" -> configuration.put(RdmaKernelKeys.KOTLIN_OUTPUT_DIR, value)
@@ -77,7 +80,8 @@ class RdmaKernelCompilerRegistrar : CompilerPluginRegistrar() {
         val kotlinDir = configuration.get(RdmaKernelKeys.KOTLIN_OUTPUT_DIR)
         val kernelPackage = configuration.get(RdmaKernelKeys.KERNEL_PACKAGE)
         val moduleId = configuration.get(RdmaKernelKeys.MODULE_ID)
-        IrGenerationExtension.registerExtension(RdmaKernelGenerationExtension(cppDir, jsonDir, kotlinDir, kernelPackage, moduleId))
+        val backend = configuration.get(RdmaKernelKeys.BACKEND) ?: "jni"
+        IrGenerationExtension.registerExtension(RdmaKernelGenerationExtension(cppDir, jsonDir, kotlinDir, kernelPackage, moduleId, backend))
     }
 }
 
@@ -87,6 +91,7 @@ class RdmaKernelGenerationExtension(
     private val kotlinOutputDir: String?,
     private val kernelPackage: String?,
     private val moduleId: String?,
+    private val backend: String,
 ) : IrGenerationExtension {
 
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
@@ -123,40 +128,82 @@ class RdmaKernelGenerationExtension(
             File(dir).listFiles { f -> f.isFile && f.extension == "kt" }?.forEach { it.delete() }
         }
 
+        val isCapi = backend == "capi"
+
+        val widgets = functions.filter { it.composable }
+        val pkg = kernelPackage ?: "com.example.kernel"
+        val modId = moduleId ?: ""
+
         // The Composer proxy is part of the base protocol and does not depend on any
         // @RDMA class/function, so it is always regenerated (and version-checked against
-        // the resolved `androidx.compose.runtime.Composer` IR).
+        // the resolved `androidx.compose.runtime.Composer` IR). The backend picks the
+        // concrete generator (JNI vs C ABI).
         cppOutputDir?.let { dir ->
             val protocolErrors = RdmaComposerProtocol.validateAgainst(pluginContext)
             if (protocolErrors.isNotEmpty()) {
                 error("Compose base protocol mismatch:\n" + protocolErrors.joinToString("\n"))
             }
-            RdmaComposerProxyGenerator { fileName, _ ->
-                File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
-            }.generate(RdmaComposerProtocol.baseProtocol)
+            if (isCapi) {
+                CAbiComposerProxyGenerator { fileName, _ ->
+                    File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
+                }.generate(RdmaComposerProtocol.baseProtocol)
+            } else {
+                RdmaComposerProxyGenerator { fileName, _ ->
+                    File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
+                }.generate(RdmaComposerProtocol.baseProtocol)
+            }
         }
 
         // Typed per-widget bridge (Variant A): generated Kotlin entries + C++ HostFunctions.
-        val widgets = functions.filter { it.composable }
-        val pkg = kernelPackage ?: "com.example.kernel"
-        val modId = moduleId ?: ""
-        cppOutputDir?.let { cppDir ->
-            kotlinOutputDir?.let { kotlinDir ->
-                RdmaWidgetGenerator(
-                    { fileName, _ -> File(cppDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
-                    { fileName, _ -> File(kotlinDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
-                    pkg,
-                    modId,
-                ).generate(widgets)
+        if (isCapi) {
+            cppOutputDir?.let { cppDir ->
+                kotlinOutputDir?.let { kotlinDir ->
+                    CAbiWidgetGenerator(
+                        { fileName, _ -> File(cppDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
+                        { fileName, _ -> File(kotlinDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
+                        pkg,
+                        modId,
+                    ).generate(widgets)
+                }
             }
+        } else {
+            cppOutputDir?.let { cppDir ->
+                kotlinOutputDir?.let { kotlinDir ->
+                    RdmaWidgetGenerator(
+                        { fileName, _ -> File(cppDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
+                        { fileName, _ -> File(kotlinDir, fileName).also { it.parentFile.mkdirs() }.outputStream() },
+                        pkg,
+                        modId,
+                    ).generate(widgets)
+                }
+            }
+        }
+
+        // IR pass: fill in the C ABI widget entry stub bodies. Runs after the compose
+        // compiler has lowered the @Composable widgets to (args..., $composer, $changed).
+        if (isCapi) {
+            CAbiWidgetIrGenerator(pluginContext, moduleFragment, modId, pkg).generate(widgets)
         }
 
         if (classes.isEmpty() && functions.isEmpty()) return
 
-        cppOutputDir?.let { dir ->
-            CppGenerator(modId) { fileName, _ ->
-                File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
-            }.generate(classInfos, functions)
+        if (isCapi) {
+            kotlinOutputDir?.let { dir ->
+                CAbiKotlinGenerator(modId, pkg) { fileName, _ ->
+                    File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
+                }.generate(classInfos, functions)
+            }
+            cppOutputDir?.let { dir ->
+                CAbiCppGenerator(modId) { fileName, _ ->
+                    File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
+                }.generate(classInfos, functions)
+            }
+        } else {
+            cppOutputDir?.let { dir ->
+                CppGenerator(modId) { fileName, _ ->
+                    File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
+                }.generate(classInfos, functions)
+            }
         }
 
         jsonOutputDir?.let { dir ->
@@ -169,7 +216,7 @@ class RdmaKernelGenerationExtension(
             File(dir, "rdma_analysis.json").also { it.parentFile.mkdirs() }.writeText(analysisJson)
         }
 
-        val transformer = RdmaVtableTransformer(pluginContext, pkg)
+        val transformer = RdmaVtableTransformer(pluginContext, pkg, isCapi)
         for (entry in classes) {
             transformer.transform(entry.cls, entry.info)
         }

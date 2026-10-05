@@ -20,6 +20,8 @@ node_modules/
 kotlin-js-store/
 # Hermes source checkout (created by scripts/setup-hermes.sh)
 .hermes-src/
+# Hermes iOS build output (created by scripts/setup-hermes-ios.sh)
+.hermes-ios/
 # User-generated bridge C++ (produced by the kernel compiler plugin and compiled
 # by :kernel-bridge). The framework's generic Composer proxy lives in
 # rdma-runtime-android/src/main/cpp/generated/ and is committed.

@@ -33,6 +33,10 @@ object RdmaPublicApiChecker {
 
     private val RDMA_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RDMA")
 
+    // The C-ABI bridge is generated as `@CName`-annotated public functions; they are
+    // framework scaffolding, not user API, so they must not trip the public-API rule.
+    private val CNAME_ANNOTATION = FqName("kotlin.native.CName")
+
     // Framework entry points / scaffolding that are public by design but not `@RDMA`.
     private val allowlist = setOf("runRdmaApp", "rdmaVtableDispatch")
 
@@ -45,8 +49,11 @@ object RdmaPublicApiChecker {
                         // Interfaces and objects are host-side scaffolding (e.g. a service
                         // provider interface / singleton registry) and are allowed to be
                         // public; only concrete classes risk leaking into @RDMA signatures.
+                        // Synthetic declarations (names containing `$`, e.g. Kotlin/Native
+                        // `$stableprop_getter` holders) are compiler-generated and ignored.
                         val isHostOnly = declaration.kind == ClassKind.INTERFACE || declaration.kind == ClassKind.OBJECT
-                        if (!isHostOnly &&
+                        val isSynthetic = declaration.name.asString().contains('$')
+                        if (!isHostOnly && !isSynthetic &&
                             declaration.visibility == DescriptorVisibilities.PUBLIC &&
                             !declaration.hasAnnotation(RDMA_ANNOTATION)
                         ) {
@@ -55,8 +62,13 @@ object RdmaPublicApiChecker {
                     }
                     is IrSimpleFunction -> {
                         val name = declaration.name.asString()
-                        if (declaration.visibility == DescriptorVisibilities.PUBLIC &&
+                        val isSynthetic = name.contains('$')
+                        val isCAbiScaffolding = name.startsWith("rdma_")
+                        if (!isSynthetic &&
+                            declaration.visibility == DescriptorVisibilities.PUBLIC &&
                             !declaration.hasAnnotation(RDMA_ANNOTATION) &&
+                            !declaration.hasAnnotation(CNAME_ANNOTATION) &&
+                            !isCAbiScaffolding &&
                             name !in allowlist
                         ) {
                             errors += "function $name: non-@RDMA public declaration must be internal/private"

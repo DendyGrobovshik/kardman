@@ -37,6 +37,20 @@ dependencies {
     testImplementation(libs.junit)
 }
 
+// The Kotlin/Native compiler runs the plugin in its own process and does not
+// resolve the plugin's transitive Maven dependencies, so `rdma-types` and
+// kotlinx.serialization must be embedded into the plugin jar. kotlin-stdlib is
+// excluded (the compiler provides it).
+tasks.jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from({
+        configurations.runtimeClasspath.get()
+            .filter { it.name.endsWith(".jar") }
+            .filterNot { it.name.startsWith("kotlin-stdlib") }
+            .map { zipTree(it) }
+    })
+}
+
 publishing {
     publications {
         create<MavenPublication>("maven") {

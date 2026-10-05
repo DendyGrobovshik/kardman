@@ -27,6 +27,9 @@ kotlin {
         minSdk = libs.versions.android.minSdk.get().toInt()
     }
 
+    iosArm64()
+    iosSimulatorArm64()
+
     sourceSets {
         commonMain {
             kotlin.srcDir("build/generated/rdma/kotlin")
@@ -36,6 +39,16 @@ kotlin {
                 implementation(libs.compose.foundation)
                 implementation(libs.compose.material3)
                 implementation(libs.coil.compose)
+            }
+        }
+        androidMain {
+            kotlin.srcDir("build/generated/rdma/androidMain")
+        }
+        iosMain {
+            kotlin.srcDir("build/generated/rdma/iosMain")
+            kotlin.srcDir("build/generated/rdma/capi/kotlin")
+            dependencies {
+                implementation(project(":rdma-runtime-ios"))
             }
         }
     }

@@ -35,19 +35,28 @@ import org.jetbrains.kotlin.ir.builders.irNull
 import org.jetbrains.kotlin.ir.builders.irReturn
 import org.jetbrains.kotlin.ir.builders.irTemporary
 import org.jetbrains.kotlin.ir.declarations.IrClass
-import org.jetbrains.kotlin.ir.declarations.IrField
 import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
+import org.jetbrains.kotlin.ir.declarations.IrValueParameter
+import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
 import org.jetbrains.kotlin.ir.util.functions
 import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 
-class RdmaVtableTransformer(private val pluginContext: IrPluginContext, kernelPackage: String) {
+class RdmaVtableTransformer(private val pluginContext: IrPluginContext, kernelPackage: String, private val isCapi: Boolean) {
 
     private val dispatchFn: IrSimpleFunctionSymbol? by lazy {
         pluginContext.referenceFunctions(
             CallableId(FqName(kernelPackage), Name.identifier("rdmaVtableDispatch"))
+        ).firstOrNull()
+    }
+
+    // C ABI only: the vtable pointer lives in a runtime registry (the IR-injected
+    // `__vtable` field can't be referenced from generated Kotlin source).
+    private val vtableGetFn: IrSimpleFunctionSymbol? by lazy {
+        pluginContext.referenceFunctions(
+            CallableId(FqName("io.github.dendygrobovshik.kardman.runtime"), Name.identifier("rdmaVtableGet"))
         ).firstOrNull()
     }
 
@@ -56,28 +65,45 @@ class RdmaVtableTransformer(private val pluginContext: IrPluginContext, kernelPa
         if (openMethods.isEmpty()) return
 
         val fn = dispatchFn ?: return
-        val field = cls.addField("__vtable", pluginContext.irBuiltIns.longType, DescriptorVisibilities.PUBLIC)
 
         val functionsByName = cls.functions.filter {
             it.modality == Modality.OPEN && it.overriddenSymbols.isEmpty()
         }.groupBy { it.name.asString() }
 
-        for (method in openMethods) {
-            val irFn = functionsByName[method.name]?.firstOrNull() ?: continue
-            inject(irFn, field, fn, method.vtableId)
+        if (isCapi) {
+            val getFn = vtableGetFn ?: return
+            for (method in openMethods) {
+                val irFn = functionsByName[method.name]?.firstOrNull() ?: continue
+                inject(irFn, fn, method.vtableId) { builder, thisReceiver ->
+                    builder.irCall(getFn).apply { arguments[0] = builder.irGet(thisReceiver) }
+                }
+            }
+        } else {
+            val field = cls.addField("__vtable", pluginContext.irBuiltIns.longType, DescriptorVisibilities.PUBLIC)
+            for (method in openMethods) {
+                val irFn = functionsByName[method.name]?.firstOrNull() ?: continue
+                inject(irFn, fn, method.vtableId) { builder, thisReceiver ->
+                    builder.irGetField(builder.irGet(thisReceiver), field)
+                }
+            }
         }
     }
 
-    private fun inject(function: IrSimpleFunction, field: IrField, dispatchFn: IrSimpleFunctionSymbol, vtableId: Int) {
+    private fun inject(
+        function: IrSimpleFunction,
+        dispatchFn: IrSimpleFunctionSymbol,
+        vtableId: Int,
+        vtableRead: (DeclarationIrBuilder, IrValueParameter) -> IrExpression,
+    ) {
         val body = function.body ?: return
         if (body !is org.jetbrains.kotlin.ir.expressions.IrBlockBody) return
         val thisReceiver = function.dispatchReceiverParameter ?: return
         val builder = DeclarationIrBuilder(pluginContext, function.symbol)
 
-        val vtableRead = builder.irGetField(builder.irGet(thisReceiver), field)
-        val condition = builder.irNotEquals(vtableRead, builder.irLong(0))
+        val vtableValue = vtableRead(builder, thisReceiver)
+        val condition = builder.irNotEquals(vtableValue, builder.irLong(0))
         val dispatchCall = builder.irCall(dispatchFn).apply {
-            arguments[0] = vtableRead
+            arguments[0] = vtableValue
             arguments[1] = builder.irInt(vtableId)
         }
 

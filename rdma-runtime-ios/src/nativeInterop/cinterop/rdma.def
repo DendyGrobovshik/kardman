@@ -1,0 +1,2 @@
+package = io.github.dendygrobovshik.kardman.ios.cinterop
+headers = RdmaCAbiExports.h

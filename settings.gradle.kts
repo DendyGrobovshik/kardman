@@ -49,6 +49,7 @@ plugins {
 }
 
 include(":androidApp")
+include(":iosApp")
 include(":kernel:internal")
 include(":kernel:user:alice")
 include(":kernel:user:itest")
@@ -57,7 +58,8 @@ include(":rdma-types")
 include(":rdma-kernel-compiler-plugin")
 include(":rdma-kernel-gradle-plugin")
 include(":rdma-app-gradle-plugin")
-include(":rdma-runtime-android")
+include(":rdma-runtime")
+include(":rdma-runtime-ios")
 include(":plugin:alice:counter")
 include(":plugin:bob:services")
 include(":plugin:itest:newplug")

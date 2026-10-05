@@ -18,5 +18,5 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     :rdma-kernel-gradle-plugin:publishToMavenLocal \
     :rdma-plugin-compiler-plugin:publishToMavenLocal \
     :rdma-plugin-gradle-plugin:publishToMavenLocal \
-    :rdma-runtime-android:publishToMavenLocal \
+    :rdma-runtime:publishToMavenLocal \
     :rdma-app-gradle-plugin:publishToMavenLocal

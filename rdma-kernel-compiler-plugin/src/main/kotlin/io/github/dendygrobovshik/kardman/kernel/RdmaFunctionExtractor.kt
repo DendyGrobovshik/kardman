@@ -47,6 +47,15 @@ object RdmaFunctionExtractor {
                 val fileBase = File(file.fileEntry.name).nameWithoutExtension
                 val facadeClass = if (packageName.isEmpty()) "${fileBase}Kt" else "$packageName.${fileBase}Kt"
                 val composable = fn.hasAnnotation(COMPOSABLE_ANNOTATION)
+                // Fail fast if the compose compiler did not run before us: a lowered
+                // @Composable function must have the injected `$composer` param.
+                if (composable && fn.parameters.none { it.name.asString() == "\$composer" }) {
+                    error(
+                        "@Composable @RDMA function ${fn.name.asString()} was not lowered by the compose compiler " +
+                            "(missing \$composer parameter). The rdma-kernel-compiler-plugin must run after " +
+                            "the compose compiler plugin.",
+                    )
+                }
                 // The compose compiler injects synthetic `$composer`/`$changed` params and
                 // rewrites `@Composable () -> Unit` types to `Function2<Composer, Int, Unit>`;
                 // strip both so the manifest records the logical widget signature.

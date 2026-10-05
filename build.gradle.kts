@@ -34,7 +34,7 @@ tasks.register<Delete>("cleanGenerated") {
         "plugin/build/compileSync",
         "plugin/build/kotlin-webpack",
         "plugin/build/dist",
-        "rdma-runtime-android/.cxx",
+        "rdma-runtime/.cxx",
         "androidApp/src/main/assets/kotlin",
     )
 }

@@ -206,6 +206,7 @@ void initJniCache(JNIEnv* env) {
 #include <memory>
 #include <string>
 #include "RdmaVtable.h"
+#include "RdmaNativeState.h"
 
 namespace facebook {
 namespace rdma {

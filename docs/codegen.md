@@ -90,8 +90,10 @@ walks the module IR and:
   top-level function (`RdmaFunctionExtractor`); functions that are also
   `@Composable` are classified as **widgets**;
 - serializes the model into `rdma_manifest.json` (`RdmaManifest { classes, functions }`);
-- generates the C++ glue (`CppGenerator`, `RdmaWidgetGenerator`) and the
-  `Composer` proxy (`RdmaComposerProxyGenerator`);
+- generates the C++ glue and the `Composer` proxy. There are two backends,
+  selected by the `backend` option (`jni` for Android, `capi` for iOS):
+  `CppGenerator`/`RdmaWidgetGenerator`/`RdmaComposerProxyGenerator` (JNI) vs
+  `CAbiCppGenerator`/`CAbiWidgetGenerator`/`CAbiComposerProxyGenerator` (C ABI);
 - injects the vtable (`RdmaVtableTransformer`) directly into the IR.
 
 Generated files in `kernel/build/generated/rdma/`:
@@ -128,6 +130,41 @@ of any `@RDMA` class. Before generating, the plugin cross-checks the list agains
 the resolved `androidx.compose.runtime.Composer` IR and fails the build if a
 method is missing (compose-runtime version drift). This proxy is compiled into the
 framework runtime, not the user bridge.
+
+### The C ABI backend (iOS)
+
+The `capi` backend replaces JNI with a **function-pointer registry** because a
+Kotlin/Native framework cannot export C symbols for `@CName` functions (they are
+exported only as Objective-C methods). See [ios_design.md](ios_design.md).
+
+Concretely, for each kernel module the backend emits:
+
+| File | Content |
+|------|---------|
+| `RdmaCAbi_<mod>.kt` | C-compatible functions (`rdma_<mod>_<Class>_<member>`, `typeIdOf`, `setVtable`) + the `@EagerInitialization`/`staticCFunction` registration |
+| `RdmaCAbi_<mod>.h` | `inline` wrappers that call the registered functions via `rdma_lookupFunction` |
+| `RdmaWidgetEntries_<mod>.kt` | widget entry **stubs** + content/callback lambda helpers + registration |
+| `RdmaWidgetBridge_<mod>.h/cpp` | widget `HostFunction`s (no `Composer`/`changed` crossing) |
+| `{Class}Proxy.h/cpp`, `RdmaBridge_<mod>.h/cpp` | same proxy structure as JNI, but the leaves call the `rdma_<mod>_*` wrappers |
+
+Three things differ from the JNI backend:
+
+1. **String crossing** — `String` is not C-compatible, so it crosses as
+   `const char*` (`CPointer<ByteVar>`); `rdmaToKString`/`rdmaStringToCStr`
+   convert on the Kotlin side.
+2. **Composer** — never crosses; the shim holds `currentComposer` in a global and
+   `rdmaGetCurrentComposer()` returns it. Composer proxy methods and widget
+   wrappers read the global instead of taking a `Composer` argument.
+3. **Widget wrappers are IR** — `CAbiWidgetIrGenerator` (an
+   `IrGenerationExtension` running after the compose compiler) fills the stub
+   body with a direct IR call to the *already-lowered* `@Composable` widget, e.g.
+   `Text(rdmaToKString(text), rdmaGetCurrentComposer() as Composer, 0)`.
+
+The build is two-pass: pass N generates the `capi/kotlin` sources, pass N+1
+compiles them and the IR pass injects the widget bodies. `RdmaFunctionExtractor`
+fails fast if a `@Composable @RDMA` function is not yet lowered (missing
+`$composer`), which guards the plugin ordering against future changes.
+
 
 ## Stage 2 — plugin (FIR) rewrite
 

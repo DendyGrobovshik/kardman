@@ -146,6 +146,47 @@ class RdmaAppGradlePlugin : Plugin<Project> {
             }
         }
 
+        // 2b) C ABI (iOS): generate the aggregate C-ABI bridge + the install entry, and
+        // copy the generated C ABI C++ from every kernel module into `capi-cpp/`.
+        val capiCppDir = File(genDir, "capi-cpp")
+        val kernelCapiCppDirs = kernelProjects.map { File(it.buildDir, "generated/rdma/capi/cpp") }
+        val kernelIosCompileTasks = kernelProjects.map { kp ->
+            kp.provider {
+                kp.tasks.findByName("compileKotlinIosSimulatorArm64")
+                    ?: kp.tasks.findByName("compileKotlinIosArm64")
+                    ?: error("No kernel iOS compile task found in ${kp.path}")
+            }
+        }
+        val generateBridgeCAbi = target.tasks.register("generateRdmaBridgeCAbi") { task ->
+            task.doLast {
+                writeUserBridgeCAbiCpp(File(capiCppDir, "UserBridgeCAbi.cpp"))
+            }
+        }
+        val copyGeneratedCppCAbi = target.tasks.register("copyGeneratedCppCAbi") { task ->
+            kernelIosCompileTasks.forEach { task.dependsOn(it) }
+            task.dependsOn(generateBridgeCAbi)
+            task.doLast {
+                capiCppDir.mkdirs()
+                capiCppDir.listFiles { f -> f.isFile && (f.extension == "h" || f.extension == "cpp") }
+                    ?.forEach { it.delete() }
+                writeUserBridgeCAbiCpp(File(capiCppDir, "UserBridgeCAbi.cpp"))
+                writeAggregateBridgeCAbi(
+                    File(capiCppDir, "RdmaBridgeAggregate.h"),
+                    File(capiCppDir, "RdmaBridgeAggregate.cpp"),
+                    kernelModuleIds,
+                )
+                for (dir in kernelCapiCppDirs) {
+                    dir.listFiles()?.forEach { f ->
+                        if (f.isFile && (f.extension == "h" || f.extension == "cpp") &&
+                            f.name != "RdmaComposerProxy.h" && f.name != "RdmaComposerProxy.cpp"
+                        ) {
+                            f.copyTo(File(capiCppDir, f.name), overwrite = true)
+                        }
+                    }
+                }
+            }
+        }
+
         // 3) Wire the compiled plugin JS of every plugin module into the app's assets.
         if (pluginProjects.isNotEmpty()) {
             if (!hermesc.isNullOrBlank()) {
@@ -181,12 +222,45 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                         }
                     }
                 }
-                target.tasks.named("preBuild") { it.dependsOn(aotCompileJs) }
-                target.tasks.configureEach(Action<Task> { task ->
-                    if (task.name == "mergeDebugAssets" || task.name == "mergeReleaseAssets") {
+                target.pluginManager.withPlugin("com.android.application") {
+                    target.tasks.named("preBuild") { it.dependsOn(aotCompileJs) }
+                    target.tasks.configureEach(Action<Task> { task ->
+                        if (task.name == "mergeDebugAssets" || task.name == "mergeReleaseAssets") {
+                            pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
+                        }
+                    })
+                }
+                // iOS: emit the same AOT-compiled `.hbc` bundles into the app's build dir
+                // (`build/generated/rdma/hbc`). The Xcode project copies them into the app
+                // bundle and the host evaluates them via RdmaBridge.nativeEvalBytes.
+                target.pluginManager.withPlugin("org.jetbrains.kotlin.multiplatform") {
+                    val hbcDir = File(genDir, "hbc")
+                    val aotCompileJsCAbi = target.tasks.register("aotCompileJsCAbi") { task ->
                         pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
+                        task.doLast {
+                            hbcDir.mkdirs()
+                            hbcDir.listFiles { f -> f.extension in listOf("js", "map", "hbc") }?.forEach { it.delete() }
+                            val jsByName = mutableMapOf<String, File>()
+                            for (srcDir in pluginProdSyncDirs) {
+                                srcDir.listFiles { f -> f.extension == "js" }?.forEach { js ->
+                                    val prev = jsByName[js.name]
+                                    if (prev == null || js.length() > prev.length()) {
+                                        jsByName[js.name] = js
+                                    }
+                                }
+                            }
+                            for ((name, js) in jsByName) {
+                                val hbc = File(hbcDir, name.removeSuffix(".js") + ".hbc")
+                                val cmd = listOf(hc, "-O", "-emit-binary", "-out", hbc.absolutePath, js.absolutePath)
+                                val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
+                                val output = proc.inputStream.bufferedReader().readText()
+                                if (proc.waitFor() != 0) {
+                                    throw org.gradle.api.GradleException("hermesc failed for $name:\n$output")
+                                }
+                            }
+                        }
                     }
-                })
+                }
             } else {
                 val copyPluginJs = target.tasks.register("copyPluginJs") { task ->
                     pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsBrowserDevelopmentExecutableDistribution") }
@@ -200,15 +274,17 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                         }
                     }
                 }
-                target.tasks.named("preBuild") { it.dependsOn(copyPluginJs) }
-                target.tasks.configureEach(Action<Task> { task ->
-                    if (task.name == "mergeDebugAssets") {
-                        pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsBrowserDevelopmentExecutableDistribution") }
-                    }
-                    if (task.name == "mergeReleaseAssets") {
-                        pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsBrowserProductionExecutableDistribution") }
-                    }
-                })
+                target.pluginManager.withPlugin("com.android.application") {
+                    target.tasks.named("preBuild") { it.dependsOn(copyPluginJs) }
+                    target.tasks.configureEach(Action<Task> { task ->
+                        if (task.name == "mergeDebugAssets") {
+                            pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsBrowserDevelopmentExecutableDistribution") }
+                        }
+                        if (task.name == "mergeReleaseAssets") {
+                            pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsBrowserProductionExecutableDistribution") }
+                        }
+                    })
+                }
             }
         }
 
@@ -220,7 +296,7 @@ class RdmaAppGradlePlugin : Plugin<Project> {
             kernelProjects.forEach { kp ->
                 target.dependencies.add("implementation", target.dependencies.project(mapOf("path" to kp.path)))
             }
-            target.dependencies.add("implementation", "io.github.dendygrobovshik.kardman:rdma-runtime-android:$RDMA_RUNTIME_VERSION")
+            target.dependencies.add("implementation", "io.github.dendygrobovshik.kardman:rdma-runtime:$RDMA_RUNTIME_VERSION")
             target.dependencies.add("implementation", "com.facebook.hermes:hermes-android:$HERMES_VERSION")
 
             android.buildFeatures {
@@ -454,7 +530,7 @@ jsi::Value wrapUserObject(jsi::Runtime& rt, JavaVM* jvm, jobject obj) {
 project(RdmaUserBridge)
 set(CMAKE_CXX_STANDARD 17)
 
-find_package(rdma-runtime-android REQUIRED CONFIG)
+find_package(rdma-runtime REQUIRED CONFIG)
 find_package(hermes-engine REQUIRED CONFIG)
 
 file(GLOB GENERATED_SOURCES "${'$'}{CMAKE_CURRENT_SOURCE_DIR}/generated/*.cpp")
@@ -469,12 +545,120 @@ target_include_directories(rdma_user PRIVATE
 )
 
 target_link_libraries(rdma_user
-        rdma-runtime-android::rdma_runtime
+        rdma-runtime::rdma_runtime
         hermes-engine::hermesvm
         android
         log
 )
 """,
         )
+    }
+
+    // ---------------------------------------------------------------- C ABI (iOS)
+
+    private fun writeUserBridgeCAbiCpp(file: File) {
+        file.parentFile.mkdirs()
+        file.writeText(
+            """#include "RdmaBridgeAggregate.h"
+#include "RdmaComposeCAbi.h"
+
+// Registers the aggregate C-ABI user bridge (composing all kernel modules) with the
+// generic runtime. Called once from the iOS host before rdmaStart().
+extern "C" void rdma_userBridgeInstall() {
+    facebook::rdma::rdmaSetUserBridgeInstaller(&facebook::rdma::installUserBridge);
+    facebook::rdma::rdmaSetObjectWrapper(&facebook::rdma::wrapUserObject);
+}
+""",
+        )
+    }
+
+    private fun writeAggregateBridgeCAbi(header: File, cpp: File, moduleIds: List<String>) {
+        header.parentFile.mkdirs()
+        header.writeText(
+            """#pragma once
+#include <jsi/jsi.h>
+#include "RdmaPlatform.h"
+
+namespace facebook {
+namespace rdma {
+
+void installUserBridge(jsi::Runtime& rt, HostContext ctx, jsi::Object& rdma);
+jsi::Value wrapUserObject(jsi::Runtime& rt, void* handle);
+
+} // namespace rdma
+} // namespace facebook
+""",
+        )
+
+        val ids = moduleIds.distinct()
+        val sb = StringBuilder()
+        sb.append("#include \"RdmaBridgeAggregate.h\"\n")
+        for (id in ids) {
+            sb.append("#include \"RdmaBridge_$id.h\"\n")
+        }
+        sb.append(
+            """
+#include <string>
+#include <utility>
+
+namespace facebook {
+namespace rdma {
+
+static jsi::Value createWithOverridesImpl(jsi::Runtime& rt, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides);
+
+void installUserBridge(jsi::Runtime& rt, HostContext ctx, jsi::Object& rdma) {
+""",
+        )
+        for (id in ids) {
+            sb.append("    $id::installUserBridge(rt, rdma);\n")
+        }
+        sb.append(
+            """
+    {
+        auto createOverridesFn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "createWithOverrides"), 3,
+            [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 3) return jsi::Value::undefined();
+                std::string className = args[0].getString(r).utf8(r);
+                jsi::Array ctorArgs = args[1].asObject(r).asArray(r);
+                jsi::Object overrides = args[2].asObject(r);
+                return createWithOverridesImpl(r, className, ctorArgs, overrides);
+            }
+        );
+        rdma.setProperty(rt, "createWithOverrides", std::move(createOverridesFn));
+    }
+}
+
+static jsi::Value createWithOverridesImpl(jsi::Runtime& rt, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides) {
+""",
+        )
+        for (id in ids) {
+            sb.append("    {\n")
+            sb.append("        jsi::Value v = $id::createWithOverrides(rt, className, ctorArgs, overrides);\n")
+            sb.append("        if (!v.isUndefined()) return v;\n")
+            sb.append("    }\n")
+        }
+        sb.append(
+            """    return jsi::Value::undefined();
+}
+
+jsi::Value wrapUserObject(jsi::Runtime& rt, void* handle) {
+""",
+        )
+        for (id in ids) {
+            sb.append("    {\n")
+            sb.append("        jsi::Value v = $id::wrapUserObject(rt, handle);\n")
+            sb.append("        if (!v.isUndefined()) return v;\n")
+            sb.append("    }\n")
+        }
+        sb.append(
+            """    return jsi::Value::undefined();
+}
+
+} // namespace rdma
+} // namespace facebook
+""",
+        )
+        cpp.writeText(sb.toString())
     }
 }

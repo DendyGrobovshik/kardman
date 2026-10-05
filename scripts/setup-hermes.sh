@@ -44,7 +44,7 @@ echo "Building and publishing hermes-android:$HERMES_VERSION to mavenLocal ..."
 
 # 3) Copy the JSI headers (not shipped in the AAR prefab) into the runtime module.
 JSI_SRC="$HERMES_SRC_DIR/API/jsi/jsi"
-JSI_DST="$ROOT_DIR/rdma-runtime-android/src/main/cpp/include/jsi"
+JSI_DST="$ROOT_DIR/rdma-runtime/src/androidMain/cpp/include/jsi"
 
 echo "Copying JSI headers from $JSI_SRC to $JSI_DST ..."
 mkdir -p "$JSI_DST"
