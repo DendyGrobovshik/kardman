@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <atomic>
 #include <cstdio>
 #include <android/log.h>
 
@@ -36,6 +37,9 @@ ComposeJniCache g_composeCache;
 
 static std::shared_ptr<jsi::Function> g_content;
 std::shared_ptr<jsi::Object> g_empty;
+// Monotonic counter bumped every time a new content is registered. The host
+// polls it to detect "content changed" and recompose the UI (dynamic plugins).
+static std::atomic<int> g_contentVersion{0};
 static std::unordered_map<int64_t, std::shared_ptr<jsi::Function>> g_scopeBlocks;
 static int64_t g_nextScopeBlockId = 1;
 std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
@@ -467,6 +471,10 @@ jsi::Value rdmaResultToJsi(jsi::Runtime& rt, RdmaResult& result) {
 
 // ------------------------------------------------------------- content/scope
 
+int getContentVersion() {
+    return g_contentVersion.load(std::memory_order_acquire);
+}
+
 void invokeRegisteredContent(jsi::Runtime& rt, jobject composerGlobal) {
     if (!g_content) {
         LOGW("No content registered");
@@ -528,6 +536,7 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
             if (count > 0 && args[0].isObject() && args[0].asObject(r).isFunction(r)) {
                 g_content = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
+                g_contentVersion.fetch_add(1, std::memory_order_release);
                 LOGI("Content registered");
             }
             return jsi::Value::undefined();

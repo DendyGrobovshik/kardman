@@ -27,4 +27,5 @@ object RdmaBridge {
     external fun nativeEvalFile(filePath: String)
     external fun nativeEvalBytes(bytes: ByteArray)
     external fun nativeIsReady(): Boolean
+    external fun nativeContentVersion(): Int
 }

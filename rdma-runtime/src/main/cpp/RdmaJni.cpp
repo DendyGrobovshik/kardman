@@ -52,6 +52,11 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeIsReady(JNIEnv* 
     return facebook::rdma::rdmaIsReady() ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeContentVersion(JNIEnv* env, jclass) {
+    return facebook::rdma::getContentVersion();
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalAsset(JNIEnv* env, jclass, jstring assetPath) {
     if (!g_assetMgr) {

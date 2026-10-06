@@ -123,6 +123,10 @@ jsi::Value wrapAny(jsi::Runtime& rt, HostContext ctx, jobject obj);
 // global ref owned by the caller (the content task); it is deleted by the caller.
 void invokeRegisteredContent(jsi::Runtime& rt, jobject composerGlobal);
 
+// Returns the current content registration version. Bumped by registerContent on
+// the Hermes thread; read by the host on the UI thread to detect content changes.
+int getContentVersion();
+
 // Invokes a stored scope-update block on the Hermes thread. `composerGlobal` is
 // a global ref owned by the caller (the scope task).
 void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composerGlobal, jint changed);

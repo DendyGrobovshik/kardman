@@ -26,6 +26,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -35,6 +36,7 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 import io.github.dendygrobovshik.kardman.types.ResyncRequest
 import io.github.dendygrobovshik.kardman.types.ResyncStatus
 import kotlinx.coroutines.delay
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -67,18 +69,9 @@ class MainActivity : ComponentActivity() {
         // Async init: JNI caches on this thread, then Hermes thread + runtime.
         RdmaBridge.nativeInit(assets)
 
-        val dependencies = listOf(
-            "kotlin/kotlin-kotlin-stdlib.hbc",
-            "kotlin/kotlinx-atomicfu.hbc",
-            "kotlin/kotlinx-coroutines-core.hbc",
-            "kotlin/androidx-collection-collection.hbc",
-            "kotlin/androidx-compose-runtime-runtime.hbc",
-        )
-        for (dep in dependencies) {
-            RdmaBridge.nativeEvalAsset(dep)
+        for (module in readModuleManifest()) {
+            RdmaBridge.nativeEvalAsset("kotlin/$module.hbc")
         }
-        RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin-alice-counter.hbc")
-        RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin-bob-services.hbc")
 
         loadDevPolyfills()
 
@@ -86,15 +79,25 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             var ready by remember { mutableStateOf(RdmaBridge.nativeIsReady()) }
+            var contentVersion by remember { mutableStateOf(RdmaBridge.nativeContentVersion()) }
             LaunchedEffect(Unit) {
-                while (!ready) {
+                var readyLogged = false
+                while (true) {
+                    val r = RdmaBridge.nativeIsReady()
+                    if (r != ready) ready = r
+                    if (r && !readyLogged) {
+                        readyLogged = true
+                        Log.i("RDMA", "Runtime ready")
+                    }
+                    val cv = RdmaBridge.nativeContentVersion()
+                    if (cv != contentVersion) contentVersion = cv
                     delay(16)
-                    ready = RdmaBridge.nativeIsReady()
                 }
-                Log.i("RDMA", "Runtime ready")
             }
             if (ready) {
-                RdmaComposeHost.Content()
+                key(contentVersion) {
+                    RdmaComposeHost.Content()
+                }
             }
         }
     }
@@ -123,6 +126,17 @@ class MainActivity : ComponentActivity() {
         dir.listFiles { f -> f.isFile && f.extension == "hbc" }
             ?.sortedBy { it.name }
             ?.forEach { RdmaBridge.nativeEvalFile(it.absolutePath) }
+    }
+
+    /**
+     * Reads the build-generated load manifest (`assets/kotlin/rdma-modules.json`) and returns
+     * the module base names in dependency order (shared dependencies first, then plugins).
+     */
+    private fun readModuleManifest(): List<String> {
+        return assets.open("kotlin/rdma-modules.json").use { stream ->
+            val arr = JSONObject(stream.bufferedReader().readText()).getJSONArray("modules")
+            List(arr.length()) { arr.getString(it) }
+        }
     }
 
     /**
