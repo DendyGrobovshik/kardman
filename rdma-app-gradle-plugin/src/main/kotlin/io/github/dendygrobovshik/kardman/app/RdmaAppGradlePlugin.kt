@@ -99,6 +99,18 @@ class RdmaAppGradlePlugin : Plugin<Project> {
         val pluginDevSyncDirs = pluginProjects.map { File(it.buildDir, "compileSync/js/main/developmentExecutable/kotlin") }
         val pluginProdSyncDirs = pluginProjects.map { File(it.buildDir, "compileSync/js/main/productionExecutable/kotlin") }
 
+        // The shared-runtime module aggregates the common dependencies (compose runtime,
+        // Kotlin stdlib, coroutines, …) into one full-DCE compilation. Its full dep modules
+        // are used verbatim in the app; each plugin contributes only its own module.
+        val sharedRuntimePath = target.findProperty("rdmaSharedRuntimeProject")?.toString()
+            ?: target.rootProject.findProperty("rdmaSharedRuntimeProject")?.toString()
+            ?: ":shared-runtime"
+        val sharedRuntimeProject = target.rootProject.findProject(sharedRuntimePath)
+        val sharedRuntimeProdSyncDir = sharedRuntimeProject?.let {
+            File(it.buildDir, "compileSync/js/main/productionExecutable/kotlin")
+        }
+        val sharedRuntimeModuleName = "${target.rootProject.name}-shared-runtime"
+
         // 1) Generate the user bridge + CMake (no kernel dependency).
         val generateBridge = target.tasks.register("generateRdmaBridge") { task ->
             task.doLast {
@@ -194,32 +206,11 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                 else File(target.rootProject.projectDir, hermesc).absolutePath
                 val aotCompileJs = target.tasks.register("aotCompileJs") { task ->
                     pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
+                    if (sharedRuntimeProject != null) {
+                        task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
+                    }
                     task.doLast {
-                        assetsKotlin.mkdirs()
-                        assetsKotlin.listFiles { f -> f.extension in listOf("js", "map", "hbc") }?.forEach { it.delete() }
-                        // Multiple plugin modules each produce a tree-shaken copy of the
-                        // shared dependencies. A plugin that doesn't use a dependency (e.g.
-                        // compose) yields a near-empty stub that must not overwrite the
-                        // fuller copy another plugin needs. Pick the largest (most complete)
-                        // copy per file name.
-                        val jsByName = mutableMapOf<String, File>()
-                        for (srcDir in pluginProdSyncDirs) {
-                            srcDir.listFiles { f -> f.extension == "js" }?.forEach { js ->
-                                val prev = jsByName[js.name]
-                                if (prev == null || js.length() > prev.length()) {
-                                    jsByName[js.name] = js
-                                }
-                            }
-                        }
-                        for ((name, js) in jsByName) {
-                            val hbc = File(assetsKotlin, name.removeSuffix(".js") + ".hbc")
-                            val cmd = listOf(hc, "-O", "-emit-binary", "-out", hbc.absolutePath, js.absolutePath)
-                            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
-                            val output = proc.inputStream.bufferedReader().readText()
-                            if (proc.waitFor() != 0) {
-                                throw org.gradle.api.GradleException("hermesc failed for $name:\n$output")
-                            }
-                        }
+                        compileSharedBundles(hc, assetsKotlin, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
                     }
                 }
                 target.pluginManager.withPlugin("com.android.application") {
@@ -237,27 +228,11 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                     val hbcDir = File(genDir, "hbc")
                     val aotCompileJsCAbi = target.tasks.register("aotCompileJsCAbi") { task ->
                         pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
+                        if (sharedRuntimeProject != null) {
+                            task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
+                        }
                         task.doLast {
-                            hbcDir.mkdirs()
-                            hbcDir.listFiles { f -> f.extension in listOf("js", "map", "hbc") }?.forEach { it.delete() }
-                            val jsByName = mutableMapOf<String, File>()
-                            for (srcDir in pluginProdSyncDirs) {
-                                srcDir.listFiles { f -> f.extension == "js" }?.forEach { js ->
-                                    val prev = jsByName[js.name]
-                                    if (prev == null || js.length() > prev.length()) {
-                                        jsByName[js.name] = js
-                                    }
-                                }
-                            }
-                            for ((name, js) in jsByName) {
-                                val hbc = File(hbcDir, name.removeSuffix(".js") + ".hbc")
-                                val cmd = listOf(hc, "-O", "-emit-binary", "-out", hbc.absolutePath, js.absolutePath)
-                                val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
-                                val output = proc.inputStream.bufferedReader().readText()
-                                if (proc.waitFor() != 0) {
-                                    throw org.gradle.api.GradleException("hermesc failed for $name:\n$output")
-                                }
-                            }
+                            compileSharedBundles(hc, hbcDir, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
                         }
                     }
                 }
@@ -339,6 +314,101 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                 }
             })
         }
+    }
+
+    /**
+     * Collects the shared-runtime's full dependency modules plus each plugin's own module,
+     * AOT-compiles them to Hermes bytecode, and writes an ordered `rdma-modules.json`
+     * manifest (topological order so dependencies load before their dependents).
+     */
+    private fun compileSharedBundles(
+        hermesc: String,
+        outDir: File,
+        sharedRuntimeProdSyncDir: File?,
+        pluginProdSyncDirs: List<File>,
+        sharedRuntimeModuleName: String,
+    ) {
+        val jsByName = linkedMapOf<String, File>()
+        val sharedNames = mutableSetOf<String>()
+        sharedRuntimeProdSyncDir?.listFiles { f -> f.extension == "js" }?.forEach { js ->
+            if (js.name != "$sharedRuntimeModuleName.js") {
+                sharedNames.add(js.name)
+                jsByName[js.name] = js
+            }
+        }
+        for (srcDir in pluginProdSyncDirs) {
+            srcDir.listFiles { f -> f.extension == "js" }?.forEach { js ->
+                if (js.name !in sharedNames) {
+                    jsByName[js.name] = js
+                }
+            }
+        }
+
+        val order = topologicalOrder(jsByName)
+
+        outDir.mkdirs()
+        outDir.listFiles { f -> f.extension in listOf("js", "map", "hbc", "json") }?.forEach { it.delete() }
+
+        for (name in order) {
+            val js = jsByName[name] ?: continue
+            val hbc = File(outDir, name.removeSuffix(".js") + ".hbc")
+            val cmd = listOf(hermesc, "-O", "-emit-binary", "-out", hbc.absolutePath, js.absolutePath)
+            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
+            val output = proc.inputStream.bufferedReader().readText()
+            if (proc.waitFor() != 0) {
+                throw org.gradle.api.GradleException("hermesc failed for $name:\n$output")
+            }
+        }
+
+        val modules = order.map { it.removeSuffix(".js") }
+        File(outDir, "rdma-modules.json").writeText(
+            modules.joinToString(prefix = "{\"modules\":[", postfix = "]}") { "\"$it\"" },
+        )
+    }
+
+    /** Returns module base names in load order (Kahn's algorithm over the AMD `define` deps). */
+    private fun topologicalOrder(files: Map<String, File>): List<String> {
+        val names = files.keys.toList()
+        val deps = names.associateWith { name -> parseModuleDeps(files[name]!!).filter { it in files }.toSet() }
+        val indegree = names.associateWith { 0 }.toMutableMap()
+        val dependents = mutableMapOf<String, MutableSet<String>>()
+        for ((name, ds) in deps) {
+            for (d in ds) {
+                dependents.getOrPut(d) { sortedSetOf() }.add(name)
+                indegree[name] = indegree[name]!! + 1
+            }
+        }
+        val queue = ArrayDeque<String>()
+        names.filter { indegree[it] == 0 }.sorted().forEach { queue.add(it) }
+        val result = mutableListOf<String>()
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            result.add(n)
+            for (m in (dependents[n] ?: emptySet()).sorted()) {
+                indegree[m] = indegree[m]!! - 1
+                if (indegree[m] == 0) queue.add(m)
+            }
+        }
+        if (result.size < names.size) {
+            (names - result.toSet()).sorted().forEach { result.add(it) }
+        }
+        return result
+    }
+
+    /** Extracts the direct dependency base names from a module's AMD `define([...])` header. */
+    private fun parseModuleDeps(file: File): List<String> {
+        val text = file.readText()
+        val marker = "define(['"
+        val start = text.indexOf(marker)
+        if (start < 0) return emptyList()
+        val begin = start + marker.length
+        val end = text.indexOf("]", begin)
+        if (end < 0) return emptyList()
+        return text.substring(begin, end)
+            .split(",")
+            .map { it.trim().trim('\'', '"') }
+            .filter { it != "exports" && it.startsWith("./") }
+            .map { it.removePrefix("./") }
     }
 
     private fun writeUserBridgeKt(file: File, kernelPackage: String) {

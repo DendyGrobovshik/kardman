@@ -66,24 +66,38 @@ private fun Content() {
     }
 }
 
-// Order mirrors androidApp MainActivity: shared dependencies first (Kotlin stdlib,
-// coroutines, compose runtime), then the baked-in plugin bundles.
-private val HBC_DEPENDENCIES = listOf(
-    "kotlin-kotlin-stdlib",
-    "kotlinx-atomicfu",
-    "kotlinx-coroutines-core",
-    "androidx-collection-collection",
-    "androidx-compose-runtime-runtime",
-)
-
-private val HBC_PLUGINS = listOf(
-    "RDMAHermes-plugin-alice-counter",
-    "RDMAHermes-plugin-bob-services",
-)
-
+// Load order comes from the build-generated `rdma-modules.json` manifest (shared
+// dependencies first, then the baked-in plugin bundles).
 private fun loadBundles() {
-    for (name in HBC_DEPENDENCIES + HBC_PLUGINS) {
+    for (name in readModuleManifest()) {
         evalBundle(name)
+    }
+}
+
+private fun readModuleManifest(): List<String> {
+    val path = NSBundle.mainBundle.pathForResource("rdma-modules", ofType = "json") ?: return emptyList()
+    val file = fopen(path, "rb") ?: return emptyList()
+    return try {
+        fseek(file, 0L, SEEK_END)
+        val size = ftell(file).toInt()
+        fseek(file, 0L, SEEK_SET)
+        val bytes = ByteArray(size)
+        val read = bytes.usePinned { pinned ->
+            fread(pinned.addressOf(0), 1UL, size.toULong(), file).toInt()
+        }
+        if (read == size) {
+            val text = bytes.decodeToString()
+            val start = text.indexOf('[')
+            val end = text.indexOf(']', start)
+            if (start >= 0 && end > start) {
+                text.substring(start + 1, end)
+                    .split(",")
+                    .map { it.trim().trim('"') }
+                    .filter { it.isNotEmpty() }
+            } else emptyList()
+        } else emptyList()
+    } finally {
+        fclose(file)
     }
 }
 

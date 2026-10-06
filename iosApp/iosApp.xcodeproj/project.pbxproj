@@ -163,7 +163,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nif [ \"$PLATFORM_NAME\" = \"iphonesimulator\" ]; then\n  HERMES_SLICE=\"ios-arm64-simulator\"\nelse\n  HERMES_SLICE=\"ios-arm64\"\nfi\nHERMES_SRC=\"$SRCROOT/../.hermes-ios/hermes.xcframework/$HERMES_SLICE/hermesvm.framework\"\nFRAMEWORKS_DIR=\"$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH\"\nif [ -d \"$HERMES_SRC\" ]; then\n  rm -rf \"$FRAMEWORKS_DIR/hermesvm.framework\"\n  cp -R \"$HERMES_SRC\" \"$FRAMEWORKS_DIR/hermesvm.framework\"\nfi\nHBC_DIR=\"$SRCROOT/build/generated/rdma/hbc\"\nif [ -d \"$HBC_DIR\" ]; then\n  cp \"$HBC_DIR\"/*.hbc \"$CODESIGNING_FOLDER_PATH\" 2>/dev/null || true\nfi\n";
+			shellScript = "set -e\nif [ \"$PLATFORM_NAME\" = \"iphonesimulator\" ]; then\n  HERMES_SLICE=\"ios-arm64-simulator\"\nelse\n  HERMES_SLICE=\"ios-arm64\"\nfi\nHERMES_SRC=\"$SRCROOT/../.hermes-ios/hermes.xcframework/$HERMES_SLICE/hermesvm.framework\"\nFRAMEWORKS_DIR=\"$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH\"\nif [ -d \"$HERMES_SRC\" ]; then\n  rm -rf \"$FRAMEWORKS_DIR/hermesvm.framework\"\n  cp -R \"$HERMES_SRC\" \"$FRAMEWORKS_DIR/hermesvm.framework\"\nfi\nHBC_DIR=\"$SRCROOT/build/generated/rdma/hbc\"\nif [ -d \"$HBC_DIR\" ]; then\n  cp \"$HBC_DIR\"/*.hbc \"$CODESIGNING_FOLDER_PATH\" 2>/dev/null || true\n  cp \"$HBC_DIR\"/rdma-modules.json \"$CODESIGNING_FOLDER_PATH\" 2>/dev/null || true\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
