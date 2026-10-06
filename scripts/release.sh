@@ -55,7 +55,7 @@ dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral(); go
 rootProject.name = "rdma-polyfill"
 EOF
     cat > "$scratch/build.gradle.kts" <<EOF
-plugins { id("org.jetbrains.kotlin.multiplatform") version "2.4.10" }
+plugins { id("org.jetbrains.kotlin.multiplatform") version "2.4.10-rdma" }
 kotlin {
     js(IR) { browser(); binaries.executable() }
     sourceSets { jsMain { kotlin.srcDir("$scratch/src") } }

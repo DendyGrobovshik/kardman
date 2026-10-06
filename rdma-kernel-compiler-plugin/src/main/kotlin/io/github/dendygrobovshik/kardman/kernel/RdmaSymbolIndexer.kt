@@ -58,7 +58,7 @@ object RdmaSymbolIndexer {
     private val RDMA_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RDMA")
     private val COMPOSABLE_ANNOTATION = FqName("androidx.compose.runtime.Composable")
     private val DEPRECATED_ANNOTATION = FqName("kotlin.Deprecated")
-    private val POLYFILL_TARGET_REGEX = Regex("@Polyfill\\s*\\(\\s*for\\s*=\\s*\"([^\"]+)\"")
+    private val POLYFILL_TARGET_REGEX = Regex("@Polyfill\\s*\\(\\s*`?for`?\\s*=\\s*\"([^\"]+)\"")
 
     fun index(moduleFragment: IrModuleFragment): RdmaIndexResult {
         val declarations = mutableListOf<RdmaDeclaration>()
@@ -99,7 +99,9 @@ object RdmaSymbolIndexer {
 
     /** Returns the `for = "…"` target of a `@Polyfill` annotation, or null if not annotated. */
     private fun readPolyfillTarget(text: String, start: Int, end: Int): String? {
-        val head = text.substring(start, minOf(end, start + 512))
+        // The @Polyfill annotation sits immediately before the function declaration, so look
+        // backwards from the declaration start to cover it.
+        val head = text.substring(maxOf(0, start - 256), minOf(text.length, end))
         return POLYFILL_TARGET_REGEX.find(head)?.groupValues?.get(1)
     }
 

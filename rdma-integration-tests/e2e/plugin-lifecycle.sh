@@ -273,7 +273,7 @@ package com.example.kernel.user.alice
 
 import io.github.dendygrobovshik.kardman.Polyfill
 
-@Polyfill(for = "com.example.kernel.user.alice.aliceTagline")
+@Polyfill(`for` = "com.example.kernel.user.alice.aliceTagline")
 internal fun aliceTagline_polyfill(): String = "alice-polyfill"
 EOF
     run_gradle :kernel:user:alice:compileAndroidMain

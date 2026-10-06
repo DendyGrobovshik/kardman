@@ -113,8 +113,10 @@ object RdmaPolyfillMaterializer {
             .filter { it.fqn !in manualEntries }
         val externalObject = buildExternalObject(externalFunctions)
 
-        val files = mutableListOf<PolyfillSourceFile>()
-        var index = 0
+        // First pass: collect the emitted body + registration for each manual entry so that the
+        // registration can be consolidated into a single eager `main()` (a DCE root that runs on
+        // module load), rather than a lazy top-level property that DCE strips away.
+        val entries = mutableListOf<Pair<String, Pair<String, String>>>() // header to (body, registrationLine)
         for (target in manualEntries.sorted()) {
             val polyfill = manualByTarget[target] ?: continue
             val range = polyfill.sourceRange ?: continue
@@ -123,16 +125,29 @@ object RdmaPolyfillMaterializer {
             val body = stripPolyfillAnnotation(stripRdmaAnnotation(rewriteRdmaCalls(text.substring(range.start, range.end), externalFunctions)))
             val targetName = target.substringAfterLast('.')
             val polyfillName = polyfill.fqn.substringAfterLast('.')
+            entries += header to (body to "    js(\"RDMA\").$targetName = ::$polyfillName")
+        }
+        if (entries.isEmpty()) return emptyList()
 
+        val registration = buildString {
+            append("fun main() {\n")
+            entries.forEach { append(it.second.second).append("\n") }
+            append("}")
+        }
+
+        val files = mutableListOf<PolyfillSourceFile>()
+        var index = 0
+        for ((header, bodyAndReg) in entries) {
+            val body = bodyAndReg.first
             val content = buildString {
                 if (header.isNotBlank()) append(header.trimEnd()).append("\n\n")
                 if (index == 0 && externalObject.isNotBlank()) append(externalObject).append("\n\n")
                 append(body.trimEnd())
-                append("\n\n")
-                append("private val __rdmaPolyfillRegistration = run {\n")
-                append("    js(\"RDMA\").$targetName = ::$polyfillName\n")
-                append("    Unit\n")
-                append("}\n")
+                if (index == 0) {
+                    append("\n\n")
+                    append(registration)
+                }
+                append("\n")
             }
             files += PolyfillSourceFile("PolyfillManual$index.kt", content)
             index++
@@ -204,7 +219,9 @@ object RdmaPolyfillMaterializer {
     private fun extractHeader(text: String): String =
         text.lines().filter { line ->
             val t = line.trimStart()
-            (t.startsWith("package ") || t.startsWith("import ")) && !t.endsWith(".RDMA")
+            (t.startsWith("package ") || t.startsWith("import ")) &&
+                !t.endsWith(".RDMA") &&
+                !t.endsWith(".Polyfill")
         }.joinToString("\n")
 
     private fun stripRdmaAnnotation(source: String): String =
@@ -232,10 +249,9 @@ object RdmaPolyfillMaterializer {
         if (byName.isEmpty()) return ""
         val lines = byName.joinToString("\n") { name -> "    js(\"RDMA\").$name = ::$name" }
         return buildString {
-            append("private val __rdmaPolyfillRegistration = run {\n")
+            append("fun main() {\n")
             append(lines)
-            append("\n    Unit\n")
-            append("}")
+            append("\n}")
         }
     }
 
@@ -281,24 +297,32 @@ object RdmaPolyfillMaterializer {
         val externalObject = buildExternalObject(externalFunctions)
 
         val files = mutableListOf<PolyfillSourceFile>()
+        val registrations = mutableListOf<String>()
+        val bodies = mutableListOf<String>()
         var index = 0
         for (fqn in removedClasses.sorted()) {
             val snippet = snapshot.sources[fqn] ?: continue
             val simpleName = fqn.substringAfterLast('.')
             val body = stripRdmaAnnotation(rewriteRdmaCalls(snippet, externalFunctions))
-            val content = buildString {
-                append(body.trimEnd())
-                append("\n\n")
-                if (index == 0 && externalObject.isNotBlank()) {
-                    append(externalObject).append("\n\n")
-                }
-                append("private val __rdmaClassRegistration = run {\n")
-                append("    js(\"RDMA\").create$simpleName = js(\"(...args) => new $simpleName(...args)\")\n")
-                append("    Unit\n")
-                append("}\n")
-            }
-            files += PolyfillSourceFile("PolyfillRClass$index.kt", content)
+            bodies += body.trimEnd()
+            registrations += "    js(\"RDMA\").create$simpleName = js(\"(...args) => new $simpleName(...args)\")"
+            files += PolyfillSourceFile("PolyfillRClass$index.kt", body.trimEnd())
             index++
+        }
+        if (bodies.isNotEmpty()) {
+            val registration = buildString {
+                append("fun main() {\n")
+                registrations.forEach { append(it).append("\n") }
+                append("}")
+            }
+            val content = buildString {
+                append(bodies[0])
+                append("\n\n")
+                if (externalObject.isNotBlank()) append(externalObject).append("\n\n")
+                append(registration)
+                append("\n")
+            }
+            files[0] = PolyfillSourceFile("PolyfillRClass0.kt", content)
         }
         return files
     }
@@ -316,24 +340,32 @@ object RdmaPolyfillMaterializer {
         val externalObject = buildExternalObject(externalFunctions)
 
         val files = mutableListOf<PolyfillSourceFile>()
+        val registrations = mutableListOf<String>()
+        val bodies = mutableListOf<String>()
         var index = 0
         for (fqn in removedFunctions.sorted()) {
             val snippet = snapshot.sources[fqn] ?: continue
             val body = stripRdmaAnnotation(rewriteRdmaCalls(snippet, externalFunctions))
             val name = fqn.substringAfterLast('.')
-            val content = buildString {
-                append(body.trimEnd())
-                append("\n\n")
-                if (index == 0 && externalObject.isNotBlank()) {
-                    append(externalObject).append("\n\n")
-                }
-                append("private val __rdmaPolyfillRegistration = run {\n")
-                append("    js(\"RDMA\").$name = ::$name\n")
-                append("    Unit\n")
-                append("}\n")
-            }
-            files += PolyfillSourceFile("PolyfillR$index.kt", content)
+            bodies += body.trimEnd()
+            registrations += "    js(\"RDMA\").$name = ::$name"
+            files += PolyfillSourceFile("PolyfillR$index.kt", body.trimEnd())
             index++
+        }
+        if (bodies.isNotEmpty()) {
+            val registration = buildString {
+                append("fun main() {\n")
+                registrations.forEach { append(it).append("\n") }
+                append("}")
+            }
+            val content = buildString {
+                append(bodies[0])
+                append("\n\n")
+                if (externalObject.isNotBlank()) append(externalObject).append("\n\n")
+                append(registration)
+                append("\n")
+            }
+            files[0] = PolyfillSourceFile("PolyfillR0.kt", content)
         }
         return files
     }

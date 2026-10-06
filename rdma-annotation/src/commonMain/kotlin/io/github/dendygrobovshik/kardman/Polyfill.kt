@@ -24,7 +24,7 @@ package io.github.dendygrobovshik.kardman
  * picks it up only when the bound symbol needs a JS version.
  *
  * ```kotlin
- * @Polyfill(for = "com.example.kernel.foo")
+ * @Polyfill(`for` = "com.example.kernel.foo")
  * fun foo_polyfill(...): ... = { /* emulatable implementation via @RDMA primitives */ }
  * ```
  */
