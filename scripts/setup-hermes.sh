@@ -91,7 +91,27 @@ mkdir -p "$ROOT_DIR/tools"
 cp "$HERMES_SRC_DIR/build_host_hermesc/bin/hermesc" "$ROOT_DIR/tools/hermesc"
 echo "Installed tools/hermesc: $("$ROOT_DIR/tools/hermesc" --version 2>&1 | grep -i 'bytecode version' || true)"
 
-# 5) Sanity-check: the JSI headers checked into the runtime must match the pinned
+# 5) Publish `hermesc` as a maven artifact so consumer projects (e.g. wb2) can
+#    resolve it instead of vendoring the binary. The classifier encodes the host
+#    OS/arch so the rdma-app Gradle plugin can pick the right binary per platform.
+case "$(uname -s)" in
+    Darwin) HERMESC_OS=macos ;;
+    Linux)  HERMESC_OS=linux ;;
+    *)      HERMESC_OS="$(uname -s | tr 'A-Z' 'a-z')" ;;
+esac
+case "$(uname -m)" in
+    arm64|aarch64) HERMESC_ARCH=aarch64 ;;
+    x86_64|amd64)  HERMESC_ARCH=x86_64 ;;
+    *)             HERMESC_ARCH="$(uname -m)" ;;
+esac
+HERMESC_CLASSIFIER="$HERMESC_OS-$HERMESC_ARCH"
+
+echo "Publishing hermesc:$HERMESC_CLASSIFIER to mavenLocal ..."
+"$ROOT_DIR/gradlew" -p "$ROOT_DIR/publish/hermesc" publishToMavenLocal \
+    -PhermescPath="$ROOT_DIR/tools/hermesc" \
+    -PhermescClassifier="$HERMESC_CLASSIFIER"
+
+# 6) Sanity-check: the JSI headers checked into the runtime must match the pinned
 #    commit (the prefab does not ship them, and the C++ runtime includes them
 #    directly from `rdma-runtime/src/main/cpp/include/jsi`). Bail out early with a
 #    clear message if the pin has drifted from those headers.

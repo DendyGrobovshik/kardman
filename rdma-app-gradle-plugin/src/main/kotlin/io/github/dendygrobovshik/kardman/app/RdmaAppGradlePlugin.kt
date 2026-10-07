@@ -20,7 +20,12 @@ import org.gradle.api.Action
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.Task
+import org.gradle.api.provider.Provider
+import org.gradle.api.tasks.TaskProvider
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.util.zip.ZipInputStream
 
 private const val DEFAULT_KERNEL_PROJECT = ":kernel"
 private const val DEFAULT_KERNEL_ROOT_PACKAGE = "com.example.kernel"
@@ -202,15 +207,17 @@ class RdmaAppGradlePlugin : Plugin<Project> {
         // 3) Wire the compiled plugin JS of every plugin module into the app's assets.
         if (pluginProjects.isNotEmpty()) {
             if (!hermesc.isNullOrBlank()) {
-                val hc = if (File(hermesc).isAbsolute) hermesc
-                else File(target.rootProject.projectDir, hermesc).absolutePath
+                val (hermescResolve, hermescBinary) = resolveHermesc(target, hermesc)
                 val aotCompileJs = target.tasks.register("aotCompileJs") { task ->
                     pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
                     if (sharedRuntimeProject != null) {
                         task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
                     }
+                    if (hermescResolve != null) {
+                        task.dependsOn(hermescResolve)
+                    }
                     task.doLast {
-                        compileSharedBundles(hc, assetsKotlin, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
+                        compileSharedBundles(hermescBinary.get(), assetsKotlin, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
                     }
                 }
                 target.pluginManager.withPlugin("com.android.application") {
@@ -231,8 +238,11 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                         if (sharedRuntimeProject != null) {
                             task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
                         }
+                        if (hermescResolve != null) {
+                            task.dependsOn(hermescResolve)
+                        }
                         task.doLast {
-                            compileSharedBundles(hc, hbcDir, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
+                            compileSharedBundles(hermescBinary.get(), hbcDir, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
                         }
                     }
                 }
@@ -314,6 +324,85 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                 }
             })
         }
+    }
+
+    /**
+     * Returns the path to the `hermesc` compiler binary, plus the task that produces it.
+     *
+     * If `rdmaHermesc` points at an existing file it is used as-is (no resolve task).
+     * Otherwise the `hermesc` maven artifact (`io.github.dendygrobovshik.kardman:hermesc`)
+     * is resolved for the current OS/architecture and extracted to the build dir, so a
+     * consumer project never has to vendor the binary itself.
+     */
+    private fun resolveHermesc(
+        target: Project,
+        configured: String,
+    ): Pair<TaskProvider<Task>?, Provider<String>> {
+        if (configured.isNotBlank()) {
+            val file = if (File(configured).isAbsolute) File(configured)
+            else File(target.rootProject.projectDir, configured)
+            if (file.isFile) {
+                return null to target.providers.provider { file.absolutePath }
+            }
+        }
+
+        val classifier = hostClassifier()
+        val config = target.configurations.create("rdmaHermescTool")
+        config.setTransitive(false)
+        config.setCanBeConsumed(false)
+        target.dependencies.add(
+            config.name,
+            "io.github.dendygrobovshik.kardman:hermesc:$RDMA_RUNTIME_VERSION:$classifier@zip",
+        )
+
+        // Resolve eagerly so the task action only captures plain Files (configuration-cache
+        // safe); the hermesc artifact is tiny and always local.
+        val zip = config.singleFile
+        val out = File(target.buildDir, "rdma/hermesc/hermesc")
+        val extract = target.tasks.register("resolveRdmaHermesc") { task ->
+            task.outputs.file(out)
+            task.doLast {
+                val tmp = File(out.parentFile, "tmp")
+                tmp.deleteRecursively()
+                tmp.mkdirs()
+                ZipInputStream(FileInputStream(zip)).use { zin ->
+                    var entry = zin.nextEntry
+                    while (entry != null) {
+                        val entryFile = File(tmp, entry.name)
+                        if (entry.isDirectory) {
+                            entryFile.mkdirs()
+                        } else {
+                            entryFile.parentFile?.mkdirs()
+                            FileOutputStream(entryFile).use { fos -> zin.copyTo(fos) }
+                        }
+                        zin.closeEntry()
+                        entry = zin.nextEntry
+                    }
+                }
+                out.parentFile.mkdirs()
+                File(tmp, "hermesc").copyTo(out, overwrite = true)
+                out.setExecutable(true)
+            }
+        }
+        return extract to target.providers.provider { out.absolutePath }
+    }
+
+    /** Maps the host OS/architecture to the classifier used for the `hermesc` artifact. */
+    private fun hostClassifier(): String {
+        val osName = System.getProperty("os.name").lowercase()
+        val os = when {
+            osName.contains("mac") -> "macos"
+            osName.contains("linux") -> "linux"
+            osName.contains("win") -> "windows"
+            else -> osName.replace(" ", "")
+        }
+        val archName = System.getProperty("os.arch").lowercase()
+        val arch = when (archName) {
+            "aarch64", "arm64" -> "aarch64"
+            "x86_64", "amd64" -> "x86_64"
+            else -> archName
+        }
+        return "$os-$arch"
     }
 
     /**

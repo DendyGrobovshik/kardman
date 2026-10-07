@@ -211,6 +211,12 @@ To consume them from a separate project:
    sees the framework-owned `rdmaKernelInternals` modules plus its own `:kernel:user:<username>`
    module, and nothing else.
 
+   `rdmaHermesc` points the `rdma-app` plugin at the Hermes compiler. You no longer need
+   to vendor the `hermesc` binary: if the path is set but the file is absent, the plugin
+   resolves `io.github.dendygrobovshik.kardman:hermesc:1.0:<os-arch>` from `mavenLocal`
+   (published by `scripts/setup-hermes.sh`) and extracts it automatically. Setting
+   `rdmaHermesc` still opts into AOT; leaving it unset keeps the plain-JS fallback.
+
 5. **In `MainActivity`**, register the user bridge and init the runtime (async):
 
    ```kotlin
