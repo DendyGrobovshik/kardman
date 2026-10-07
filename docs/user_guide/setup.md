@@ -26,12 +26,40 @@ The only things you need installed on the host:
 
 - **Android SDK** (compileSdk 36) and **NDK** (28+) — the C++ bridge is built with CMake.
 - **`ANDROID_HOME`** (or `ANDROID_SDK_ROOT`) pointing at the SDK.
-- **JDK 17+** — required by the Android Gradle Plugin.
+- **JDK 17** — required by the Kotlin fork build and the Hermes Android build.
 - **git** and network access — the demo script clones Hermes and downloads dependencies.
+- For iOS: **Xcode** (with an iOS simulator) plus `cmake` and `ninja`.
 
 Gradle and Kotlin are **not** manual prerequisites: the Gradle wrapper
 (`./gradlew`) and the version catalog (`gradle/libs.versions.toml`) pin them for
-you (Gradle 9.1+, Kotlin 2.4.10).
+you. Note that this project uses a **custom Kotlin compiler** (`2.4.10-rdma`) —
+see [Build the Kotlin compiler](#build-the-kotlin-compiler) below; it must be
+published to `mavenLocal` before any build works.
+
+## Build the Kotlin compiler
+
+The framework is built with a fork of the Kotlin compiler (`2.4.10-rdma`) that
+adds the `-Xir-export-all` flag used to export plugin declarations to JS. It is
+**not** on Maven Central, so a fresh machine must build and publish it first:
+
+```bash
+git clone --branch full_stable_js_export_table-2.4.10 \
+    https://github.com/DendyGrobovshik/kotlin.git ~/Code/kotlin
+cd ~/Code/kotlin
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)     # JDK 17 required
+./gradlew install \
+    -PdeployVersion=2.4.10-rdma \
+    -Pbuild.number=1 \
+    -Pversions.kotlin-native=2.4.10
+```
+
+This publishes the whole compiler toolchain (`org.jetbrains.kotlin:*:2.4.10-rdma`
+and its Gradle plugins) to `mavenLocal`. It is heavy the first time (it compiles
+the compiler and stdlib); it is cached afterwards. Verify it worked with:
+
+```bash
+ls ~/.m2/repository/org/jetbrains/kotlin/kotlin-gradle-plugin/2.4.10-rdma
+```
 
 ## Run the demo
 
@@ -44,9 +72,10 @@ One command builds everything:
 This script does three things:
 
 1. **Sets up Hermes** (see [`scripts/setup-hermes.sh`](../../scripts/setup-hermes.sh)):
-   - clones Hermes (default `static_h` branch of `facebook/hermes`) into `.hermes-src/`
+   - clones Hermes at a **pinned commit** of `facebook/hermes` into `.hermes-src/`
    - builds the Android AAR and publishes `com.facebook.hermes:hermes-android` to `mavenLocal`
-   - copies the JSI headers into `rdma-runtime-android/src/main/cpp/include/jsi/`
+   - builds and installs the matching `hermesc` compiler into `tools/hermesc`
+     (its bytecode version must match the runtime, or the plugin bundles will not load)
 2. **Publishes the framework** to `mavenLocal` (see [`scripts/publish.sh`](../../scripts/publish.sh)) —
    the demo app consumes the `rdma-app` Gradle plugin by id from `mavenLocal`.
 3. **Assembles the demo APK**: `./gradlew :androidApp:assembleDebug`, which runs the

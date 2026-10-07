@@ -8,6 +8,11 @@ set -euo pipefail
 # Uses a dedicated settings file that includes only the framework modules, so the
 # demo app (which consumes the published `rdma-app` Gradle plugin) is not part of
 # this build.
+#
+# The iOS runtime (`rdma-runtime-ios` + `rdma-runtime-ios-native`) is published
+# from the main build below, because it references the Hermes xcframework produced
+# by `scripts/setup-hermes-ios.sh` (`.hermes-ios/hermes.xcframework`). If that
+# framework is absent the iOS publish is skipped, so Android-only setups still work.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -20,3 +25,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     :rdma-plugin-gradle-plugin:publishToMavenLocal \
     :rdma-runtime:publishToMavenLocal \
     :rdma-app-gradle-plugin:publishToMavenLocal
+
+if [[ -d "$ROOT_DIR/.hermes-ios/hermes.xcframework" ]]; then
+    echo "Publishing iOS runtime artifacts to mavenLocal ..."
+    ./gradlew :rdma-runtime-ios:publishToMavenLocal
+else
+    echo "Skipping iOS runtime publish (run scripts/setup-hermes-ios.sh first)."
+fi

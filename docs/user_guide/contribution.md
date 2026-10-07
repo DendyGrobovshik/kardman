@@ -28,7 +28,7 @@ All dependency versions live in `gradle/libs.versions.toml`:
 
 | Key | Value | Notes |
 |-----|-------|-------|
-| `kotlin` | `2.4.10` | Kotlin version |
+| `kotlin` | `2.4.10-rdma` | Kotlin version (custom fork — see `docs/user_guide/setup.md`) |
 | `agp` | `9.0.1` | Android Gradle Plugin |
 | `hermes-android` | `0.76.9` | Hermes AAR (from mavenLocal) |
 | `composeMultiplatform` | `1.11.1` | Compose Multiplatform |

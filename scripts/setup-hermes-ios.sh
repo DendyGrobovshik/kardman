@@ -24,6 +24,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 HERMES_REPO="${HERMES_REPO:-https://github.com/facebook/hermes.git}"
 HERMES_BRANCH="${HERMES_BRANCH:-static_h}"
+# Must match scripts/setup-hermes.sh (same runtime/bytecode version).
+HERMES_COMMIT="${HERMES_COMMIT:-a1154cb46a9cfe03a96fcdae96ab5e5cf5125c66}"
 HERMES_SRC_DIR="${HERMES_SRC_DIR:-$ROOT_DIR/.hermes-src}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-12.0}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
@@ -34,13 +36,16 @@ for tool in git cmake ninja xcodebuild; do
     command -v "$tool" > /dev/null || { echo "error: $tool is required" >&2; exit 1; }
 done
 
-# 0) Obtain the Hermes source tree.
+# 0) Obtain the Hermes source tree at the pinned commit.
 if [[ ! -d "$HERMES_SRC_DIR/.git" ]]; then
-    echo "Cloning $HERMES_REPO (branch $HERMES_BRANCH) into $HERMES_SRC_DIR ..."
-    git clone --depth 1 --branch "$HERMES_BRANCH" "$HERMES_REPO" "$HERMES_SRC_DIR"
+    echo "Cloning $HERMES_REPO into $HERMES_SRC_DIR ..."
+    git clone --filter=blob:none "$HERMES_REPO" "$HERMES_SRC_DIR"
 else
     echo "Using existing Hermes checkout at $HERMES_SRC_DIR"
 fi
+echo "Checking out pinned Hermes commit $HERMES_COMMIT ..."
+git -C "$HERMES_SRC_DIR" fetch --depth 1 origin "$HERMES_COMMIT"
+git -C "$HERMES_SRC_DIR" checkout "$HERMES_COMMIT"
 
 mkdir -p "$FRAMEWORK_OUT"
 
@@ -76,6 +81,7 @@ build_framework() {
         -DHERMES_ENABLE_LIBFUZZER:BOOLEAN=false \
         -DHERMES_ENABLE_FUZZILLI:BOOLEAN=false \
         -DHERMES_ENABLE_TEST_SUITE:BOOLEAN=false \
+        -DHERMES_ENABLE_NAPI:BOOLEAN=false \
         -DHERMES_BUILD_APPLE_FRAMEWORK:BOOLEAN=true \
         -DCMAKE_CXX_FLAGS="-gdwarf" \
         -DCMAKE_C_FLAGS="-gdwarf" \
