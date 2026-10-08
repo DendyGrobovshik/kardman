@@ -217,18 +217,36 @@ To consume them from a separate project:
    (published by `scripts/setup-hermes.sh`) and extracts it automatically. Setting
    `rdmaHermesc` still opts into AOT; leaving it unset keeps the plain-JS fallback.
 
-5. **In `MainActivity`**, register the user bridge and init the runtime (async):
+   Keep `hermesc` in sync with the runtime: a stale vendored binary produces
+   `Wrong bytecode version. Expected N but got M` at runtime and the plugin bundles
+   won't load. Prefer leaving `tools/hermesc` absent and letting the plugin resolve
+   the pinned binary from `mavenLocal`.
+
+5. **In `MainActivity`**, register the user bridge, init the runtime (async) and
+   load the plugin bundles from the generated manifest:
 
    ```kotlin
    UserBridge.nativeInstall()          // loads librdma_user.so, registers installUserBridge
    RdmaBridge.nativeInit(assets)       // JNI caches on UI thread, then starts the Hermes thread
-   RdmaBridge.nativeEvalAsset("kotlin/RDMAHermes-plugin.js")
-   // poll RdmaBridge.nativeIsReady(), then setContent { RdmaComposeHost.Content() }
+   for (module in readModuleManifest()) {
+       RdmaBridge.nativeEvalAsset("kotlin/$module.hbc")
+   }
+   // poll nativeIsReady() AND nativeContentVersion(), then:
+   // if (ready) key(contentVersion) { RdmaComposeHost.Content() }
    ```
+
+   `readModuleManifest()` reads the build-generated `kotlin/rdma-modules.json` (module
+   base names in topological load order — shared dependencies first, then the plugins).
+   **Never hardcode the module list**: after a compiler/Compose update the dependency
+   set and its order change, and a hardcoded list silently breaks module resolution,
+   leaving the host rendering nothing (blank screen).
 
    Without `rdmaHermesc`, the plugin copies the JS source (`.js`) and the runtime evals
    it directly. With `rdmaHermesc`, the plugin compiles the JS to `.hbc` bytecode (faster
-   startup, smaller size) — in that case load the `.hbc` assets instead of `.js`.
+   startup, smaller size) and emits the `rdma-modules.json` manifest — load those `.hbc`
+   assets instead of `.js`. Poll `nativeContentVersion()` and wrap the content in
+   `key(contentVersion)` so a dynamically-loaded plugin's `registerContent` triggers a
+   host recomposition (see the in-repo `androidApp` for the reference).
 
 See the in-repo `androidApp`, `kernel` and `plugin` modules for a self-contained
 reference of this exact wiring.

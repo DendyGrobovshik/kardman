@@ -216,3 +216,49 @@ Missing Kotlin stdlib. Make sure `kotlin-kotlin-stdlib.js` is loaded before the
 plugin JS. Note: the plugin's JS source set must compile only the generated
 `build/generated/rdma/` files (kernel is a JVM resolve-pass dependency only, not
 a JS dependency).
+
+### Native link fails: `undefined symbol: facebook::jsi::*`
+
+`librdma_user.so` (or `librdma_runtime.so`) links against JSI symbols
+(`facebook::jsi::Value::~Value()`, `typeinfo for facebook::jsi::NativeState`, …)
+that `libhermesvm.so` does not export. The published `hermes-android` was built
+with JSI as a separate `libjsi.so` that is then **excluded** from the AAR, leaving
+`hermes-engine::hermesvm` without the JSI symbols.
+
+Fix: re-publish `hermes-android` with the JSI-static patch applied — the patch flips
+`-DHERMES_BUILD_SHARED_JSI=True` to `False` in `.hermes-src/android/build.gradle.kts`
+(see [`scripts/setup-hermes.sh`](../../scripts/setup-hermes.sh)), which links JSI
+statically into `libhermesvm.so`. Verify:
+
+```bash
+nm -D <AAR>/prefab/modules/hermesvm/libs/android.arm64-v8a/libhermesvm.so \
+  | c++filt | grep 'facebook::jsi::Value::~Value()'   # must be T (defined), not U
+```
+
+### Plugin bundles fail to load: `Wrong bytecode version. Expected N but got M`
+
+The `.hbc` bundles were compiled with a `hermesc` whose bytecode version does not
+match the Hermes runtime (e.g. `Expected 99 but got 98`). This is caused by a stale,
+vendored `tools/hermesc`. The runtime and `hermesc` are pinned together — always
+reuse the same pin for both.
+
+Fix: don't vendor the binary. Keep `rdmaHermesc=tools/hermesc` in `gradle.properties`
+but **delete** the stale `tools/hermesc` file; the `rdma-app` plugin then resolves
+`io.github.dendygrobovshik.kardman:hermesc:1.0:<os-arch>` from `mavenLocal` (published
+by `setup-hermes.sh`) with the matching version. Verify the bytecode version:
+
+```bash
+hermesc --version   # HBC bytecode version: <N> — must equal the runtime's version
+```
+
+### Host renders a white/blank screen after loading
+
+The plugin `registerContent` never ran because its dependencies were not loaded (or
+loaded in the wrong order). The build generates `rdma-modules.json` (module base
+names in topological load order); the host must read it — **never hardcode the module
+list**, since the dependency set/order changes with the compiler and Compose version.
+
+On Android, also poll `RdmaBridge.nativeContentVersion()` (not just `nativeIsReady()`)
+and wrap the content in `key(contentVersion)`, so the host recomposes when a plugin
+registers new content. See `androidApp`/`iosApp` `MainActivity`/`MainViewController`
+for the reference implementation.

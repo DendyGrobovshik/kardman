@@ -197,9 +197,16 @@ plugin bytecode, then renders the UI.
 1. `KernelServices.register(provider)`
 2. `RdmaBridge.nativeInit(...)` — on iOS takes bundle/bytes instead of
    `AssetManager`
-3. load the plugin `.hbc`
+3. load the plugin `.hbc` bundles in the order given by the build-generated
+   `rdma-modules.json` manifest (shared dependencies first, then plugins) —
+   don't hardcode the module list
 4. wait for `nativeIsReady()`
 5. `setContent { RdmaComposeHost.Content() }`
+
+The Xcode "Embed Hermes + .hbc" build phase must copy **both** the `.hbc` files
+and `rdma-modules.json` into `$CODESIGNING_FOLDER_PATH`; omitting the manifest
+leaves the host with nothing to load (blank screen). On Android the manifest is
+also read from assets — see `androidApp`/`iosApp` `MainActivity`/`MainViewController`.
 
 On iOS the entry point is SwiftUI hosting
 `ComposeUIViewController { RdmaComposeHost.Content() }`.
