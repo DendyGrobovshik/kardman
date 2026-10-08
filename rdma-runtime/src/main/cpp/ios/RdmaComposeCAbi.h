@@ -40,6 +40,7 @@
 extern "C" {
 void rdma_nativeInvokeContent(void);
 void rdma_nativeInvokeScopeBlock(int64_t blockId, int32_t changed);
+void rdma_nativeInvokeScopeBlock1(int64_t blockId, int32_t changed, int32_t p1);
 void rdma_nativeInvokeCallback(int64_t blockId, void* argsHandle);
 void rdma_nativeInvokeLambda(int64_t blockId, void* argsHandle);
 int64_t rdma_nativeInvokeEffectBody(int64_t blockId);

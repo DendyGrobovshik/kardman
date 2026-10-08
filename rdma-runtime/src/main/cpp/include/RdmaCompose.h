@@ -131,6 +131,10 @@ int getContentVersion();
 // a global ref owned by the caller (the scope task).
 void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composerGlobal, jint changed);
 
+// Like `invokeScopeBlock`, but the guest block is invoked with a single leading
+// user argument (`p1`, e.g. a lazy-list item index) before the composer proxy.
+void invokeScopeBlock1(jsi::Runtime& rt, long blockId, jobject composerGlobal, jint changed, jint p1);
+
 // Converts a UI-thread RdmaResult into a jsi::Value on the Hermes thread.
 jsi::Value rdmaResultToJsi(jsi::Runtime& rt, RdmaResult& result);
 
@@ -170,6 +174,10 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeConte
 JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeScopeBlock(
     JNIEnv* env, jclass, jlong blockId, jobject composer, jint changed);
+
+JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeScopeBlock1(
+    JNIEnv* env, jclass, jlong blockId, jobject composer, jint changed, jint p1);
 
 JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeCallback(

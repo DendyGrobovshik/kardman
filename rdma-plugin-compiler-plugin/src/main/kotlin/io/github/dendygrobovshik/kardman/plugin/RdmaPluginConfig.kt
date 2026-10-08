@@ -71,8 +71,15 @@ object RdmaPluginConfig {
             val parameters = fn.parameters.map { p ->
                 val fnType = p.type.type as? RdmaType.FunctionType
                 when {
-                    fnType != null && p.composable ->
-                        RdmaPluginParameter(p.name, RdmaParamKind.CONTENT, "@Composable () -> Unit", fnType.parameters.size)
+                    fnType != null && p.composable -> {
+                        val paramTypes = fnType.parameters.map { kotlinTypeFor(fqnOf(it.type)) }
+                        val ktType = if (paramTypes.isEmpty()) {
+                            "@Composable () -> Unit"
+                        } else {
+                            "@Composable (" + paramTypes.joinToString(", ") + ") -> Unit"
+                        }
+                        RdmaPluginParameter(p.name, RdmaParamKind.CONTENT, ktType, fnType.parameters.size)
+                    }
                     fnType != null -> {
                         val paramTypes = fnType.parameters.map { kotlinTypeFor(fqnOf(it.type)) }
                         val ktType = "(" + paramTypes.joinToString(", ") + ") -> Unit"

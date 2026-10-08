@@ -30,6 +30,7 @@ import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeEffectBod
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeFreeBlock
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeLambda
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeScopeBlock
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeScopeBlock1
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_registerFunction
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_vtableDispatch
 import kotlinx.cinterop.COpaquePointer
@@ -64,6 +65,16 @@ object RdmaComposeHost {
         }
     }
 
+    fun nativeInvokeScopeBlock1(blockId: Long, composer: Composer, changed: Int, p1: Int) {
+        val prev = currentComposerHolder
+        currentComposerHolder = composer
+        try {
+            rdma_nativeInvokeScopeBlock1(blockId, changed, p1)
+        } finally {
+            currentComposerHolder = prev
+        }
+    }
+
     fun nativeInvokeCallback(blockId: Long, args: Array<Any?>) {
         // The C++ side disposes the args handle after the async post.
         rdma_nativeInvokeCallback(blockId, StableRef.create(args).asCPointer())
@@ -92,6 +103,12 @@ object RdmaComposeHost {
 class ComposerScopeBlock(private val blockId: Long) : (Composer, Int) -> Unit {
     override fun invoke(composer: Composer, changed: Int) {
         RdmaComposeHost.nativeInvokeScopeBlock(blockId, composer, changed)
+    }
+}
+
+class ComposerScopeBlock1(private val blockId: Long) : (Int, Composer, Int) -> Unit {
+    override fun invoke(p1: Int, composer: Composer, changed: Int) {
+        RdmaComposeHost.nativeInvokeScopeBlock1(blockId, composer, changed, p1)
     }
 }
 

@@ -415,6 +415,20 @@ void invokeScopeBlock(jsi::Runtime& rt, int64_t blockId, int32_t changed) {
     g_inComposition = prevInComposition;
 }
 
+void invokeScopeBlock1(jsi::Runtime& rt, int64_t blockId, int32_t changed, int32_t p1) {
+    auto it = g_scopeBlocks.find(blockId);
+    if (it == g_scopeBlocks.end()) return;
+    bool prevInComposition = g_inComposition;
+    g_inComposition = true;
+    jsi::Object proxy = makeComposerProxy(rt);
+    try {
+        it->second->call(rt, jsi::Value((double)p1), proxy, changed);
+    } catch (const jsi::JSError& e) {
+        LOGW("JSError in scope block: %s\n%s", e.what(), e.getStack().c_str());
+    }
+    g_inComposition = prevInComposition;
+}
+
 // --------------------------------------------------------- callback/lambda
 
 static void runCallbackOrLambda(jsi::Runtime& rt, int64_t blockId, void* argsHandle) {
@@ -568,6 +582,14 @@ void rdma_nativeInvokeScopeBlock(int64_t blockId, int32_t changed) {
     rdmaCallJs([blockId, changed] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (rt) invokeScopeBlock(*rt, blockId, changed);
+    });
+}
+
+void rdma_nativeInvokeScopeBlock1(int64_t blockId, int32_t changed, int32_t p1) {
+    using namespace facebook::rdma;
+    rdmaCallJs([blockId, changed, p1] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) invokeScopeBlock1(*rt, blockId, changed, p1);
     });
 }
 

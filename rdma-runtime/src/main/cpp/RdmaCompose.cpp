@@ -511,6 +511,23 @@ void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composerGlobal, ji
     setCurrentComposer(prevComposer);
 }
 
+void invokeScopeBlock1(jsi::Runtime& rt, long blockId, jobject composerGlobal, jint changed, jint p1) {
+    auto it = g_scopeBlocks.find(blockId);
+    if (it == g_scopeBlocks.end()) return;
+    jobject prevComposer = g_currentComposer;
+    bool prevInComposition = g_inComposition;
+    setCurrentComposer(composerGlobal);
+    g_inComposition = true;
+    jsi::Object proxy = makeComposerProxy(rt, composerGlobal);
+    try {
+        it->second->call(rt, jsi::Value((double)p1), proxy, changed);
+    } catch (const jsi::JSError& e) {
+        LOGW("JSError in scope block: %s\n%s", e.what(), e.getStack().c_str());
+    }
+    g_inComposition = prevInComposition;
+    setCurrentComposer(prevComposer);
+}
+
 // ------------------------------------------------------------ init (JNI/JSI)
 
 void initRdmaComposeJniCache(JNIEnv* env) {
@@ -754,6 +771,20 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeScope
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (rt) {
             invokeScopeBlock(*rt, blockId, composerGlobal, changed);
+        }
+        deleteGlobalRef(composerGlobal);
+    });
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeScopeBlock1(
+    JNIEnv* env, jclass, jlong blockId, jobject composer, jint changed, jint p1) {
+    using namespace facebook::rdma;
+    jobject composerGlobal = env->NewGlobalRef(composer);
+    rdmaCallJs([blockId, composerGlobal, changed, p1] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            invokeScopeBlock1(*rt, blockId, composerGlobal, changed, p1);
         }
         deleteGlobalRef(composerGlobal);
     });

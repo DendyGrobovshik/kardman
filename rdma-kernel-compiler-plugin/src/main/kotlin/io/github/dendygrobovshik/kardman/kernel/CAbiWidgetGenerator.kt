@@ -45,7 +45,7 @@ class CAbiWidgetGenerator(
     private sealed class Param {
         data class Value(val name: String, val jvmType: String) : Param()
         data class Ref(val name: String, val fqn: String, val nullable: Boolean) : Param()
-        data class Content(val name: String) : Param()
+        data class Content(val name: String, val arity: Int) : Param()
         data class Callback(val name: String, val arity: Int, val paramTypes: List<RdmaTypeRef>) : Param()
 
         val idName: String get() = when (this) {
@@ -67,7 +67,7 @@ class CAbiWidgetGenerator(
     private fun classify(fn: RdmaFunctionInfo): List<Param> = fn.parameters.map { p ->
         val fnType = p.type.type as? RdmaType.FunctionType
         when {
-            fnType != null && p.composable -> Param.Content(p.name)
+            fnType != null && p.composable -> Param.Content(p.name, fnType.parameters.size)
             fnType != null -> Param.Callback(p.name, fnType.parameters.size, fnType.parameters)
             p.type.type is RdmaType.Ref ->
                 Param.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable)
@@ -162,8 +162,13 @@ import kotlinx.cinterop.staticCFunction
 
     private fun helper(cName: String, p: Param): String? = when (p) {
         is Param.Content -> {
-            "fun ${cName}_${p.name}(${p.idName}: Long): @Composable () -> Unit = { " +
-                "RdmaComposeHost.nativeInvokeScopeBlock(${p.idName}, currentComposer, 0) }\n"
+            when (p.arity) {
+                0 -> "fun ${cName}_${p.name}(${p.idName}: Long): @Composable () -> Unit = { " +
+                    "RdmaComposeHost.nativeInvokeScopeBlock(${p.idName}, currentComposer, 0) }\n"
+                1 -> "fun ${cName}_${p.name}(${p.idName}: Long): @Composable (Int) -> Unit = { p0 -> " +
+                    "RdmaComposeHost.nativeInvokeScopeBlock1(${p.idName}, currentComposer, 0, p0) }\n"
+                else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
+            }
         }
         is Param.Callback -> {
             val ret = if (p.arity == 0) "() -> Unit"

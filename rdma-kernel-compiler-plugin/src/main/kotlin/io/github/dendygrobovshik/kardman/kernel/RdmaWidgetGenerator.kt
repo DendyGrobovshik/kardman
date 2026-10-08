@@ -46,7 +46,7 @@ class RdmaWidgetGenerator(
     private sealed class Param {
         data class Value(val name: String, val jvmType: String) : Param()
         data class Ref(val name: String, val fqn: String, val nullable: Boolean) : Param()
-        data class Content(val name: String) : Param()
+        data class Content(val name: String, val arity: Int) : Param()
         data class Callback(val name: String, val arity: Int) : Param()
 
         val idName: String get() = when (this) {
@@ -68,7 +68,7 @@ class RdmaWidgetGenerator(
     private fun classify(fn: RdmaFunctionInfo): List<Param> = fn.parameters.map { p ->
         val fnType = p.type.type as? RdmaType.FunctionType
         when {
-            fnType != null && p.composable -> Param.Content(p.name)
+            fnType != null && p.composable -> Param.Content(p.name, fnType.parameters.size)
             fnType != null -> Param.Callback(p.name, fnType.parameters.size)
             p.type.type is RdmaType.Ref ->
                 Param.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable)
@@ -176,8 +176,11 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
     private fun callArg(p: Param): String = when (p) {
         is Param.Value -> "${p.name} = ${p.idName}"
         is Param.Ref -> "${p.name} = ${p.idName}"
-        is Param.Content ->
-            "${p.name} = { RdmaComposeHost.nativeInvokeScopeBlock(${p.idName}, currentComposer, 0) }"
+        is Param.Content -> when (p.arity) {
+            0 -> "${p.name} = { RdmaComposeHost.nativeInvokeScopeBlock(${p.idName}, currentComposer, 0) }"
+            1 -> "${p.name} = { p0 -> RdmaComposeHost.nativeInvokeScopeBlock1(${p.idName}, currentComposer, 0, p0) }"
+            else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
+        }
         is Param.Callback -> {
             if (p.arity == 0) {
                 "${p.name} = { RdmaComposeHost.nativeInvokeCallback(${p.idName}, emptyArray<Any?>()) }"
