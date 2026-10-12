@@ -15,9 +15,7 @@ limitations under the License.
 -->
 # Contributing
 
-This guide is for developers working on the framework itself. If you only want to
-run the demo or use the framework in your own project, see the
-[user guide](getting_started.md). How the code generation works end-to-end is described
+This guide is for developers working on the framework itself.  How the code generation works end-to-end is described
 in [codegen.md](../codegen.md).
 
 ## Project Configuration

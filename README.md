@@ -103,8 +103,12 @@ While working with `Dog` object overridden method will be called from both plugi
 
 ## Getting started
 
-Prerequisites, running the demo and how to wire the framework into your own
-project are in the [user guide](docs/user_guide/getting_started.md).
+| You want to… | Read |
+|---|---|
+| Install prerequisites, run the demo, use the framework in your own project | [setup.md](setup.md) |
+| Learn what you can express with `@RDMA` (data, UI, effects, coroutines) | [features.md](features.md) |
+| Run releases and operate the store | [releases.md](releases.md) |
+| Contribute to the framework itself (build, test, debug) | [contribution.md](contribution.md) |
 
 ## Project modules
 
@@ -144,8 +148,7 @@ runtime through the `installUserBridge` hook.
 
 User guides (`docs/user_guide/`):
 
-- [Getting started](docs/user_guide/getting_started.md) — where to go next
-- [Setup](docs/user_guide/setup.md) — prerequisites, demo, integration
+- [Setup](docs/user_guide/setup.md)
 - [Features](docs/user_guide/features.md)
 - [Releases & operations](docs/user_guide/releases.md)
 - [Contributing](docs/user_guide/contribution.md)
@@ -164,7 +167,7 @@ Design intent (`docs/design/`):
 - [Versioning & compatibility](docs/design/compatibility.md)
 - [iOS design](docs/design/ios_design.md)
 
-# Лицензия / License
+# License
 
 Licensed with Apache 2.0. See details in [LICENSE](LICENSE).
 
