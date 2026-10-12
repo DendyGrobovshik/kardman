@@ -15,10 +15,16 @@ limitations under the License.
 -->
 # Setup
 
-How to get the framework running: install the prerequisites, build and run the
-demo, then wire the framework into your own project. For an overview of what the
-framework *is*, see the root [README.md](../../README.md); for what you can build
-with it, see [features.md](features.md).
+To get the framework running on a fresh machine, run the one-command initial
+setup, then build and run the demo:
+
+```bash
+./scripts/setup.sh
+```
+
+It builds and publishes the custom Kotlin compiler, builds Hermes for Android and
+iOS, and publishes the framework to `mavenLocal`. For wiring the framework into
+your own project, see [How to use](how_to_use.md).
 
 ## Prerequisites
 
@@ -27,68 +33,65 @@ The only things you need installed on the host:
 - **Android SDK** (compileSdk 36) and **NDK** (28+) — the C++ bridge is built with CMake.
 - **`ANDROID_HOME`** (or `ANDROID_SDK_ROOT`) pointing at the SDK.
 - **JDK 17** — required by the Kotlin fork build and the Hermes Android build.
-- **git** and network access — the demo script clones Hermes and downloads dependencies.
+- **git** and network access — the setup script clones Hermes and downloads dependencies.
 - For iOS: **Xcode** (with an iOS simulator) plus `cmake` and `ninja`.
 
 Gradle and Kotlin are **not** manual prerequisites: the Gradle wrapper
 (`./gradlew`) and the version catalog (`gradle/libs.versions.toml`) pin them for
-you. Note that this project uses a **custom Kotlin compiler** (`2.4.10-rdma`) —
-see [Build the Kotlin compiler](#build-the-kotlin-compiler) below; it must be
-published to `mavenLocal` before any build works.
+you. Note that this project uses a **custom Kotlin compiler** (see
+[Initial setup](#initial-setup) below); it must be published to `mavenLocal`
+before any build works.
 
-## Build the Kotlin compiler
+## Initial setup
 
-The framework is built with a fork of the Kotlin compiler (`2.4.10-rdma`) that
-adds the `-Xir-export-all` flag used to export plugin declarations to JS. It is
-**not** on Maven Central, so a fresh machine must build and publish it first:
+Run the one-command setup (idempotent — caches are reused on re-runs):
 
 ```bash
-git clone --branch full_stable_js_export_table-2.4.10 \
-    https://github.com/DendyGrobovshik/kotlin.git ~/Code/kotlin
-cd ~/Code/kotlin
-export JAVA_HOME=$(/usr/libexec/java_home -v 17)     # JDK 17 required
-./gradlew install \
-    -PdeployVersion=2.4.10-rdma \
-    -Pbuild.number=1 \
-    -Pversions.kotlin-native=2.4.10
+./scripts/setup.sh
 ```
 
-This publishes the whole compiler toolchain (`org.jetbrains.kotlin:*:2.4.10-rdma`
-and its Gradle plugins) to `mavenLocal`. It is heavy the first time (it compiles
-the compiler and stdlib); it is cached afterwards. Verify it worked with:
+It runs four steps, each in its own script under [`scripts/setup/`](../../scripts/setup/):
 
-```bash
-ls ~/.m2/repository/org/jetbrains/kotlin/kotlin-gradle-plugin/2.4.10-rdma
-```
+1. **Build the Kotlin compiler** ([`scripts/setup/kotlin.sh`](../../scripts/setup/kotlin.sh)).
+   The framework is built with a fork of the Kotlin compiler (checked out as the
+   `third_party/kotlin` submodule, branch `full_stable_js_export_table-2.4.10`) that
+   adds the `-Xir-export-all` flag used to export plugin declarations to JS. It is
+   **not** on Maven Central, so a fresh machine must build and publish it first. The
+   script reads the compiler version from `gradle/libs.versions.toml`, runs
+   `./gradlew install`, and verifies the published artifact. Heavy the first time
+   (it compiles the compiler and stdlib); cached afterwards.
+
+2. **Build Hermes for Android** ([`scripts/setup/hermes.sh`](../../scripts/setup/hermes.sh)).
+   Clones Hermes at a pinned commit into `third_party/hermes/`, builds and publishes
+   `com.facebook.hermes:hermes-android` to `mavenLocal`, and builds + installs the
+   matching `hermesc` compiler into `third_party/bin/hermesc` (its bytecode version
+   must match the runtime, or the plugin bundles will not load).
+
+3. **Build Hermes for iOS** ([`scripts/setup/hermes-ios.sh`](../../scripts/setup/hermes-ios.sh)).
+   Builds a universal `hermes.xcframework` into `.hermes-ios/`. Skipped automatically
+   on non-macOS hosts; fails loudly on macOS if Xcode/`cmake`/`ninja` are missing.
+
+4. **Publish the framework** ([`scripts/publish.sh`](../../scripts/publish.sh)).
+   Publishes `rdma-annotation`, `rdma-types`, both compiler plugins and their Gradle
+   plugins, `rdma-runtime` and `rdma-app-gradle-plugin` to `mavenLocal` (plus
+   `rdma-runtime-ios` when the iOS xcframework from step 3 is present). The demo app
+   consumes the `rdma-app` plugin by id from `mavenLocal`.
 
 ## Run the demo
 
-One command builds everything:
+After setup, assemble the demo APK:
 
 ```bash
-./scripts/build.sh
+./gradlew :androidApp:assembleDebug
 ```
 
-This script does three things:
+This runs the entire pipeline:
 
-1. **Sets up Hermes** (see [`scripts/setup-hermes.sh`](../../scripts/setup-hermes.sh)):
-   - clones Hermes at a **pinned commit** of `facebook/hermes` into `.hermes-src/`
-   - builds the Android AAR and publishes `com.facebook.hermes:hermes-android` to `mavenLocal`
-   - builds and installs the matching `hermesc` compiler into `tools/hermesc`
-     (its bytecode version must match the runtime, or the plugin bundles will not load)
-2. **Publishes the framework** to `mavenLocal` (see [`scripts/publish.sh`](../../scripts/publish.sh)) —
-   the demo app consumes the `rdma-app` Gradle plugin by id from `mavenLocal`.
-3. **Assembles the demo APK**: `./gradlew :androidApp:assembleDebug`, which runs the
-   entire pipeline:
-   1. **Kernel compiler plugin** — generates C++ glue + `rdma_manifest.json` + injects the vtable
-   2. **Plugin compiler plugin** — reads the manifest and rewrites the plugin source
-   3. **Plugin JS compilation** — Kotlin/JS → `RDMAHermes-plugin.js`
-   4. **C++ compilation** — CMake + NDK → `librdma_runtime.so` + `librdma_user.so`
-   5. **APK packaging** — assets + native libs + dex
-
-The Hermes build is heavy the first time (it compiles libhermes for every ABI);
-it is cached afterwards. Override any setting via env vars — see the header of
-[`setup-hermes.sh`](../../scripts/setup-hermes.sh).
+1. **Kernel compiler plugin** — generates C++ glue + `rdma_manifest.json` + injects the vtable
+2. **Plugin compiler plugin** — reads the manifest and rewrites the plugin source
+3. **Plugin JS compilation** — Kotlin/JS → `RDMAHermes-plugin.js`
+4. **C++ compilation** — CMake + NDK → `librdma_runtime.so` + `librdma_user.so`
+5. **APK packaging** — assets + native libs + dex
 
 Install the result on a device/emulator:
 
@@ -98,155 +101,13 @@ adb install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk
 
 Logcat filters for the demo: `RdmaBridge RdmaRuntime RdmaJni RDMA`.
 
-### Useful build targets
-
-| Command | What it does |
-|---------|--------------|
-| `./gradlew :androidApp:assembleDebug` | Full demo APK (the whole pipeline above) |
-| `./gradlew :plugin:jsBrowserDevelopmentExecutableDistribution` | Compile only the plugin to JS (no native/APK) |
-| `./gradlew :kernel:compileKotlinJvm` | Run only the kernel compiler plugin → `kernel/build/generated/rdma/cpp/` |
-| `./gradlew :rdma-kernel-compiler-plugin:test :rdma-plugin-compiler-plugin:test :rdma-tests:test` | Run the compiler-plugin unit/integration tests |
-
 Force a full rebuild if caches go stale:
 
 ```bash
-rm -rf kernel/build plugin/build rdma-runtime-android/.cxx .gradle/configuration-cache
+rm -rf kernel/internal/build kernel/user/alice/build plugin/alice/counter/build plugin/bob/services/build rdma-runtime/.cxx .gradle/configuration-cache
 ./gradlew :androidApp:assembleDebug --no-configuration-cache --rerun-tasks
 ```
 
 ## How to use
 
-Concrete code snippets live in the [README](../../README.md); this is the workflow in
-words. You write ordinary Kotlin and the compiler plugins turn it into proxy calls
-at build time:
-
-- **Share a data type** — annotate a class in `:kernel` with `@RDMA`. The kernel
-  compiler plugin generates the JNI/JSI glue for its constructors, methods and
-  properties automatically.
-- **Use it from the plugin** — import the class in `:plugin` and use it like any
-  other object. Constructor calls, `.property` reads/writes and method calls are
-  rewritten to `RDMA.*` bridge calls by the FIR compiler plugin. No manual
-  serialization.
-- **Expose UI widgets** — annotate `@Composable` functions in `:kernel` with
-  `@RDMA`; they become host-side widgets the plugin can call, driving the Compose
-  tree on the kernel side.
-- **Inherit & override** — annotate an `open class` with `@RDMA`; the plugin can
-  subclass it and override methods. Overrides are dispatched through an injected
-  vtable, so they are visible from both runtimes.
-- **Offload work** — `@RDMA` classes with callback parameters let the plugin hand
-  heavy work (network, IO) to the kernel's threads and receive results via
-  callbacks.
-
-For what is and isn't supported yet (types, constructors, properties, methods,
-plugin transformation), see [features.md](features.md).
-
-### Cross-module `@RDMA` references
-
-A kernel module may reference an `@RDMA` type declared in another kernel module —
-e.g. a widget in `:kernel:user:<user>` taking a `Color`/`Dp` from `:kernel:internal`.
-The generated glue marshals such types without knowing their concrete class (see
-[codegen.md](../codegen.md) for the type-erased mechanism), so cross-module references
-"just work" as long as the referencing module depends on the owning module via
-Gradle. The only check the kernel compiler performs is that the referenced FQN is
-itself annotated `@RDMA` (resolved through the dependency classpath); a non-`@RDMA`
-type in an `@RDMA` signature remains a build error.
-
-### Kernel public-API rule
-
-A kernel module's non-`@RDMA` **concrete classes** must be `internal`/`private` —
-a public non-`@RDMA` class could otherwise leak into an `@RDMA` signature. This
-rule does **not** apply to `interface`/`object`/top-level `val` declarations
-(e.g. a host-side `KernelServiceProvider` interface or a `KernelServices` singleton
-registry) or to the framework entry point `runRdmaApp`, which are public by design.
-
-## Use the framework in your own project
-
-The framework modules are published as `io.github.dendygrobovshik.kardman:*:1.0`.
-To consume them from a separate project:
-
-1. **Publish the framework and Hermes to `mavenLocal()`:**
-
-   ```bash
-   ./scripts/publish.sh          # rdma-annotation, rdma-types, both compiler plugins + gradle plugins, rdma-runtime-android
-   ./scripts/setup-hermes.sh     # com.facebook.hermes:hermes-android
-   ```
-
-2. **Add `mavenLocal()`** to `settings.gradle.kts` (`pluginManagement` and
-   `dependencyResolutionManagement`).
-
-3. **Create the three user-side modules** (a complete working example lives in the
-   companion `wb2` project — copy its structure):
-
-   | Module | Purpose | Plugins |
-   |--------|---------|---------|
-   | `:kernel` | Your `@RDMA` classes + `@Composable` widgets | `id("io.github.dendygrobovshik.kardman.rdma-kernel-compiler") version "1.0"` |
-   | `:plugin` | Your plugin code (Kotlin/JS) | `id("io.github.dendygrobovshik.kardman.rdma-plugin-compiler") version "1.0"`, `jsMain` points at `build/generated/rdma` |
-   | `:androidApp` | Loads Hermes + the plugin | `androidApplication` + `id("io.github.dendygrobovshik.kardman.rdma-app") version "1.0"` |
-
-   The `rdma-app` plugin does the rest of the wiring for you:
-   - adds the dependencies (`:kernel`, `rdma-runtime-android`, `hermes-android`);
-   - generates the user bridge and compiles the generated C++ into `librdma_user.so`;
-   - copies the compiled plugin JS into the app's assets (or AOT-compiles it to `.hbc`,
-     see below).
-
-   So `:androidApp` needs no hand-written deps, native config or asset-copy tasks —
-   just the plugin and the usual `android {}` block.
-
-4. **Set the module paths/packages** in `gradle.properties` (single source of truth):
-
-   ```properties
-   rdmaKernelRootPackage=com.example.kernel
-   rdmaKernelProject=:kernel
-   rdmaKernelInternals=:kernel:internal
-   rdmaPluginRootPackage=com.example.plugin
-   rdmaPluginProject=:plugin
-   # optional: AOT-compile the plugin JS to Hermes bytecode (.hbc)
-   rdmaHermesc=tools/hermesc
-   ```
-
-   Kernel and plugin modules are nested subprojects of the container projects above.
-   Each kernel module's package is derived from its path (`:kernel:user:alice` →
-   `com.example.kernel.user.alice`); each plugin module's package is
-   `rdmaPluginRootPackage.<username>` (the first path segment after `:plugin`). A plugin
-   sees the framework-owned `rdmaKernelInternals` modules plus its own `:kernel:user:<username>`
-   module, and nothing else.
-
-   `rdmaHermesc` points the `rdma-app` plugin at the Hermes compiler. You no longer need
-   to vendor the `hermesc` binary: if the path is set but the file is absent, the plugin
-   resolves `io.github.dendygrobovshik.kardman:hermesc:1.0:<os-arch>` from `mavenLocal`
-   (published by `scripts/setup-hermes.sh`) and extracts it automatically. Setting
-   `rdmaHermesc` still opts into AOT; leaving it unset keeps the plain-JS fallback.
-
-   Keep `hermesc` in sync with the runtime: a stale vendored binary produces
-   `Wrong bytecode version. Expected N but got M` at runtime and the plugin bundles
-   won't load. Prefer leaving `tools/hermesc` absent and letting the plugin resolve
-   the pinned binary from `mavenLocal`.
-
-5. **In `MainActivity`**, register the user bridge, init the runtime (async) and
-   load the plugin bundles from the generated manifest:
-
-   ```kotlin
-   UserBridge.nativeInstall()          // loads librdma_user.so, registers installUserBridge
-   RdmaBridge.nativeInit(assets)       // JNI caches on UI thread, then starts the Hermes thread
-   for (module in readModuleManifest()) {
-       RdmaBridge.nativeEvalAsset("kotlin/$module.hbc")
-   }
-   // poll nativeIsReady() AND nativeContentVersion(), then:
-   // if (ready) key(contentVersion) { RdmaComposeHost.Content() }
-   ```
-
-   `readModuleManifest()` reads the build-generated `kotlin/rdma-modules.json` (module
-   base names in topological load order — shared dependencies first, then the plugins).
-   **Never hardcode the module list**: after a compiler/Compose update the dependency
-   set and its order change, and a hardcoded list silently breaks module resolution,
-   leaving the host rendering nothing (blank screen).
-
-   Without `rdmaHermesc`, the plugin copies the JS source (`.js`) and the runtime evals
-   it directly. With `rdmaHermesc`, the plugin compiles the JS to `.hbc` bytecode (faster
-   startup, smaller size) and emits the `rdma-modules.json` manifest — load those `.hbc`
-   assets instead of `.js`. Poll `nativeContentVersion()` and wrap the content in
-   `key(contentVersion)` so a dynamically-loaded plugin's `registerContent` triggers a
-   host recomposition (see the in-repo `androidApp` for the reference).
-
-See the in-repo `androidApp`, `kernel` and `plugin` modules for a self-contained
-reference of this exact wiring.
+See [How to use](how_to_use.md) for wiring the framework into your own project.

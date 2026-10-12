@@ -140,15 +140,12 @@ declare `@RDMA` types/widgets, plugin modules use them, and `:androidApp` applie
 `rdma-app` plugin to build the bridge into `librdma_user.so` and register it with the
 runtime through the `installUserBridge` hook.
 
-## Limitations
-
-#TODO
-
 ## Docs
 
 User guides (`docs/user_guide/`):
 
 - [Setup](docs/user_guide/setup.md)
+- [How to use](docs/user_guide/how_to_use.md)
 - [Features](docs/user_guide/features.md)
 - [Releases & operations](docs/user_guide/releases.md)
 - [Contributing](docs/user_guide/contribution.md)

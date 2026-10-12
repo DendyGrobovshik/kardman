@@ -21,7 +21,7 @@ VERSIONS_DIR="${3:?}"
 POLYFILL_OUT="${4:-}"
 INTERNAL_MODULES="${5:-internal}"
 TELEMETRY="${6:-}"
-HERMESC="${HERMESC:-$ROOT_DIR/tools/hermesc}"
+HERMESC="${HERMESC:-$ROOT_DIR/third_party/bin/hermesc}"
 
 case "$COMMAND" in
   static-release) TASK=staticRelease ;;

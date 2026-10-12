@@ -183,7 +183,7 @@ Mirrors the Android split into a reusable runtime and a per-app bridge:
   `Exec` task into `librdma_core.a` and linked via `linkerOpts`; the shim imports
   the C++-provided entry points through a cinterop `rdma.def`.
 - `hermes.xcframework` — prebuilt XCFramework (0.76.x), built reproducibly by
-  `scripts/setup-hermes-ios.sh`.
+  `scripts/setup/hermes-ios.sh`.
 - a per-app generated bridge (the `RdmaCAbi_<mod>`, `RdmaWidgetBridge_<mod>`,
   per-class proxies) compiled by the `rdma-app` plugin's `buildRdmaUserCAbi`
   task into `librdma_user.a` (the analog of `librdma_user.so`).

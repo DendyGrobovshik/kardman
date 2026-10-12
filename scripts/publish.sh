@@ -11,7 +11,7 @@ set -euo pipefail
 #
 # The iOS runtime (`rdma-runtime-ios` + `rdma-runtime-ios-native`) is published
 # from the main build below, because it references the Hermes xcframework produced
-# by `scripts/setup-hermes-ios.sh` (`.hermes-ios/hermes.xcframework`). If that
+# by `scripts/setup/hermes-ios.sh` (`.hermes-ios/hermes.xcframework`). If that
 # framework is absent the iOS publish is skipped, so Android-only setups still work.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,5 +30,5 @@ if [[ -d "$ROOT_DIR/.hermes-ios/hermes.xcframework" ]]; then
     echo "Publishing iOS runtime artifacts to mavenLocal ..."
     ./gradlew :rdma-runtime-ios:publishToMavenLocal
 else
-    echo "Skipping iOS runtime publish (run scripts/setup-hermes-ios.sh first)."
+    echo "Skipping iOS runtime publish (run scripts/setup/hermes-ios.sh first)."
 fi

@@ -2,35 +2,35 @@
 set -euo pipefail
 
 # Downloads and builds Hermes for Android, publishes the `hermes-android` AAR to
-# mavenLocal, installs the matching host `hermesc` compiler into `tools/`, and
-# refreshes the JSI headers used by the runtime.
+# mavenLocal, installs the matching host `hermesc` compiler into `third_party/bin/`,
+# and refreshes the JSI headers used by the runtime.
 #
 # IMPORTANT: Hermes is pinned to a specific commit. The `static_h` branch is a
 # moving target (it was switched to the React Native Hermes build in 2025 and the
 # bytecode version / JSI API keep changing), so cloning HEAD is not reproducible.
 # The commit below is known-good for this framework: its bytecode version matches
-# the `tools/hermesc` that this script installs, and its JSI API matches the
-# headers checked into `rdma-runtime/src/main/cpp/include/jsi`.
+# the `third_party/bin/hermesc` that this script installs, and its JSI API matches
+# the headers checked into `rdma-runtime/src/main/cpp/include/jsi`.
 #
 # Override any of the following via environment variables:
 #   HERMES_VERSION   AAR version to publish (default: 0.76.9)
 #   HERMES_REPO      Git URL to clone from (default: https://github.com/facebook/hermes.git)
 #   HERMES_BRANCH    Branch to fetch from (default: static_h)
 #   HERMES_COMMIT    Exact commit to check out (default: the known-good pin)
-#   HERMES_SRC_DIR   Where to clone Hermes into (default: .hermes-src; re-used on re-runs)
+#   HERMES_SRC_DIR   Where to clone Hermes into (default: third_party/hermes; re-used on re-runs)
 #
 # Requirements: git, JDK 17, ANDROID_HOME (or ANDROID_SDK_ROOT) with the NDK,
 # cmake + ninja (for the host hermesc). The build is heavy: it compiles libhermes
 # for every Android ABI.
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 HERMES_VERSION="${HERMES_VERSION:-0.76.9}"
 HERMES_REPO="${HERMES_REPO:-https://github.com/facebook/hermes.git}"
 HERMES_BRANCH="${HERMES_BRANCH:-static_h}"
 # Known-good pin: bytecode v99, JSI `IRuntime` API (matches the committed headers).
 HERMES_COMMIT="${HERMES_COMMIT:-a1154cb46a9cfe03a96fcdae96ab5e5cf5125c66}"
-HERMES_SRC_DIR="${HERMES_SRC_DIR:-$ROOT_DIR/.hermes-src}"
+HERMES_SRC_DIR="${HERMES_SRC_DIR:-$ROOT_DIR/third_party/hermes}"
 
 if [[ -z "${ANDROID_HOME:-}${ANDROID_SDK_ROOT:-}" ]]; then
     echo "error: ANDROID_HOME or ANDROID_SDK_ROOT must be set" >&2
@@ -71,7 +71,7 @@ fi
 #    The AAR exposes the `hermes-engine` prefab (`hermesvm` module) that the
 #    runtime links against via `find_package(hermes-engine)`.
 #    The `:ios-artifacts` subproject publishes iOS framework artifacts that are
-#    only produced by setup-hermes-ios.sh, so it is excluded here.
+#    only produced by scripts/setup/hermes-ios.sh, so it is excluded here.
 echo "Building and publishing hermes-android:$HERMES_VERSION to mavenLocal ..."
 (
     cd "$HERMES_SRC_DIR/android"
@@ -79,17 +79,17 @@ echo "Building and publishing hermes-android:$HERMES_VERSION to mavenLocal ..."
         -x :ios-artifacts:publishToMavenLocal
 )
 
-# 4) Build + install the host `hermesc` compiler into tools/. Its bytecode version
-#    must match the runtime built above, otherwise the plugin `.hbc` bundles will
-#    not load. (Never rely on a stale committed binary.)
+# 4) Build + install the host `hermesc` compiler into third_party/bin/. Its bytecode
+#    version must match the runtime built above, otherwise the plugin `.hbc` bundles
+#    will not load. (Never rely on a stale committed binary.)
 echo "Building host hermesc ..."
 if [[ ! -f "$HERMES_SRC_DIR/build_host_hermesc/bin/hermesc" ]]; then
     (cd "$HERMES_SRC_DIR" && cmake -S . -B build_host_hermesc -DCMAKE_BUILD_TYPE=Release)
     (cd "$HERMES_SRC_DIR" && cmake --build ./build_host_hermesc --target hermesc)
 fi
-mkdir -p "$ROOT_DIR/tools"
-cp "$HERMES_SRC_DIR/build_host_hermesc/bin/hermesc" "$ROOT_DIR/tools/hermesc"
-echo "Installed tools/hermesc: $("$ROOT_DIR/tools/hermesc" --version 2>&1 | grep -i 'bytecode version' || true)"
+mkdir -p "$ROOT_DIR/third_party/bin"
+cp "$HERMES_SRC_DIR/build_host_hermesc/bin/hermesc" "$ROOT_DIR/third_party/bin/hermesc"
+echo "Installed third_party/bin/hermesc: $("$ROOT_DIR/third_party/bin/hermesc" --version 2>&1 | grep -i 'bytecode version' || true)"
 
 # 5) Publish `hermesc` as a maven artifact so consumer projects (e.g. wb2) can
 #    resolve it instead of vendoring the binary. The classifier encodes the host
@@ -108,7 +108,7 @@ HERMESC_CLASSIFIER="$HERMESC_OS-$HERMESC_ARCH"
 
 echo "Publishing hermesc:$HERMESC_CLASSIFIER to mavenLocal ..."
 "$ROOT_DIR/gradlew" -p "$ROOT_DIR/publish/hermesc" publishToMavenLocal \
-    -PhermescPath="$ROOT_DIR/tools/hermesc" \
+    -PhermescPath="$ROOT_DIR/third_party/bin/hermesc" \
     -PhermescClassifier="$HERMESC_CLASSIFIER"
 
 # 6) Sanity-check: the JSI headers checked into the runtime must match the pinned

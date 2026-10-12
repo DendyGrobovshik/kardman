@@ -224,8 +224,8 @@ with JSI as a separate `libjsi.so` that is then **excluded** from the AAR, leavi
 `hermes-engine::hermesvm` without the JSI symbols.
 
 Fix: re-publish `hermes-android` with the JSI-static patch applied — the patch flips
-`-DHERMES_BUILD_SHARED_JSI=True` to `False` in `.hermes-src/android/build.gradle.kts`
-(see [`scripts/setup-hermes.sh`](../../scripts/setup-hermes.sh)), which links JSI
+`-DHERMES_BUILD_SHARED_JSI=True` to `False` in `third_party/hermes/android/build.gradle.kts`
+(see [`scripts/setup/hermes.sh`](../../scripts/setup/hermes.sh)), which links JSI
 statically into `libhermesvm.so`. Verify:
 
 ```bash
@@ -237,13 +237,14 @@ nm -D <AAR>/prefab/modules/hermesvm/libs/android.arm64-v8a/libhermesvm.so \
 
 The `.hbc` bundles were compiled with a `hermesc` whose bytecode version does not
 match the Hermes runtime (e.g. `Expected 99 but got 98`). This is caused by a stale,
-vendored `tools/hermesc`. The runtime and `hermesc` are pinned together — always
-reuse the same pin for both.
+vendored `third_party/bin/hermesc`. The runtime and `hermesc` are pinned together —
+always reuse the same pin for both.
 
-Fix: don't vendor the binary. Keep `rdmaHermesc=tools/hermesc` in `gradle.properties`
-but **delete** the stale `tools/hermesc` file; the `rdma-app` plugin then resolves
-`io.github.dendygrobovshik.kardman:hermesc:1.0:<os-arch>` from `mavenLocal` (published
-by `setup-hermes.sh`) with the matching version. Verify the bytecode version:
+Fix: don't vendor the binary. Keep `rdmaHermesc=third_party/bin/hermesc` in
+`gradle.properties` but **delete** the stale `third_party/bin/hermesc` file; the
+`rdma-app` plugin then resolves `io.github.dendygrobovshik.kardman:hermesc:1.0:<os-arch>`
+from `mavenLocal` (published by `scripts/setup/hermes.sh`) with the matching version.
+Verify the bytecode version:
 
 ```bash
 hermesc --version   # HBC bytecode version: <N> — must equal the runtime's version

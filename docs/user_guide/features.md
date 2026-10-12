@@ -285,3 +285,7 @@ overloaded methods, extension and `suspend` functions; block-body overrides;
 allowlist; `delay(ms)`/timers; stable identity for object/`@RDMA` effect keys;
 cross-runtime object identity/`equals`, JNI exception propagation,
 async/Promise returns, batch transfers.
+
+## Limitations
+
+#TODO

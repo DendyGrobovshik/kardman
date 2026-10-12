@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Builds Hermes for iOS (iphoneos + iphonesimulator) into a universal
-# `hermes.xcframework`, mirroring what scripts/setup-hermes.sh does for Android.
+# `hermes.xcframework`, mirroring what scripts/setup/hermes.sh does for Android.
 #
 # Hermes is cloned from a git remote into a local, gitignored checkout and built
 # there. Nothing outside the repository is read or written, so a fresh clone of
@@ -11,7 +11,7 @@ set -euo pipefail
 # Override any of the following via environment variables:
 #   HERMES_REPO             Git URL to clone from (default: facebook/hermes)
 #   HERMES_BRANCH           Branch/tag to check out (default: static_h)
-#   HERMES_SRC_DIR          Where to clone into (default: <repo>/.hermes-src,
+#   HERMES_SRC_DIR          Where to clone into (default: <repo>/third_party/hermes,
 #                           re-used on re-runs)
 #   IOS_DEPLOYMENT_TARGET   Minimum iOS version (default: 12.0, from the podspec)
 #   BUILD_TYPE              Debug or Release (default: Release)
@@ -20,17 +20,24 @@ set -euo pipefail
 # The build is heavy: it compiles the host `hermesc` + `shermes` and the Hermes
 # VM for two iOS architectures.
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 HERMES_REPO="${HERMES_REPO:-https://github.com/facebook/hermes.git}"
 HERMES_BRANCH="${HERMES_BRANCH:-static_h}"
-# Must match scripts/setup-hermes.sh (same runtime/bytecode version).
+# Must match scripts/setup/hermes.sh (same runtime/bytecode version).
 HERMES_COMMIT="${HERMES_COMMIT:-a1154cb46a9cfe03a96fcdae96ab5e5cf5125c66}"
-HERMES_SRC_DIR="${HERMES_SRC_DIR:-$ROOT_DIR/.hermes-src}"
+HERMES_SRC_DIR="${HERMES_SRC_DIR:-$ROOT_DIR/third_party/hermes}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-12.0}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 
 FRAMEWORK_OUT="$ROOT_DIR/.hermes-ios"
+
+# The iOS Hermes build is macOS-only (it needs Xcode). On other platforms skip it
+# silently; on macOS fail loudly if any required tool is missing.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "Skipping iOS Hermes build (requires macOS)."
+    exit 0
+fi
 
 for tool in git cmake ninja xcodebuild; do
     command -v "$tool" > /dev/null || { echo "error: $tool is required" >&2; exit 1; }

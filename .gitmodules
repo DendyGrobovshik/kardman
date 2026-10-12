@@ -1,0 +1,4 @@
+[submodule "third_party/kotlin"]
+	path = third_party/kotlin
+	url = https://github.com/DendyGrobovshik/kotlin.git
+	branch = full_stable_js_export_table-2.4.10

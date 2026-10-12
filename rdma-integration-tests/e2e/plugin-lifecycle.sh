@@ -10,11 +10,11 @@ set -euo pipefail
 #   ./rdma-integration-tests/e2e/plugin-lifecycle.sh
 #
 # Requirements: a booted emulator (adb devices), the framework published to
-# mavenLocal (done in step 1), and the Hermes compiler (tools/hermesc).
+# mavenLocal (done in step 1), and the Hermes compiler (third_party/bin/hermesc).
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GRADLE="$ROOT_DIR/gradlew"
-HERMESC="$ROOT_DIR/tools/hermesc"
+HERMESC="$ROOT_DIR/third_party/bin/hermesc"
 
 STORE_URL="http://10.0.2.2:8080"   # emulator loopback to host
 STORE_PORT=8080
