@@ -19,7 +19,7 @@ import org.gradle.api.publish.maven.MavenPublication
 // projects (e.g. wb2) can resolve it instead of vendoring the binary.
 //
 // Run after `scripts/setup/hermes.sh` has built the compiler:
-//   ./gradlew -p publish/hermesc publishToMavenLocal \
+//   ./gradlew -p scripts/publish/hermesc publishToMavenLocal \
 //       -PhermescPath=third_party/bin/hermesc -PhermescClassifier=macos-aarch64
 //
 // The artifact is `io.github.dendygrobovshik.kardman:hermesc:1.0:<classifier>`

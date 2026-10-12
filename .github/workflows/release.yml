@@ -48,7 +48,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build + test (hard gate)
-        run: ./gradlew :rdma-tests:test :rdma-kernel-compiler-plugin:test :rdma-store:test
+        run: ./gradlew :tests:rdma-tests:test :rdma-kernel-compiler-plugin:test :rdma-store:test
 
       - name: Release (changelog write is the commit point)
         run: |

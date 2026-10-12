@@ -123,7 +123,7 @@ packaging {
 ./gradlew compileKotlinJs compileKotlinJvm compileDebugKotlin
 
 # Compiler-plugin unit/integration tests (no device needed)
-./gradlew :rdma-kernel-compiler-plugin:test :rdma-plugin-compiler-plugin:test :rdma-tests:test
+./gradlew :rdma-kernel-compiler-plugin:test :rdma-plugin-compiler-plugin:test :tests:rdma-tests:test
 
 # Verify the kernel compiler plugin generated the expected output
 ./gradlew :kernel:compileKotlinJvm

@@ -77,7 +77,7 @@ EOF
 }
 
 echo "== 1/3: hard gate — tests =="
-(cd "$ROOT_DIR" && ./gradlew :rdma-tests:test :rdma-kernel-compiler-plugin:test :rdma-store:test)
+(cd "$ROOT_DIR" && ./gradlew :tests:rdma-tests:test :rdma-kernel-compiler-plugin:test :rdma-store:test)
 
 echo "== 2/3: release ($COMMAND) =="
 cd "$ROOT_DIR"

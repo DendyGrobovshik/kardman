@@ -112,33 +112,72 @@ While working with `Dog` object overridden method will be called from both plugi
 
 ## Project modules
 
+The framework modules are published to `mavenLocal`
+
+### Compiler & Gradle plugins
+
+| Module | Role |
+|--------|------|
+| `:rdma-kernel-compiler-plugin` | IR compiler plugin → generates C++ JNI/JSI glue + `rdma_manifest.json` + vtable injection |
+| `:rdma-kernel-gradle-plugin` | Gradle wrapper that wires `:rdma-kernel-compiler-plugin` into kernel modules |
+| `:rdma-plugin-compiler-plugin` | FIR compiler plugin → resolves `@RDMA` usages and rewrites plugin source to JS proxy calls |
+| `:rdma-plugin-gradle-plugin` | Gradle wrapper that wires `:rdma-plugin-compiler-plugin` into plugin modules and generates the guest-side widget bridge |
+| `:rdma-app-gradle-plugin` | Gradle plugin applied to the app: generates the user bridge + aggregate bridge and compiles the generated C++ into `librdma_user.so` |
+
+### Runtime & types
+
 | Module | Role |
 |--------|------|
 | `:rdma-annotation` | `@RDMA` annotation (KMP) |
 | `:rdma-types` | Shared metadata model + `RdmaManifest` (`@Serializable` DTOs) |
-| `:kernel` | Container for kernel modules (framework-owned `:kernel:internal` + `:kernel:user:<user>`) |
-| `:rdma-kernel-compiler-plugin` | IR compiler plugin → generates C++ JNI/JSI glue + `rdma_manifest.json` + vtable injection |
-| `:rdma-kernel-gradle-plugin` | Gradle wrapper that wires `:rdma-kernel-compiler-plugin` into the kernel module |
-| `:rdma-plugin-compiler-plugin` | FIR compiler plugin → resolves @RDMA usages and rewrites plugin source to JS proxy calls |
-| `:rdma-plugin-gradle-plugin` | Gradle wrapper that wires `:rdma-plugin-compiler-plugin` into the plugin module's JVM resolve compilation and generates the guest-side widget bridge |
-| `:rdma-app-gradle-plugin` | Gradle plugin applied to the app: generates the user bridge + aggregate bridge and compiles the generated C++ into `librdma_user.so` |
-| `:rdma-runtime-android` | Android AAR: generic Hermes runtime + JNI bridge + C++ glue (exported as a prefab) |
+| `:rdma-runtime` | Android AAR: generic Hermes runtime + JNI bridge + C++ glue (exported as a prefab) |
 | `:rdma-runtime-ios` | iOS static framework: generic Hermes runtime + C ABI bridge + C++ core (`librdma_core.a`) |
-| `:rdma-store` | JVM store: plugin registry + re-sync reconciliation + P1–P4 state machine (§7.2–7.4, §8) |
-| `:kernel:internal` | Framework-owned `@RDMA` classes/widgets (standard functionality) |
-| `:kernel:user:alice` | User `alice`'s own kernel module (`@RDMA` classes) |
-| `:plugin:alice:counter` | Plugin of user `alice` (Kotlin/JS), compiles to JS executed in Hermes |
-| `:plugin:bob:services` | Plugin of user `bob` (Kotlin/JS) |
-| `:androidApp` | Android app — initializes Hermes, loads plugin JS |
-| `:iosApp` | iOS app — initializes Hermes, loads plugin `.hbc` |
-| `:rdma-tests` | JVM tests asserting on generated C++ output |
+| `:shared-runtime` | Shared JS runtime bundle (stdlib, coroutines, androidx-collection, compose-runtime) compiled to `.hbc`, loaded before the plugin bundles |
 
-The framework (all modules except the `:kernel:*` and `:plugin:*` modules and `:androidApp`)
-is generic and knows nothing about user code. `:kernel:internal` + `:kernel:user:*` and
-`:plugin:*` + `:androidApp` are a self-contained sample of *user* code: kernel modules
-declare `@RDMA` types/widgets, plugin modules use them, and `:androidApp` applies the
-`rdma-app` plugin to build the bridge into `librdma_user.so` and register it with the
-runtime through the `installUserBridge` hook.
+### Store (server side)
+
+| Module | Role |
+|--------|------|
+| `:rdma-store` | JVM HTTP store: plugin registry + re-sync reconciliation + P1–P4 state machine; serves plugin/polyfill bundles (§7.2–7.4, §8) |
+
+### Demo / sample user code (not published)
+
+| Module | Role |
+|--------|------|
+| `:kernel:internal` | Framework-owned `@RDMA` classes/widgets (standard functionality) |
+| `:kernel:user:alice` | Sample user `alice`'s kernel module (`@RDMA` classes) |
+| `:kernel:user:itest` | Integration-test fixture kernel module |
+| `:plugin:alice:counter` | Sample plugin of user `alice` (Kotlin/JS), compiles to JS executed in Hermes |
+| `:plugin:bob:services` | Sample plugin of user `bob` (Kotlin/JS) |
+| `:plugin:itest:newplug` | Integration-test fixture plugin |
+| `:androidApp` | Android demo app — initializes Hermes, loads plugin JS |
+| `:iosApp` | iOS demo app — initializes Hermes, loads plugin `.hbc` |
+
+### Tests
+
+| Module | Role |
+|--------|------|
+| `:tests:rdma-tests` | JVM tests: compiler-plugin output (C++ generation) + versioning/release/polyfill machinery |
+| `:tests:rdma-integration-tests` | Store state-machine tests + `e2e/plugin-lifecycle.sh` end-to-end suite |
+
+The framework (the compiler plugins, runtimes, types, store and `:shared-runtime`) is
+generic and knows nothing about user code. The `:kernel:*`, `:plugin:*`, `:androidApp`
+and `:iosApp` modules are a self-contained sample of *user* code: kernel modules declare
+`@RDMA` types/widgets, plugin modules use them, and `:androidApp` applies the `rdma-app`
+plugin to build the bridge into `librdma_user.so` and register it with the runtime
+through the `installUserBridge` hook.
+
+## Repository layout (not Gradle modules)
+
+- `scripts/` — build/setup/release scripts. `scripts/setup.sh` is the one-time setup entry
+  point, `scripts/setup/*.sh` are the individual steps, and `scripts/publish/` is a separate
+  minimal Gradle build that publishes only the framework modules to `mavenLocal` (plus
+  `scripts/publish/hermesc/`, which publishes the `hermesc` binary as a maven artifact).
+- `versions/` — kernel versioning state: `changelog.json` (source of truth) plus the derived
+  `rdma_hashes.json` / `rdma_floor.json` / `rdma_sources.json` snapshots per module.
+- `third_party/` — external build inputs: `kotlin/` (compiler fork submodule), `hermes/`
+  (pinned Hermes source checkout), `bin/hermesc` (built compiler).
+- `docs/` — documentation (see below).
 
 ## Docs
 

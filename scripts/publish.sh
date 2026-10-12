@@ -16,7 +16,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-./gradlew -p "$ROOT_DIR/publish" \
+./gradlew -p "$ROOT_DIR/scripts/publish" \
     :rdma-annotation:publishToMavenLocal \
     :rdma-types:publishToMavenLocal \
     :rdma-kernel-compiler-plugin:publishToMavenLocal \

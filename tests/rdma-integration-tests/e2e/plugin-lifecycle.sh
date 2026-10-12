@@ -7,12 +7,12 @@ set -euo pipefail
 # The 9 steps are each a `step_N_*` function; `main` runs them in order and any
 # failure stops the whole run (fail-fast via `set -e` + `fail`).
 #
-#   ./rdma-integration-tests/e2e/plugin-lifecycle.sh
+#   ./tests/rdma-integration-tests/e2e/plugin-lifecycle.sh
 #
 # Requirements: a booted emulator (adb devices), the framework published to
 # mavenLocal (done in step 1), and the Hermes compiler (third_party/bin/hermesc).
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GRADLE="$ROOT_DIR/gradlew"
 HERMESC="$ROOT_DIR/third_party/bin/hermesc"
 

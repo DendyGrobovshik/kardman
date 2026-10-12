@@ -18,7 +18,7 @@
 // avoids the chicken-and-egg where the demo app consumes the just-published
 // `rdma-app` Gradle plugin.
 //
-// Run with `./gradlew -p publish ...`.
+// Run with `./gradlew -p scripts/publish ...`.
 rootProject.name = "rdma-framework"
 
 pluginManagement {
@@ -39,7 +39,7 @@ pluginManagement {
 dependencyResolutionManagement {
     versionCatalogs {
         create("libs") {
-            from(files("../gradle/libs.versions.toml"))
+            from(files("../../gradle/libs.versions.toml"))
         }
     }
     repositories {
@@ -61,7 +61,7 @@ plugins {
 
 fun includeModule(name: String) {
     include(":$name")
-    project(":$name").projectDir = file("../$name")
+    project(":$name").projectDir = file("../../$name")
 }
 
 includeModule("rdma-annotation")

@@ -262,7 +262,7 @@ Android entry point. `MainActivity`:
 4. Loads `RDMAHermes-plugin.js` (compiled plugin)
 5. Polls `nativeIsReady()` and, once ready, `setContent { RdmaComposeHost.Content() }`
 
-### `:rdma-tests`
+### `:tests:rdma-tests`
 
 JVM integration tests (no Android device). They drive `CppGenerator` /
 `RdmaWidgetGenerator` directly with `RdmaClassInfo` fixtures and assert on the

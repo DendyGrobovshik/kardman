@@ -101,6 +101,15 @@ adb install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk
 
 Logcat filters for the demo: `RdmaBridge RdmaRuntime RdmaJni RDMA`.
 
+### Useful build targets
+
+| Command | What it does |
+|---------|--------------|
+| `./gradlew :androidApp:assembleDebug` | Full demo APK (the whole pipeline above) |
+| `./gradlew :plugin:alice:counter:jsBrowserDevelopmentExecutableDistribution` | Compile only the `alice:counter` plugin to JS (no native/APK) |
+| `./gradlew :kernel:internal:compileAndroidMain` | Run only the kernel compiler plugin → `kernel/internal/build/generated/rdma/` |
+| `./gradlew :rdma-kernel-compiler-plugin:test :rdma-plugin-compiler-plugin:test :tests:rdma-tests:test` | Run the compiler-plugin unit/integration tests |
+
 Force a full rebuild if caches go stale:
 
 ```bash

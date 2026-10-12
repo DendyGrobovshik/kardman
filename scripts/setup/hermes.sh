@@ -107,7 +107,7 @@ esac
 HERMESC_CLASSIFIER="$HERMESC_OS-$HERMESC_ARCH"
 
 echo "Publishing hermesc:$HERMESC_CLASSIFIER to mavenLocal ..."
-"$ROOT_DIR/gradlew" -p "$ROOT_DIR/publish/hermesc" publishToMavenLocal \
+"$ROOT_DIR/gradlew" -p "$ROOT_DIR/scripts/publish/hermesc" publishToMavenLocal \
     -PhermescPath="$ROOT_DIR/third_party/bin/hermesc" \
     -PhermescClassifier="$HERMESC_CLASSIFIER"
 
