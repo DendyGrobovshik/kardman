@@ -134,6 +134,20 @@ The framework modules are published to `mavenLocal`
 | `:rdma-runtime-ios` | iOS static framework: generic Hermes runtime + C ABI bridge + C++ core (`librdma_core.a`) |
 | `:shared-runtime` | Shared JS runtime bundle (stdlib, coroutines, androidx-collection, compose-runtime) compiled to `.hbc`, loaded before the plugin bundles |
 
+### Demo (standalone build)
+
+`demo/` is a separate Gradle build (`./gradlew -p demo ...`) that consumes the published
+framework from mavenLocal and keeps a minimal, self-contained sample — the same sample code
+as `tests/stand/`, minus the integration-test fixtures:
+
+| Module | Role |
+|--------|------|
+| `:kernel:internal` | Framework-owned `@RDMA` classes/widgets |
+| `:kernel:user:alice` | Sample user `alice`'s kernel module |
+| `:plugin:alice:counter` | Sample plugin of user `alice` (Kotlin/JS) |
+| `:androidApp` | Android demo app |
+| `:iosApp` | iOS demo app |
+
 ### Store (server side)
 
 | Module | Role |
@@ -154,20 +168,6 @@ The sample user code lives under `tests/stand/` (test fixtures in the main build
 | `:tests:stand:plugin:itest:newplug` | Integration-test fixture plugin |
 | `:tests:stand:androidApp` | Android test host — initializes Hermes, loads plugin JS |
 | `:tests:stand:iosApp` | iOS test host — initializes Hermes, loads plugin `.hbc` |
-
-### Demo (standalone build)
-
-`demo/` is a separate Gradle build (`./gradlew -p demo ...`) that consumes the published
-framework from mavenLocal and keeps a minimal, self-contained sample — the same sample code
-as `tests/stand/`, minus the integration-test fixtures:
-
-| Module | Role |
-|--------|------|
-| `:kernel:internal` | Framework-owned `@RDMA` classes/widgets |
-| `:kernel:user:alice` | Sample user `alice`'s kernel module |
-| `:plugin:alice:counter` | Sample plugin of user `alice` (Kotlin/JS) |
-| `:androidApp` | Android demo app |
-| `:iosApp` | iOS demo app |
 
 Run it with `scripts/demo.sh` (publishes the framework, static-releases the demo kernel, then
 builds the app).

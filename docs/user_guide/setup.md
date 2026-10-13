@@ -111,12 +111,51 @@ adb install -r demo/androidApp/build/outputs/apk/debug/androidApp-debug.apk
 
 Logcat filters for the demo: `RdmaBridge RdmaRuntime RdmaJni RDMA`.
 
+### iOS demo
+
+The iOS demo needs the framework published and the demo kernel released first, because
+the Xcode build phase invokes Gradle tasks that read `demo/versions/`:
+
+```bash
+./scripts/setup.sh   # once
+./scripts/demo.sh    # once: publishes the framework + static-releases the demo kernel
+```
+
+Then build the iOS app from the command line:
+
+```bash
+xcodebuild -project demo/iosApp/iosApp.xcodeproj -scheme iosApp \
+  -sdk iphonesimulator \
+  -destination 'platform=iOS Simulator,name=iPhone 17' build
+```
+
+Or open `demo/iosApp/iosApp.xcodeproj` in Xcode, select the `iosApp` scheme, pick a
+simulator, and press Run. The "Compile Kotlin Framework" build phase runs
+`./gradlew -p demo :iosApp:embedAndSignAppleFrameworkForXcode :iosApp:aotCompileJsCAbi`
+automatically (via the repository-root wrapper).
+
+### Run the demo in an IDE
+
+**Android Studio** — `demo/` is its own Gradle build (`demo/settings.gradle.kts`), so
+open it as a project rather than the repository root:
+
+1. Run `./scripts/setup.sh` once, then `./scripts/demo.sh` once.
+2. File → Open… → select the `demo/` directory.
+3. `demo/` has no Gradle wrapper; in Settings → Build Tools → Gradle set the
+   distribution to version `9.1.0` (pinned by the repository-root
+   `gradle/wrapper/gradle-wrapper.properties`).
+4. Sync, then run the `androidApp` configuration on an emulator or device.
+
+**Xcode** — open `demo/iosApp/iosApp.xcodeproj` and run the `iosApp` scheme (see
+[iOS demo](#ios-demo) above).
+
 ### Useful build targets
 
 | Command | What it does |
 |---------|--------------|
 | `./scripts/demo.sh` | Build the standalone demo (publish + release kernel + assemble APK) |
 | `./gradlew -p demo :androidApp:assembleDebug` | Full demo APK (the whole pipeline above) |
+| `./gradlew -p demo :iosApp:linkDebugFrameworkIosSimulatorArm64` | Build the iOS Kotlin/Native framework (no Xcode) |
 | `./gradlew -p demo :plugin:alice:counter:jsBrowserDevelopmentExecutableDistribution` | Compile only the `alice:counter` plugin to JS (no native/APK) |
 | `./gradlew -p demo :kernel:internal:compileAndroidMain` | Run only the kernel compiler plugin → `demo/kernel/internal/build/generated/rdma/` |
 | `./scripts/test.sh` | Run the fast JVM tests (`:tests:rdma-tests`, `:rdma-store`, compiler plugins) |

@@ -62,7 +62,9 @@ git -C "$HERMES_SRC_DIR" checkout "$HERMES_COMMIT"
 #    from the AAR, which leaves `hermes-engine::hermesvm` without the JSI symbols
 #    our runtime uses. Static linking restores them.
 JSI_FLAG='-DHERMES_BUILD_SHARED_JSI='
-if grep -q "${JSI_FLAG}True" "$HERMES_SRC_DIR/android/build.gradle.kts"; then
+# `--` is required: the pattern starts with `-D`, which grep would otherwise
+# parse as the `--devices` option and silently skip the patch.
+if grep -qF -- "${JSI_FLAG}True" "$HERMES_SRC_DIR/android/build.gradle.kts"; then
     echo "Patching HERMES_BUILD_SHARED_JSI=False ..."
     sed -i '' "s/${JSI_FLAG}True/${JSI_FLAG}False/" "$HERMES_SRC_DIR/android/build.gradle.kts"
 fi
