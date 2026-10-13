@@ -105,10 +105,11 @@ While working with `Dog` object overridden method will be called from both plugi
 
 | You want to… | Read |
 |---|---|
-| Install prerequisites, run the demo, use the framework in your own project | [setup.md](setup.md) |
-| Learn what you can express with `@RDMA` (data, UI, effects, coroutines) | [features.md](features.md) |
-| Run releases and operate the store | [releases.md](releases.md) |
-| Contribute to the framework itself (build, test, debug) | [contribution.md](contribution.md) |
+| Install prerequisites, run the demo, use the framework in your own project | [setup.md](docs/user_guide/setup.md) |
+| Fix a failing setup, build or demo run | [troubleshooting.md](docs/user_guide/troubleshooting.md) |
+| Learn what you can express with `@RDMA` (data, UI, effects, coroutines) | [features.md](docs/user_guide/features.md) |
+| Run releases and operate the store | [releases.md](docs/user_guide/releases.md) |
+| Contribute to the framework itself (build, test, debug) | [contribution.md](docs/user_guide/contribution.md) |
 
 ## Project modules
 
@@ -207,6 +208,7 @@ modules use them, and the app module applies the `rdma-app` plugin to build the 
 User guides (`docs/user_guide/`):
 
 - [Setup](docs/user_guide/setup.md)
+- [Troubleshooting](docs/user_guide/troubleshooting.md)
 - [How to use](docs/user_guide/how_to_use.md)
 - [Features](docs/user_guide/features.md)
 - [Releases & operations](docs/user_guide/releases.md)

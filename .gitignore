@@ -34,3 +34,10 @@ demo/androidApp/src/main/assets/kotlin/
 # release pipeline into <rdmaVersionsDir> (default versions/); never committed.
 versions/
 demo/versions/
+# Gradle wrapper that Android Studio generates inside `demo/` (or `./gradlew -p demo
+# wrapper`). The repository-root wrapper is the single source of truth for the Gradle
+# version, so this local copy is not committed; demo/gradle/libs.versions.toml and
+# demo/gradle/gradle-daemon-jvm.properties stay tracked.
+demo/gradlew
+demo/gradlew.bat
+demo/gradle/wrapper/
