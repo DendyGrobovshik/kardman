@@ -82,7 +82,7 @@ To consume them from a separate project:
    `dependencyResolutionManagement`).
 
 3. **Create the three user-side modules** (a complete working example lives in the
-   companion `wb2` project — copy its structure):
+   in-repo `demo/` build and the companion `wb2` project — copy their structure):
 
    | Module | Purpose | Plugins |
    |--------|---------|---------|
@@ -153,7 +153,14 @@ To consume them from a separate project:
    startup, smaller size) and emits the `rdma-modules.json` manifest — load those `.hbc`
    assets instead of `.js`. Poll `nativeContentVersion()` and wrap the content in
    `key(contentVersion)` so a dynamically-loaded plugin's `registerContent` triggers a
-   host recomposition (see the in-repo `androidApp` for the reference).
+   host recomposition (see the in-repo `demo/androidApp` for the reference).
 
-See the in-repo `androidApp`, `kernel` and `plugin` modules for a self-contained
-reference of this exact wiring.
+6. **Release your kernel before building plugins.** A plugin can only be compiled
+   against a *released* kernel: the plugin Gradle plugin reads the changelog's `h` from
+   `rdmaVersionsDir` (default `versions/`) and fails the build if the kernel has never
+   been released. Run a static release for each kernel module first, e.g. via the release
+   CLI (`static-release <analysis.json> <versionsDir> …`). The in-repo `demo/` build does
+   this for you in `scripts/demo.sh`.
+
+See the in-repo `demo/` build (and the `tests/stand/*` fixtures in the main build) for a
+self-contained reference of this exact wiring.

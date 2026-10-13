@@ -29,12 +29,12 @@ tasks.register<Delete>("cleanGenerated") {
     description = "Clean all generated/cached outputs to force full rebuild"
 
     delete(
-        "kernel/build/generated",
-        "plugin/build/generated",
-        "plugin/build/compileSync",
-        "plugin/build/kotlin-webpack",
-        "plugin/build/dist",
+        "tests/stand/kernel/build/generated",
+        "tests/stand/plugin/build/generated",
+        "tests/stand/plugin/build/compileSync",
+        "tests/stand/plugin/build/kotlin-webpack",
+        "tests/stand/plugin/build/dist",
         "rdma-runtime/.cxx",
-        "androidApp/src/main/assets/kotlin",
+        "tests/stand/androidApp/src/main/assets/kotlin",
     )
 }

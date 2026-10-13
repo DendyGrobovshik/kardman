@@ -5,7 +5,7 @@ name: release
 #
 #   gh workflow run release.yml \
 #     -f command=dynamic-release \
-#     -f analysisJson=kernel/user/alice/build/generated/rdma/rdma_analysis.json \
+#     -f analysisJson=tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json \
 #     -f versionsDir=versions \
 #     -f internalModules=internal \
 #     -f hotfix=false

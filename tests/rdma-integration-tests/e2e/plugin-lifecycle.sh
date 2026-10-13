@@ -21,17 +21,18 @@ STORE_PORT=8080
 APP_ID="org.example"
 RESYNC_ACTION="org.example.rdma.RESYNC"
 
-# Scratch state: a copy of versions/ so the repo's committed changelog is never mutated.
+# Scratch state: the versioning directory lives under a fresh `mktemp` dir, so the
+# repo is never mutated and every run starts from an empty changelog (idempotent).
 IT_DIR="$(mktemp -d)"
 VERSIONS_DIR="$IT_DIR/versions"
 BUNDLES_DIR="$VERSIONS_DIR/bundles"
 STORE_PID=""
 
 # The plugin/user-module fixtures are in-repo modules (bake-in-app disabled for the plugin).
-NEWPLUG=":plugin:itest:newplug"
-NEWPLUG_SRC="$ROOT_DIR/plugin/itest/newplug/src/kotlin/com/example/plugin/itest/NewPlug.kt"
-USER_ITEST_SRC="$ROOT_DIR/kernel/user/itest/src/commonMain/kotlin/com/example/kernel/user/itest/Itest.kt"
-ALICE_TAGLINE_SRC="$ROOT_DIR/kernel/user/alice/src/commonMain/kotlin/com/example/kernel/user/alice/Tagline.kt"
+NEWPLUG=":tests:stand:plugin:itest:newplug"
+NEWPLUG_SRC="$ROOT_DIR/tests/stand/plugin/itest/newplug/src/kotlin/com/example/plugin/itest/NewPlug.kt"
+USER_ITEST_SRC="$ROOT_DIR/tests/stand/kernel/user/itest/src/commonMain/kotlin/com/example/kernel/user/itest/Itest.kt"
+ALICE_TAGLINE_SRC="$ROOT_DIR/tests/stand/kernel/user/alice/src/commonMain/kotlin/com/example/kernel/user/alice/Tagline.kt"
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -40,7 +41,7 @@ ALICE_TAGLINE_SRC="$ROOT_DIR/kernel/user/alice/src/commonMain/kotlin/com/example
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo; echo "==== $* ===="; }
 
-run_gradle() { "$GRADLE" -p "$ROOT_DIR" --console=plain "$@"; }
+run_gradle() { "$GRADLE" -p "$ROOT_DIR" --console=plain -PrdmaVersionsDir="$VERSIONS_DIR" "$@"; }
 
 adb_dev() { adb devices | grep -q 'emulator-.*\sdevice' || fail "no emulator attached"; }
 
@@ -102,7 +103,7 @@ build_plugin_bundle() { # build_plugin_bundle <outHbc>  → compiles NEWPLUG js 
     local out="$1"
     run_gradle "$NEWPLUG:jsProductionExecutableCompileSync"
     local js
-    js=$(find "$ROOT_DIR/plugin/itest/newplug/build/compileSync" -name 'RDMAHermes-plugin-itest-newplug.js' | head -1)
+    js=$(find "$ROOT_DIR/tests/stand/plugin/itest/newplug/build/compileSync" -name 'RDMAHermes-plugin-itest-newplug.js' | head -1)
     [ -n "$js" ] || fail "no plugin JS produced"
     "$HERMESC" -O -emit-binary -out "$out" "$js"
 }
@@ -111,26 +112,36 @@ build_plugin_bundle() { # build_plugin_bundle <outHbc>  → compiles NEWPLUG js 
 # steps
 # ---------------------------------------------------------------------------
 
+# 0) Static-release the kernel from an empty versions dir, so the app/plugin builds
+# below have a changelog to read (`builtAgainstVersion()` fails without one).
+step_0_static_release() {
+    step "0: static release the kernel from empty versions"
+    run_gradle :tests:stand:kernel:internal:compileAndroidMain
+    release "static-release" "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-0"
+    run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
+    release "static-release" "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-0"
+}
+
 # 1) Compile + launch the app (with the built-in kernel + plugins baked in).
 step_1_build_and_launch_app() {
     step "1: build and launch app"
     "$ROOT_DIR/scripts/publish.sh"
-    run_gradle :androidApp:assembleDebug
-    adb install -r "$ROOT_DIR/androidApp/build/outputs/apk/debug/androidApp-debug.apk"
+    run_gradle :tests:stand:androidApp:assembleDebug
+    adb install -r "$ROOT_DIR/tests/stand/androidApp/build/outputs/apk/debug/androidApp-debug.apk"
     adb logcat -c
     adb shell am force-stop "$APP_ID"
     adb shell am start -n "$APP_ID/.MainActivity" >/dev/null
     wait_logcat "RDMA" "Runtime ready"
-    register_baked_plugin "alice:counter" "$ROOT_DIR/androidApp/src/main/assets/kotlin/RDMAHermes-plugin-alice-counter.hbc"
-    register_baked_plugin "bob:services" "$ROOT_DIR/androidApp/src/main/assets/kotlin/RDMAHermes-plugin-bob-services.hbc"
+    register_baked_plugin "alice:counter" "$ROOT_DIR/tests/stand/androidApp/src/main/assets/kotlin/RDMAHermes-plugin-alice-counter.hbc"
+    register_baked_plugin "bob:services" "$ROOT_DIR/tests/stand/androidApp/src/main/assets/kotlin/RDMAHermes-plugin-bob-services.hbc"
 }
 
 register_baked_plugin() { # register_baked_plugin <pluginId> <hbc>
     local id="$1" hbc="$2"
     local json
     case "$id" in
-        "alice:counter") json="$ROOT_DIR/plugin/alice/counter/build/generated/rdma/plugin.json" ;;
-        "bob:services")  json="$ROOT_DIR/plugin/bob/services/build/generated/rdma/plugin.json" ;;
+        "alice:counter") json="$ROOT_DIR/tests/stand/plugin/alice/counter/build/generated/rdma/plugin.json" ;;
+        "bob:services")  json="$ROOT_DIR/tests/stand/plugin/bob/services/build/generated/rdma/plugin.json" ;;
         *) fail "unknown baked plugin $id" ;;
     esac
     local hash version
@@ -163,7 +174,7 @@ EOF
     local hbc="$IT_DIR/newplug.hbc"
     build_plugin_bundle "$hbc"
     local hash version
-    read -r hash version <<<"$(plugin_release "$ROOT_DIR/plugin/itest/newplug/build/generated/rdma/plugin.json" "$hbc")"
+    read -r hash version <<<"$(plugin_release "$ROOT_DIR/tests/stand/plugin/itest/newplug/build/generated/rdma/plugin.json" "$hbc")"
     seed_bundle "$hash" "$hbc"
     echo "released $NEWPLUG v$version ($hash)"
 }
@@ -193,8 +204,8 @@ fun itestPlaceholder(): String = "placeholder"
 @RDMA
 fun itestGreeting(): String = "hello-from-itest-kernel"
 EOF
-    run_gradle :kernel:user:itest:compileAndroidMain
-    local analysis="$ROOT_DIR/kernel/user/itest/build/generated/rdma/rdma_analysis.json"
+    run_gradle :tests:stand:kernel:user:itest:compileAndroidMain
+    local analysis="$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json"
     local polyfillOut="$IT_DIR/polyfill-f"
     release "dynamic-release" "$analysis" "$polyfillOut"
     local h
@@ -225,7 +236,7 @@ EOF
     local hbc="$IT_DIR/newplug-v2.hbc"
     build_plugin_bundle "$hbc"
     local hash version
-    read -r hash version <<<"$(plugin_release "$ROOT_DIR/plugin/itest/newplug/build/generated/rdma/plugin.json" "$hbc")"
+    read -r hash version <<<"$(plugin_release "$ROOT_DIR/tests/stand/plugin/itest/newplug/build/generated/rdma/plugin.json" "$hbc")"
     seed_bundle "$hash" "$hbc"
     echo "released $NEWPLUG v$version"
 }
@@ -244,10 +255,10 @@ step_5_load_updated_bundles() {
 # 6) Static release: bake the accumulated kernel into native, rebuild + relaunch.
 step_6_static_release_new_app() {
     step "6: static release (bump H, bake native)"
-    local analysis="$ROOT_DIR/kernel/user/itest/build/generated/rdma/rdma_analysis.json"
+    local analysis="$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json"
     release "static-release" "$analysis" "$IT_DIR/polyfill-s"
-    run_gradle :androidApp:assembleDebug
-    adb install -r "$ROOT_DIR/androidApp/build/outputs/apk/debug/androidApp-debug.apk"
+    run_gradle :tests:stand:androidApp:assembleDebug
+    adb install -r "$ROOT_DIR/tests/stand/androidApp/build/outputs/apk/debug/androidApp-debug.apk"
     adb shell am force-stop "$APP_ID"
     adb shell am start -n "$APP_ID/.MainActivity" >/dev/null
     wait_logcat "RDMA" "Runtime ready"
@@ -276,8 +287,8 @@ import io.github.dendygrobovshik.kardman.Polyfill
 @Polyfill(`for` = "com.example.kernel.user.alice.aliceTagline")
 internal fun aliceTagline_polyfill(): String = "alice-polyfill"
 EOF
-    run_gradle :kernel:user:alice:compileAndroidMain
-    local analysis="$ROOT_DIR/kernel/user/alice/build/generated/rdma/rdma_analysis.json"
+    run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
+    local analysis="$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json"
     local polyfillOut="$IT_DIR/polyfill-r"
     release "dynamic-release" "$analysis" "$polyfillOut"
     if [ -f "$polyfillOut/polyfill.hbc" ]; then
@@ -310,12 +321,10 @@ trap cleanup EXIT
 main() {
     adb_dev
     mkdir -p "$VERSIONS_DIR"
-    cp "$ROOT_DIR/versions/changelog.json" "$VERSIONS_DIR/" 2>/dev/null || true
-    cp -r "$ROOT_DIR/versions/internal" "$VERSIONS_DIR/" 2>/dev/null || true
-    cp -r "$ROOT_DIR/versions/user_alice" "$VERSIONS_DIR/" 2>/dev/null || true
 
     store_start
 
+    step_0_static_release
     step_1_build_and_launch_app
     step_2_add_plugin
     step_3_load_plugin_in_running_app

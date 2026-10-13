@@ -26,6 +26,7 @@ import org.jetbrains.kotlin.config.CompilerConfigurationKey
 import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrarAdapter
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
+import java.net.URLDecoder
 
 object RdmaPluginKeys {
     val MANIFEST: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("rdmaManifest")
@@ -111,7 +112,7 @@ class RdmaPluginCompilerRegistrar : CompilerPluginRegistrar() {
         try {
             kotlinx.serialization.json.Json.decodeFromString(
                 MapSerializer(String.serializer(), Int.serializer()),
-                json,
+                URLDecoder.decode(json, "UTF-8"),
             )
         } catch (e: Exception) {
             emptyMap()

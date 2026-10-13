@@ -101,7 +101,6 @@ class RdmaAppGradlePlugin : Plugin<Project> {
 
         // Immutable, config-cache-safe values captured by the task actions.
         val kernelCppDirs = kernelProjects.map { File(it.buildDir, "generated/rdma/cpp") }
-        val pluginDevSyncDirs = pluginProjects.map { File(it.buildDir, "compileSync/js/main/developmentExecutable/kotlin") }
         val pluginProdSyncDirs = pluginProjects.map { File(it.buildDir, "compileSync/js/main/productionExecutable/kotlin") }
 
         // The shared-runtime module aggregates the common dependencies (compose runtime,
@@ -205,10 +204,36 @@ class RdmaAppGradlePlugin : Plugin<Project> {
         }
 
         // 3) Wire the compiled plugin JS of every plugin module into the app's assets.
+        // `hermesc` is resolved from the configured `rdmaHermesc` path or, when unset, from
+        // the `hermesc` maven artifact (see `resolveHermesc`), so the AOT path is always used.
         if (pluginProjects.isNotEmpty()) {
-            if (!hermesc.isNullOrBlank()) {
-                val (hermescResolve, hermescBinary) = resolveHermesc(target, hermesc)
-                val aotCompileJs = target.tasks.register("aotCompileJs") { task ->
+            val (hermescResolve, hermescBinary) = resolveHermesc(target, hermesc ?: "")
+            val aotCompileJs = target.tasks.register("aotCompileJs") { task ->
+                pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
+                if (sharedRuntimeProject != null) {
+                    task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
+                }
+                if (hermescResolve != null) {
+                    task.dependsOn(hermescResolve)
+                }
+                task.doLast {
+                    compileSharedBundles(hermescBinary.get(), assetsKotlin, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
+                }
+            }
+            target.pluginManager.withPlugin("com.android.application") {
+                target.tasks.named("preBuild") { it.dependsOn(aotCompileJs) }
+                target.tasks.configureEach(Action<Task> { task ->
+                    if (task.name == "mergeDebugAssets" || task.name == "mergeReleaseAssets") {
+                        pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
+                    }
+                })
+            }
+            // iOS: emit the same AOT-compiled `.hbc` bundles into the app's build dir
+            // (`build/generated/rdma/hbc`). The Xcode project copies them into the app
+            // bundle and the host evaluates them via RdmaBridge.nativeEvalBytes.
+            target.pluginManager.withPlugin("org.jetbrains.kotlin.multiplatform") {
+                val hbcDir = File(genDir, "hbc")
+                target.tasks.register("aotCompileJsCAbi") { task ->
                     pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
                     if (sharedRuntimeProject != null) {
                         task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
@@ -217,58 +242,8 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                         task.dependsOn(hermescResolve)
                     }
                     task.doLast {
-                        compileSharedBundles(hermescBinary.get(), assetsKotlin, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
+                        compileSharedBundles(hermescBinary.get(), hbcDir, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
                     }
-                }
-                target.pluginManager.withPlugin("com.android.application") {
-                    target.tasks.named("preBuild") { it.dependsOn(aotCompileJs) }
-                    target.tasks.configureEach(Action<Task> { task ->
-                        if (task.name == "mergeDebugAssets" || task.name == "mergeReleaseAssets") {
-                            pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
-                        }
-                    })
-                }
-                // iOS: emit the same AOT-compiled `.hbc` bundles into the app's build dir
-                // (`build/generated/rdma/hbc`). The Xcode project copies them into the app
-                // bundle and the host evaluates them via RdmaBridge.nativeEvalBytes.
-                target.pluginManager.withPlugin("org.jetbrains.kotlin.multiplatform") {
-                    val hbcDir = File(genDir, "hbc")
-                    val aotCompileJsCAbi = target.tasks.register("aotCompileJsCAbi") { task ->
-                        pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
-                        if (sharedRuntimeProject != null) {
-                            task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
-                        }
-                        if (hermescResolve != null) {
-                            task.dependsOn(hermescResolve)
-                        }
-                        task.doLast {
-                            compileSharedBundles(hermescBinary.get(), hbcDir, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
-                        }
-                    }
-                }
-            } else {
-                val copyPluginJs = target.tasks.register("copyPluginJs") { task ->
-                    pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsBrowserDevelopmentExecutableDistribution") }
-                    task.doLast {
-                        assetsKotlin.mkdirs()
-                        assetsKotlin.listFiles { f -> f.extension in listOf("js", "map") }?.forEach { it.delete() }
-                        for (srcDir in pluginDevSyncDirs) {
-                            srcDir.listFiles { f -> f.extension in listOf("js", "map") }?.forEach { f ->
-                                f.copyTo(File(assetsKotlin, f.name), overwrite = true)
-                            }
-                        }
-                    }
-                }
-                target.pluginManager.withPlugin("com.android.application") {
-                    target.tasks.named("preBuild") { it.dependsOn(copyPluginJs) }
-                    target.tasks.configureEach(Action<Task> { task ->
-                        if (task.name == "mergeDebugAssets") {
-                            pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsBrowserDevelopmentExecutableDistribution") }
-                        }
-                        if (task.name == "mergeReleaseAssets") {
-                            pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsBrowserProductionExecutableDistribution") }
-                        }
-                    })
                 }
             }
         }

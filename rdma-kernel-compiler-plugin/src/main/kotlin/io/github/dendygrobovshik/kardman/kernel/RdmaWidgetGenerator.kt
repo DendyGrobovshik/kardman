@@ -21,7 +21,7 @@ import java.io.OutputStream
 
 /**
  * Generates the typed, per-widget host bridge (Variant A):
- *  - `RdmaWidgetEntries.kt`  — one `@Composable` entry per widget (runs in `rdma-runtime-android`),
+ *  - `RdmaWidgetEntries.kt`  — one `@Composable` entry per widget (runs in `rdma-runtime`),
  *    marshaling content/callback lambdas via `RdmaComposeHost.nativeInvokeScopeBlock`/`nativeInvokeCallback`.
  *  - `RdmaWidgetBridge.h/cpp` — one JSI `HostFunction` per widget (`RDMA.composeXxx`) + JNI cache.
  *

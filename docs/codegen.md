@@ -55,7 +55,7 @@ and header set, which is invisible at this module's generation time.
 To stay decoupled, the codegen is **type-erased**:
 
 - every generated `{Class}NativeState` derives from a shared `RdmaObjectNativeState`
-  (`rdma-runtime-android` header), which owns the global JVM ref and exposes a
+  (`rdma-runtime` header), which owns the global JVM ref and exposes a
   **non-virtual inline** `getObject()`;
 - a `Ref` **parameter** is unpacked via
   `std::static_pointer_cast<RdmaObjectNativeState>(obj.getNativeState(r))->getObject()`
@@ -240,7 +240,7 @@ source never reaches the JS compiler.
 │    androidApp/build/generated/  │
 │    rdma/cpp/generated/          │
 └─────────────────────────────────┘
-                │ CMake / NDK (links rdma-runtime-android prefab)
+                │ CMake / NDK (links rdma-runtime prefab)
                 ▼
 ┌─────────────────────────────────┐
 │ 4. Compile C++ → librdma_user.so│

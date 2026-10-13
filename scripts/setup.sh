@@ -8,8 +8,8 @@ set -euo pipefail
 #   3. Hermes (iOS)          -> scripts/setup/hermes-ios.sh (xcframework; skipped on non-macOS)
 #   4. Framework publish     -> scripts/publish.sh        (publishes framework modules to mavenLocal)
 #
-# After this, the demo is built with the usual Gradle command:
-#   ./gradlew :androidApp:assembleDebug
+# After this, build the standalone demo with:
+#   ./scripts/demo.sh
 #
 # Each step is idempotent (Gradle/CMake caches are reused on re-runs).
 
@@ -20,4 +20,4 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$ROOT_DIR/scripts/setup/hermes-ios.sh"
 "$ROOT_DIR/scripts/publish.sh"
 
-echo "Setup complete. Build the demo with: ./gradlew :androidApp:assembleDebug"
+echo "Setup complete. Build the demo with: ./scripts/demo.sh"

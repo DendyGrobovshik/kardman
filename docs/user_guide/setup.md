@@ -79,13 +79,23 @@ It runs four steps, each in its own script under [`scripts/setup/`](../../script
 
 ## Run the demo
 
-After setup, assemble the demo APK:
+After setup, build the standalone demo with:
 
 ```bash
-./gradlew :androidApp:assembleDebug
+./scripts/demo.sh
 ```
 
-This runs the entire pipeline:
+This publishes the framework, static-releases the demo kernel into `demo/versions/`,
+and assembles the demo APK. Alternatively, run the equivalent Gradle steps by hand:
+
+```bash
+./scripts/publish.sh
+./gradlew -p demo :kernel:internal:compileAndroidMain :kernel:user:alice:compileAndroidMain
+# (release the demo kernel into demo/versions/, then:)
+./gradlew -p demo :androidApp:assembleDebug
+```
+
+The pipeline:
 
 1. **Kernel compiler plugin** — generates C++ glue + `rdma_manifest.json` + injects the vtable
 2. **Plugin compiler plugin** — reads the manifest and rewrites the plugin source
@@ -96,7 +106,7 @@ This runs the entire pipeline:
 Install the result on a device/emulator:
 
 ```bash
-adb install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk
+adb install -r demo/androidApp/build/outputs/apk/debug/androidApp-debug.apk
 ```
 
 Logcat filters for the demo: `RdmaBridge RdmaRuntime RdmaJni RDMA`.
@@ -105,16 +115,17 @@ Logcat filters for the demo: `RdmaBridge RdmaRuntime RdmaJni RDMA`.
 
 | Command | What it does |
 |---------|--------------|
-| `./gradlew :androidApp:assembleDebug` | Full demo APK (the whole pipeline above) |
-| `./gradlew :plugin:alice:counter:jsBrowserDevelopmentExecutableDistribution` | Compile only the `alice:counter` plugin to JS (no native/APK) |
-| `./gradlew :kernel:internal:compileAndroidMain` | Run only the kernel compiler plugin → `kernel/internal/build/generated/rdma/` |
-| `./gradlew :rdma-kernel-compiler-plugin:test :rdma-plugin-compiler-plugin:test :tests:rdma-tests:test` | Run the compiler-plugin unit/integration tests |
+| `./scripts/demo.sh` | Build the standalone demo (publish + release kernel + assemble APK) |
+| `./gradlew -p demo :androidApp:assembleDebug` | Full demo APK (the whole pipeline above) |
+| `./gradlew -p demo :plugin:alice:counter:jsBrowserDevelopmentExecutableDistribution` | Compile only the `alice:counter` plugin to JS (no native/APK) |
+| `./gradlew -p demo :kernel:internal:compileAndroidMain` | Run only the kernel compiler plugin → `demo/kernel/internal/build/generated/rdma/` |
+| `./scripts/test.sh` | Run the fast JVM tests (`:tests:rdma-tests`, `:rdma-store`, compiler plugins) |
 
 Force a full rebuild if caches go stale:
 
 ```bash
-rm -rf kernel/internal/build kernel/user/alice/build plugin/alice/counter/build plugin/bob/services/build rdma-runtime/.cxx .gradle/configuration-cache
-./gradlew :androidApp:assembleDebug --no-configuration-cache --rerun-tasks
+rm -rf demo/kernel/internal/build demo/kernel/user/alice/build demo/plugin/alice/counter/build demo/.gradle/configuration-cache
+./gradlew -p demo :androidApp:assembleDebug --no-configuration-cache --rerun-tasks
 ```
 
 ## How to use

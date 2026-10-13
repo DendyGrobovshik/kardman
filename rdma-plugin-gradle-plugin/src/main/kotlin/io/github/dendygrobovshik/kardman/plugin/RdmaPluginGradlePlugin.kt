@@ -15,6 +15,7 @@
  */
 package io.github.dendygrobovshik.kardman.plugin
 
+import org.gradle.api.GradleException
 import org.gradle.api.Project
 import org.gradle.api.provider.Provider
 import org.jetbrains.kotlin.gradle.plugin.KotlinCompilation
@@ -25,6 +26,7 @@ import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
 import groovy.json.JsonSlurper
 import groovy.json.JsonOutput
 import java.io.File
+import java.net.URLEncoder
 
 private const val DEFAULT_PLUGIN_PROJECT = ":plugin"
 private const val DEFAULT_PLUGIN_ROOT_PACKAGE = "com.example.plugin"
@@ -69,17 +71,30 @@ private fun Project.pluginId(): String {
     return suffix.replace(':', '.').replaceFirst('.', ':')
 }
 
-/** Latest kernel version from `versions/changelog.json` (the `builtAgainst` value). */
+/** The kernel versioning directory (changelog + derived snapshots). */
+private fun Project.rdmaVersionsDir(): File {
+    val dir = findProperty("rdmaVersionsDir")?.toString()
+        ?: rootProject.findProperty("rdmaVersionsDir")?.toString()
+        ?: "versions"
+    val file = File(dir)
+    return if (file.isAbsolute) file else File(rootProject.projectDir, dir)
+}
+
+/** Latest kernel version from `<rdmaVersionsDir>/changelog.json` (the `builtAgainst` value). */
 private fun Project.builtAgainstVersion(): Int {
-    val changelog = File(rootProject.projectDir, "versions/changelog.json")
-    if (!changelog.isFile) return 0
-    return try {
-        val parsed = JsonSlurper().parseText(changelog.readText()) as Map<*, *>
-        val entries = parsed["entries"] as? List<*> ?: return 0
-        entries.mapNotNull { (it as? Map<*, *>)?.get("version") as? Number }.maxOfOrNull { it.toInt() } ?: 0
-    } catch (e: Exception) {
-        0
+    val changelog = File(rdmaVersionsDir(), "changelog.json")
+    if (!changelog.isFile) {
+        throw GradleException(
+            "Kernel has not been released: no changelog at ${changelog.absolutePath}. " +
+                "Run a static release of the kernel modules first.",
+        )
     }
+    val parsed = JsonSlurper().parseText(changelog.readText()) as Map<*, *>
+    val entries = parsed["entries"] as? List<*>
+        ?: throw GradleException("Malformed changelog at ${changelog.absolutePath}: missing 'entries'")
+    return entries.mapNotNull { (it as? Map<*, *>)?.get("version") as? Number }
+        .maxOfOrNull { it.toInt() }
+        ?: throw GradleException("Malformed changelog at ${changelog.absolutePath}: no versioned entries")
 }
 
 /** Merged floor map (node FQN → floor) over the visible kernel modules. */
@@ -87,7 +102,7 @@ private fun Project.floorMap(kernelContainer: String, visiblePaths: List<String>
     val merged = mutableMapOf<String, Int>()
     for (kernelPath in visiblePaths) {
         val moduleId = kernelModuleIdOf(kernelContainer, kernelPath)
-        val file = File(rootProject.projectDir, "versions/$moduleId/rdma_floor.json")
+        val file = File(rdmaVersionsDir(), "$moduleId/rdma_floor.json")
         if (!file.isFile) continue
         try {
             val parsed = JsonSlurper().parseText(file.readText()) as Map<*, *>
@@ -257,7 +272,13 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
                 ?: project.rootProject.findProperty("rdmaPluginVersion")?.toString()
                 ?: "1").toIntOrNull() ?: 1
             val builtAgainst = project.builtAgainstVersion()
-            val floorMapJson = JsonOutput.toJson(project.floorMap(kernelContainer, visiblePaths))
+            // The floor map JSON may contain commas, which would break the comma-separated
+            // `plugin:<id>:<option>=<value>` CLI option format; URL-encode it (the compiler
+            // plugin URL-decodes it back before parsing the JSON).
+            val floorMapJson = URLEncoder.encode(
+                JsonOutput.toJson(project.floorMap(kernelContainer, visiblePaths)),
+                "UTF-8",
+            )
 
             listOf(
                 SubpluginOption("rdmaManifest", manifestPaths.joinToString(File.pathSeparator)),

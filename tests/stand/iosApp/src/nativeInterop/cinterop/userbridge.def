@@ -1,0 +1,2 @@
+headers = rdma_user_bridge.h
+package = org.example.ios
