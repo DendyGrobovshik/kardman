@@ -9,6 +9,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The root build includes the Android modules, so Gradle needs the SDK location.
+source "$ROOT_DIR/scripts/android-sdk.sh"
+ensure_android_sdk "$ROOT_DIR" || exit 1
+
 ./gradlew -p "$ROOT_DIR" \
     :tests:rdma-tests:test \
     :rdma-store:test \

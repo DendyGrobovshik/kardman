@@ -15,6 +15,12 @@ set -euo pipefail
 # written next to the `.kt` sources.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The Gradle invocations below configure the root build (Android modules included),
+# so the SDK location must be known; it is detected automatically.
+source "$ROOT_DIR/scripts/android-sdk.sh"
+ensure_android_sdk "$ROOT_DIR" || exit 1
+
 COMMAND="${1:?usage: release.sh <command> <analysis.json> <versionsDir> [polyfillOutDir] [internalModules] [telemetryFile]}"
 ANALYSIS_JSON="${2:?}"
 VERSIONS_DIR="${3:?}"

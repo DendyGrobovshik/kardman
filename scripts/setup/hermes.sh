@@ -32,10 +32,11 @@ HERMES_BRANCH="${HERMES_BRANCH:-static_h}"
 HERMES_COMMIT="${HERMES_COMMIT:-a1154cb46a9cfe03a96fcdae96ab5e5cf5125c66}"
 HERMES_SRC_DIR="${HERMES_SRC_DIR:-$ROOT_DIR/third_party/hermes}"
 
-if [[ -z "${ANDROID_HOME:-}${ANDROID_SDK_ROOT:-}" ]]; then
-    echo "error: ANDROID_HOME or ANDROID_SDK_ROOT must be set" >&2
-    exit 1
-fi
+# The SDK is located automatically: ANDROID_HOME/ANDROID_SDK_ROOT, else sdk.dir in
+# local.properties, else the usual install location. ensure_android_sdk exports it
+# for the Hermes Gradle build, so a first-time checkout needs no manual setup.
+source "$ROOT_DIR/scripts/android-sdk.sh"
+ensure_android_sdk "$ROOT_DIR" || exit 1
 
 # The Hermes Android build's Gradle wrapper does not run on JDK 24/25; force JDK 17.
 export JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 17 2>/dev/null || true)}"
@@ -86,6 +87,8 @@ echo "Building and publishing hermes-android:$HERMES_VERSION to mavenLocal ..."
 #    will not load. (Never rely on a stale committed binary.)
 echo "Building host hermesc ..."
 if [[ ! -f "$HERMES_SRC_DIR/build_host_hermesc/bin/hermesc" ]]; then
+    # cmake + ninja are taken from PATH, or from the Android SDK that ships both.
+    ensure_cmake_and_ninja "$ANDROID_HOME" "$ROOT_DIR" || exit 1
     (cd "$HERMES_SRC_DIR" && cmake -S . -B build_host_hermesc -DCMAKE_BUILD_TYPE=Release)
     (cd "$HERMES_SRC_DIR" && cmake --build ./build_host_hermesc --target hermesc)
 fi

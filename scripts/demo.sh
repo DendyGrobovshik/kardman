@@ -7,10 +7,15 @@ set -euo pipefail
 # `h`), this script first static-releases the demo kernel into `demo/versions`,
 # then assembles the app.
 #
-# Requirements: `scripts/setup.sh` (Kotlin fork + Hermes) has run once, and the
-# Android SDK is available (ANDROID_HOME or `demo/local.properties`).
+# Requirements: `scripts/setup.sh` (Kotlin fork + Hermes) has run once. The
+# Android SDK is detected automatically (see scripts/android-sdk.sh).
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The demo app is Android, so the Gradle build needs the SDK location.
+source "$ROOT_DIR/scripts/android-sdk.sh"
+ensure_android_sdk "$ROOT_DIR" || exit 1
+
 VERSIONS_DIR="$ROOT_DIR/demo/versions"
 POLYFILL_OUT="$ROOT_DIR/demo/build/polyfill"
 

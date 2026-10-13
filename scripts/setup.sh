@@ -15,6 +15,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Locate the Android SDK once and export it for every step below. Failing here —
+# with instructions — beats failing an hour later inside the Hermes build.
+source "$ROOT_DIR/scripts/android-sdk.sh"
+ensure_android_sdk "$ROOT_DIR" || exit 1
+
 "$ROOT_DIR/scripts/setup/kotlin.sh"
 "$ROOT_DIR/scripts/setup/hermes.sh"
 "$ROOT_DIR/scripts/setup/hermes-ios.sh"

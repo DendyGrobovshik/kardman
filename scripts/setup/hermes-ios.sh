@@ -39,6 +39,10 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 0
 fi
 
+# cmake + ninja come from PATH, or from the Android SDK (which bundles both).
+source "$ROOT_DIR/scripts/android-sdk.sh"
+ensure_cmake_and_ninja "" "$ROOT_DIR" || exit 1
+
 for tool in git cmake ninja xcodebuild; do
     command -v "$tool" > /dev/null || { echo "error: $tool is required" >&2; exit 1; }
 done

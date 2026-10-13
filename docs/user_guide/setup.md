@@ -31,10 +31,26 @@ your own project, see [How to use](how_to_use.md).
 The only things you need installed on the host:
 
 - **Android SDK** (compileSdk 36) and **NDK** (28+) — the C++ bridge is built with CMake.
-- **`ANDROID_HOME`** (or `ANDROID_SDK_ROOT`) pointing at the SDK.
 - **JDK 17** — required by the Kotlin fork build and the Hermes Android build.
 - **git** and network access — the setup script clones Hermes and downloads dependencies.
-- For iOS: **Xcode** (with an iOS simulator) plus `cmake` and `ninja`.
+- **`cmake`** and **`ninja`** — needed to build the host `hermesc`. They do not have to be
+  on `PATH`: the scripts fall back to the copies bundled with the Android SDK
+  (`<sdk>/cmake/<version>/bin`).
+- For iOS: **Xcode** (with an iOS simulator).
+
+The Android SDK does **not** have to be configured by hand. Every script under
+`scripts/` resolves it through [`scripts/android-sdk.sh`](../../scripts/android-sdk.sh),
+in this order, and exports `ANDROID_HOME`/`ANDROID_SDK_ROOT` for Gradle:
+
+1. `ANDROID_HOME`
+2. `ANDROID_SDK_ROOT`
+3. `sdk.dir` in `local.properties` (what Android Studio writes)
+4. `sdk.dir` in `demo/local.properties`
+5. the usual install locations — `~/Library/Android/sdk` (macOS), `~/Android/Sdk`
+   (Linux), `%LOCALAPPDATA%\Android\Sdk` (Windows)
+
+Set `ANDROID_HOME` or add `local.properties` only when the SDK lives somewhere
+non-standard; otherwise the first run just works.
 
 Gradle and Kotlin are **not** manual prerequisites: the Gradle wrapper
 (`./gradlew`) and the version catalog (`gradle/libs.versions.toml`) pin them for

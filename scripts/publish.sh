@@ -16,6 +16,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# rdma-runtime is an Android library, so the Gradle build needs the SDK location.
+# It is detected automatically (see scripts/android-sdk.sh).
+source "$ROOT_DIR/scripts/android-sdk.sh"
+ensure_android_sdk "$ROOT_DIR" || exit 1
+
 ./gradlew -p "$ROOT_DIR/scripts/publish" \
     :rdma-annotation:publishToMavenLocal \
     :rdma-types:publishToMavenLocal \
