@@ -1,0 +1,17 @@
+# RDMAHermes configuration (demo build, toolchain_compatibility.md §4).
+# Scoped to the demo's own `:kernel` / `:plugin` containers. The framework
+# (compiler plugins, runtimes, types) is consumed from mavenLocal; `hermesc` is
+# resolved from mavenLocal as a maven artifact (no `[hermes] path` is set here).
+
+[kernel]
+rootPackage = "com.example.kernel"
+project = ":kernel"
+internals = [":kernel:internal"]
+
+[plugin]
+rootPackage = "com.example.plugin"
+project = ":plugin"
+
+[toolchain]
+
+[hermes]

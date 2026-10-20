@@ -227,6 +227,8 @@ Design intent (`docs/design/`):
 
 - [Design concept](docs/design/ORIGINAL_DESIGN.md)
 - [Versioning & compatibility](docs/design/compatibility.md)
+- [Toolchain compatibility](docs/design/toolchain_compatibility.md)
+- [Store & sync](docs/design/store_and_sync.md)
 - [iOS design](docs/design/ios_design.md)
 
 # License

@@ -107,20 +107,6 @@ private fun evalBundle(name: String) {
         println("RDMA: bundle not found: $name.hbc")
         return
     }
-    val file = fopen(path, "rb") ?: return
-    try {
-        fseek(file, 0L, SEEK_END)
-        val size = ftell(file).toInt()
-        fseek(file, 0L, SEEK_SET)
-        if (size <= 0) return
-        val bytes = ByteArray(size)
-        val read = bytes.usePinned { pinned ->
-            fread(pinned.addressOf(0), 1UL, size.toULong(), file).toInt()
-        }
-        if (read == size) {
-            RdmaBridge.nativeEvalBytes(bytes)
-        }
-    } finally {
-        fclose(file)
-    }
+    // mmap the bundle file (zero-copy) and evaluate it as bytecode.
+    RdmaBridge.nativeEvalFile(path)
 }

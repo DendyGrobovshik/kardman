@@ -49,8 +49,13 @@ object RdmaPluginReleases {
         return write(versionsDir, release.contract.pluginId, releases)
     }
 
+    /** Next version across **all** generations: `max(existing) + 1` (toolchain_compatibility.md §2). */
     fun nextVersion(existing: List<PluginRelease>): Int =
         (existing.maxOfOrNull { it.contract.version } ?: 0) + 1
+
+    /** Current (newest) version across all generations, used by no-bump "inherit" releases. */
+    fun currentVersion(existing: List<PluginRelease>): Int =
+        existing.maxOfOrNull { it.contract.version } ?: 0
 
     /** Loads every plugin's releases from the `versions/plugins/` directory. */
     fun loadAll(versionsDir: File): Map<String, List<PluginRelease>> {

@@ -28,7 +28,8 @@ object RdmaPluginContractBuilder {
     fun build(
         pluginId: String,
         version: Int,
-        builtAgainst: Int,
+        builtAgainstKernel: Int,
+        builtAgainstToolchain: String = "",
         moduleDeps: List<String>,
         usedSymbols: List<String>,
         floor: Map<String, Int>,
@@ -36,7 +37,8 @@ object RdmaPluginContractBuilder {
         RdmaPluginContract(
             pluginId = pluginId,
             version = version,
-            builtAgainst = builtAgainst,
+            builtAgainstKernel = builtAgainstKernel,
+            builtAgainstToolchain = builtAgainstToolchain,
             minHost = RdmaFloor.minHost(floor, usedSymbols.toSet()),
             moduleDeps = moduleDeps,
             usedSymbols = usedSymbols.distinct().sorted(),

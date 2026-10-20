@@ -245,6 +245,23 @@ void rdmaEvalAsset(const std::string& code) {
     });
 }
 
+void rdmaEvalBuffer(std::shared_ptr<const facebook::jsi::Buffer> buffer, const std::string& sourceURL) {
+    g_evalPending.fetch_add(1, std::memory_order_relaxed);
+    rdmaPostJsHigh([buffer, sourceURL] {
+        evalJavaScript(buffer, sourceURL);
+        g_evalPending.fetch_sub(1, std::memory_order_relaxed);
+    });
+}
+
+void rdmaEvalFile(const std::string& path) {
+    auto buffer = mmapFileBuffer(path);
+    if (!buffer) {
+        LOGW("rdmaEvalFile: cannot mmap %s", path.c_str());
+        return;
+    }
+    rdmaEvalBuffer(buffer, path);
+}
+
 bool rdmaIsReady() {
     return g_runtimeReady.load(std::memory_order_acquire) &&
            g_evalPending.load(std::memory_order_relaxed) == 0;

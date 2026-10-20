@@ -22,6 +22,8 @@ import io.github.dendygrobovshik.kardman.types.PluginRelease
 import io.github.dendygrobovshik.kardman.types.RdmaAnalysis
 import io.github.dendygrobovshik.kardman.types.RdmaPluginContract
 import io.github.dendygrobovshik.kardman.types.RdmaSymbolKind
+import io.github.dendygrobovshik.kardman.types.RdmaToml
+import io.github.dendygrobovshik.kardman.types.ToolchainPins
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -40,7 +42,7 @@ import java.io.File
  *   static-release   <analysis.json> <versionsDir> <polyfillOutDir> <internalModules> [telemetryFile]
  *   dynamic-release  <analysis.json> <versionsDir> <polyfillOutDir> <internalModules> [telemetryFile]
  *   hotfix-release   <analysis.json> <versionsDir> <polyfillOutDir> <internalModules> [telemetryFile]
- *   plugin-release   <plugin.json> <versionsDir> <bundlePath>
+ *   plugin-release   [--no-bump] <versionsDir> <plugin.json> (<generation> <bundlePath>)+
  *
  * Release order (§9): materialize + gate first, and only on success append the changelog entry
  * (the write is the commit point). `hotfix-release` additionally rejects a `minHost` bump (§9).
@@ -53,6 +55,14 @@ object RdmaReleaseCli {
         val command = args.getOrNull(0)
         if (command == "plugin-release") {
             pluginRelease(args)
+            return
+        }
+        if (command == "generation-release") {
+            generationRelease(args)
+            return
+        }
+        if (command == "retire-generation") {
+            retireGeneration(args)
             return
         }
 
@@ -76,6 +86,7 @@ object RdmaReleaseCli {
         val changelogFile = File(versionsDir, "changelog.json")
         val changelog = if (changelogFile.isFile) RdmaChangelog.read(changelogFile) else Changelog()
         val hotfix = command == "hotfix-release"
+        val oldestActiveKernel = RdmaToml.load(resolveRdmaConfigFile(args)).kernel.oldestActiveKernel
 
         when (command) {
             "static-release" -> {
@@ -96,7 +107,7 @@ object RdmaReleaseCli {
                 }
                 checkRemoval(changelog, analysis, changes, internalModules, polyfillOutDir, versionsDir)
                 val updated = RdmaChangelog.append(changelog, analysis.moduleId, changes, bumpH = true)
-                gate(updated, analysis, hostVersions, hotfix = false, minHostBefore = RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)))
+                gate(updated, analysis, hostVersions, hotfix = false, minHostBefore = RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)), oldestActiveKernel = oldestActiveKernel)
                 RdmaChangelog.write(changelogFile, updated)
                 val derived = RdmaBaseline.write(analysis, versionsDir)
                 println("Bumped counter to v${updated.h} (H moved). Wrote ${changelogFile.path}")
@@ -137,7 +148,7 @@ object RdmaReleaseCli {
                 } else {
                     checkRemoval(changelog, analysis, changes, internalModules, polyfillOutDir, versionsDir)
                     val appended = RdmaChangelog.append(changelog, analysis.moduleId, changes, bumpH = false)
-                    gate(appended, analysis, hostVersions, hotfix, RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)))
+                    gate(appended, analysis, hostVersions, hotfix, RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)), oldestActiveKernel = oldestActiveKernel)
                     RdmaChangelog.write(changelogFile, appended)
                     println("Bumped counter to v${RdmaChangelog.latestVersion(appended)} (H=${appended.h}). Wrote ${changelogFile.path}")
                     appended
@@ -152,30 +163,157 @@ object RdmaReleaseCli {
         }
     }
 
+    /** Resolves the `--rdmaConfig <path>` (or `--rdmaConfig=<path>`) flag, defaulting to `rdma.toml`. */
+    private fun resolveRdmaConfigFile(args: Array<String>): File {
+        for (k in args.indices) {
+            if (args[k] == "--rdmaConfig" && k + 1 < args.size) return File(args[k + 1])
+            if (args[k].startsWith("--rdmaConfig=")) return File(args[k].removePrefix("--rdmaConfig="))
+        }
+        return File("rdma.toml")
+    }
+
+    /** Returns the positional args from index [from], skipping any `--rdmaConfig` flag/value. */
+    private fun stripRdmaConfig(args: Array<String>, from: Int): List<String> {
+        val result = mutableListOf<String>()
+        var k = from
+        while (k < args.size) {
+            when {
+                args[k] == "--rdmaConfig" -> k += 2
+                args[k].startsWith("--rdmaConfig=") -> k += 1
+                else -> { result.add(args[k]); k++ }
+            }
+        }
+        return result
+    }
+
     /**
-     * `plugin-release <plugin.json> <versionsDir> <bundlePath>` — a plugin-only release (§9):
-     * bumps the plugin `version` (the kernel counter is **not** touched) and appends a
-     * [PluginRelease] to `versions/plugins/<pluginId>.json`.
+     * `plugin-release [--no-bump] <versionsDir> <plugin.json> (<generation> <bundlePath>)+` —
+     * a plugin-only release (§9, toolchain_compatibility.md §6–§7). The plugin `version` is
+     * bumped **once** (globally, `max` across all generations + 1) and the bundle is released
+     * for **every live generation** listed in `toolchain.json` (the kernel counter is **not**
+     * touched). `--no-bump` records the *current* version instead (used to bootstrap a newly
+     * created generation) and releases only the generations explicitly listed.
+     *
+     * Every release prints a per-generation report: `built-ok` for a generation that got a
+     * bundle, `blocked` for a live generation with no bundle (the store keeps serving it the
+     * last successfully built version), and `ignored` for a bundle supplied for a generation
+     * that is not active.
      */
     private fun pluginRelease(args: Array<String>) {
-        val contractPath = args.getOrNull(1)
-        val versionsDir = args.getOrNull(2)?.let(::File)
-        val bundlePath = args.getOrNull(3)
-        if (contractPath == null || versionsDir == null || bundlePath == null) {
-            System.err.println("usage: plugin-release <plugin.json> <versionsDir> <bundlePath>")
+        var i = 1
+        var noBump = false
+        if (args.getOrNull(i) == "--no-bump") {
+            noBump = true
+            i++
+        }
+        val versionsDir = args.getOrNull(i++)?.let(::File)
+        val contractPath = args.getOrNull(i++)
+        if (versionsDir == null || contractPath == null) {
+            System.err.println("usage: plugin-release [--no-bump] <versionsDir> <plugin.json> (<generation> <bundlePath>)+")
             kotlin.system.exitProcess(2)
         }
+        val rest = stripRdmaConfig(args, from = i)
+        if (rest.size % 2 != 0) {
+            System.err.println("plugin-release: <generation> <bundlePath> must come in pairs, got: ${rest.joinToString()}")
+            kotlin.system.exitProcess(2)
+        }
+        val provided = LinkedHashMap<String, File>()
+        for (k in rest.indices step 2) provided[rest[k]] = File(rest[k + 1])
+
         val contract = json.decodeFromString(RdmaPluginContract.serializer(), File(contractPath).readText())
-        val bundleHash = RdmaContentHasher.sha256Bytes(File(bundlePath).readBytes())
         val existing = RdmaPluginReleases.read(versionsDir, contract.pluginId)
-        val version = RdmaPluginReleases.nextVersion(existing)
-        val release = PluginRelease(contract.copy(version = version), bundleHash)
-        val file = RdmaPluginReleases.append(versionsDir, release)
-        println("Released plugin '${contract.pluginId}' v$version (bundle $bundleHash). Wrote ${file.path}")
+        val version = if (noBump) RdmaPluginReleases.currentVersion(existing) else RdmaPluginReleases.nextVersion(existing)
+
+        val toolchain = RdmaToolchain.read(versionsDir)
+        val floor = RdmaToml.load(resolveRdmaConfigFile(args)).toolchain.oldestActiveGeneration
+        val active = RdmaToolchain.liveGenerations(toolchain, floor).map { it.g }
+        if (!noBump && active.isEmpty()) {
+            System.err.println("plugin-release: no live generations (run generation-release first).")
+            kotlin.system.exitProcess(1)
+        }
+
+        val written = LinkedHashMap<String, String>()
+        for (g in (if (noBump) provided.keys else active)) {
+            val bundle = provided[g] ?: continue
+            val bundleHash = RdmaContentHasher.sha256Bytes(bundle.readBytes())
+            val release = PluginRelease(contract.copy(version = version, builtAgainstToolchain = g), bundleHash)
+            RdmaPluginReleases.append(versionsDir, release)
+            written[g] = bundleHash
+        }
+        if (written.isEmpty()) {
+            System.err.println("plugin-release: nothing was released (no bundle for any targeted generation).")
+            kotlin.system.exitProcess(1)
+        }
+
+        println("plugin-release '${contract.pluginId}' v$version (${if (noBump) "inherit" else "bump"}):")
+        if (noBump) {
+            for ((g, hash) in written) println("  $g  built-ok     bundle $hash")
+        } else {
+            for (g in active) {
+                val hash = written[g]
+                if (hash != null) println("  $g  built-ok     bundle $hash")
+                else println("  $g  blocked      (no bundle provided; serving last built version)")
+            }
+            for (g in provided.keys) {
+                if (g !in active) println("  $g  ignored      (generation not active)")
+            }
+        }
+    }
+
+    /** `generation-release <g> <versionsDir> [alias]` — records a new toolchain generation and, on the first generation, sets the FIFO floor. */
+    private fun generationRelease(args: Array<String>) {
+        val g = args.getOrNull(1)
+        val versionsDir = args.getOrNull(2)?.let(::File)
+        if (g == null || versionsDir == null) {
+            System.err.println("usage: generation-release <g> <versionsDir> [alias]")
+            kotlin.system.exitProcess(2)
+        }
+        val alias = args.getOrNull(3) ?: ""
+        val toolchain = RdmaToolchain.append(RdmaToolchain.read(versionsDir), g, alias, ToolchainPins())
+        val file = RdmaToolchain.write(versionsDir, toolchain)
+
+        val configFile = resolveRdmaConfigFile(args)
+        val floor = RdmaToml.load(configFile).toolchain.oldestActiveGeneration
+        if (floor.isEmpty()) {
+            // The first generation becomes the oldest live generation (the floor).
+            val first = toolchain.generations.firstOrNull()?.g ?: g
+            RdmaToml.writeOldestActiveGeneration(configFile, first)
+        }
+        println("Released toolchain generation '$g' (alias '$alias'). Wrote ${file.path}")
+    }
+
+    /** `retire-generation <g> <versionsDir>` — retires the oldest live generation (FIFO) and advances the floor. */
+    private fun retireGeneration(args: Array<String>) {
+        val g = args.getOrNull(1)
+        val versionsDir = args.getOrNull(2)?.let(::File)
+        if (g == null || versionsDir == null) {
+            System.err.println("usage: retire-generation <g> <versionsDir>")
+            kotlin.system.exitProcess(2)
+        }
+        val configFile = resolveRdmaConfigFile(args)
+        val toolchain = RdmaToolchain.read(versionsDir)
+        val gens = toolchain.generations
+        val idx = gens.indexOfFirst { it.g == g }
+        if (idx < 0) {
+            System.err.println("retire-generation: generation '$g' not found.")
+            kotlin.system.exitProcess(1)
+        }
+        val floor = RdmaToml.load(configFile).toolchain.oldestActiveGeneration
+        val oldestLive = RdmaToolchain.liveGenerations(toolchain, floor).firstOrNull()?.g
+        if (oldestLive != g) {
+            System.err.println("retire-generation: '$g' is not the oldest live generation (oldest is '$oldestLive'); FIFO retirement only.")
+            kotlin.system.exitProcess(1)
+        }
+
+        val successor = gens.getOrNull(idx + 1)?.g ?: ""
+        val retired = RdmaToolchain.retire(toolchain, g)
+        val file = RdmaToolchain.write(versionsDir, retired)
+        RdmaToml.writeOldestActiveGeneration(configFile, successor)
+        println("Retired toolchain generation '$g'; oldestActiveGeneration advanced to '${successor.ifEmpty { "<none>" }}'. Wrote ${file.path}")
     }
 
     /** Runs the hotfix gate and prints the coverage warning; aborts the release on a gate failure. */
-    private fun gate(updated: Changelog, analysis: RdmaAnalysis, hostVersions: List<Int>, hotfix: Boolean, minHostBefore: Int) {
+    private fun gate(updated: Changelog, analysis: RdmaAnalysis, hostVersions: List<Int>, hotfix: Boolean, minHostBefore: Int, oldestActiveKernel: Int? = null) {
         val floorAfter = RdmaFloor.compute(updated, analysis)
         val minHostAfter = RdmaReleaseGates.minHostOf(floorAfter)
         if (hotfix) {
@@ -185,6 +323,9 @@ object RdmaReleaseCli {
                 System.err.println("Release rejected: a hotfix must not bump minHost.")
                 kotlin.system.exitProcess(1)
             }
+        }
+        if (oldestActiveKernel != null && minHostAfter > oldestActiveKernel) {
+            println("COVERAGE: minHost rises to $minHostAfter, above the support floor oldestActiveKernel=$oldestActiveKernel (hosts H in [$oldestActiveKernel, $minHostAfter) stop receiving this module).")
         }
         if (hostVersions.isNotEmpty()) {
             val warning = RdmaReleaseGates.coverageWarning(floorAfter, hostVersions)

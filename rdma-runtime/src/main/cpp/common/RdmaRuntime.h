@@ -16,6 +16,7 @@
 #pragma once
 #include <jsi/jsi.h>
 #include <string>
+#include <memory>
 
 #include "RdmaPlatform.h"
 
@@ -27,6 +28,18 @@ void initRdmaRuntime(facebook::rdma::HostContext ctx);
 // Evaluates a JS asset/script on the Hermes thread. Fire-and-forget: the result
 // is logged; errors are caught and logged. Runs only on the Hermes thread.
 void evalJavaScript(const std::string& code);
+
+// Evaluates a bytecode buffer (JS source or Hermes bytecode) on the Hermes thread.
+// The buffer is retained for as long as Hermes needs it (lazy bytecode loading), so
+// callers may pass an mmap-backed buffer whose mapping is released only on destruction.
+void evalJavaScript(
+    const std::shared_ptr<const facebook::jsi::Buffer>& buffer,
+    const std::string& sourceURL);
+
+// Memory-maps the file at [path] and returns a zero-copy `jsi::Buffer`, or nullptr on
+// failure. The mapping lives until the returned shared_ptr is released (Hermes keeps it
+// alive via `BCProviderFromBuffer` while the bytecode module is reachable).
+std::shared_ptr<const facebook::jsi::Buffer> mmapFileBuffer(const std::string& path);
 
 // Returns the Hermes runtime. Hermes-thread access only.
 facebook::jsi::Runtime* getRdmaRuntime();

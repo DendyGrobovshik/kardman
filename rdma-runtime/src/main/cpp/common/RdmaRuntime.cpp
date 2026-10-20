@@ -17,6 +17,10 @@
 #include <hermes/hermes.h>
 #include <string>
 #include <memory>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "RdmaRuntime.h"
 #include "RdmaComposeBridge.h"
@@ -26,6 +30,60 @@
 #define LOG_TAG "RdmaRuntime"
 
 static std::unique_ptr<facebook::jsi::Runtime> g_runtime;
+
+namespace {
+
+// A `jsi::Buffer` that memory-maps a file. The mapping is released (munmap + close) when
+// the buffer is destroyed, i.e. when the last `shared_ptr` drops — Hermes holds that
+// `shared_ptr` via `BCProviderFromBuffer` for as long as the bytecode module is reachable.
+class MmapBuffer final : public facebook::jsi::Buffer {
+public:
+    explicit MmapBuffer(const std::string& path) {
+        fd_ = ::open(path.c_str(), O_RDONLY);
+        if (fd_ < 0) return;
+        struct stat st;
+        if (::fstat(fd_, &st) != 0 || st.st_size <= 0) {
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+        size_ = static_cast<size_t>(st.st_size);
+        void* p = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+        if (p == MAP_FAILED) {
+            ::close(fd_);
+            fd_ = -1;
+            size_ = 0;
+            return;
+        }
+        data_ = static_cast<const uint8_t*>(p);
+    }
+
+    ~MmapBuffer() override {
+        if (data_ != nullptr) {
+            ::munmap(const_cast<uint8_t*>(data_), size_);
+        }
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+    }
+
+    size_t size() const override { return size_; }
+    const uint8_t* data() const override { return data_; }
+    bool ok() const { return data_ != nullptr; }
+
+private:
+    int fd_ = -1;
+    const uint8_t* data_ = nullptr;
+    size_t size_ = 0;
+};
+
+} // namespace
+
+std::shared_ptr<const facebook::jsi::Buffer> mmapFileBuffer(const std::string& path) {
+    auto buf = std::make_shared<MmapBuffer>(path);
+    if (!buf->ok()) return nullptr;
+    return buf;
+}
 
 facebook::jsi::Runtime* getRdmaRuntime() {
     return g_runtime.get();
@@ -130,14 +188,17 @@ void initRdmaRuntime(facebook::rdma::HostContext ctx) {
 }
 
 void evalJavaScript(const std::string& code) {
+    evalJavaScript(std::make_shared<facebook::jsi::StringBuffer>(code), "<eval>");
+}
+
+void evalJavaScript(const std::shared_ptr<const facebook::jsi::Buffer>& buffer, const std::string& sourceURL) {
     if (!g_runtime) {
         LOGW("evalJavaScript: runtime not initialized");
         return;
     }
 
     try {
-        auto buffer = std::make_shared<facebook::jsi::StringBuffer>(code);
-        auto prepared = g_runtime->prepareJavaScript(buffer, "<eval>");
+        auto prepared = g_runtime->prepareJavaScript(buffer, sourceURL);
         g_runtime->evaluatePreparedJavaScript(prepared);
     } catch (const facebook::jsi::JSError& e) {
         LOGW("JSError: %s\n%s", e.what(), e.getStack().c_str());

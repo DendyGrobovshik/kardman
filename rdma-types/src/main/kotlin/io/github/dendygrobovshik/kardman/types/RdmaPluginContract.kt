@@ -18,11 +18,13 @@ package io.github.dendygrobovshik.kardman.types
 import kotlinx.serialization.Serializable
 
 /**
- * The version contract of a plugin (§2.2, §2.3): `[version, builtAgainst, minHost, module-deps]`
+ * The version contract of a plugin (§2.2, §2.3): `[version, builtAgainstKernel, minHost, module-deps]`
  * + code.
  *
  *  - [version] — monotonic number per plugin, incremented on every plugin release.
- *  - [builtAgainst] — the kernel version the plugin was compiled against.
+ *  - [builtAgainstKernel] — the kernel version the plugin was compiled against.
+ *  - [builtAgainstToolchain] — the toolchain generation `G` the bundle was compiled with
+ *    (see [toolchain_compatibility.md](toolchain_compatibility.md)); blank = no generation.
  *  - [minHost] — the minimum host version the plugin runs on: `max(floor(S))` over the symbols
  *    it uses (§5.3).
  *  - [moduleDeps] — the fixed set of kernel modules the plugin sees (`internal` + its own
@@ -34,7 +36,8 @@ import kotlinx.serialization.Serializable
 data class RdmaPluginContract(
     val pluginId: String,
     val version: Int = 1,
-    val builtAgainst: Int = 0,
+    val builtAgainstKernel: Int = 0,
+    val builtAgainstToolchain: String = "",
     val minHost: Int = 0,
     val moduleDeps: List<String> = emptyList(),
     val usedSymbols: List<String> = emptyList(),

@@ -48,8 +48,8 @@ warning showing the reach % and the responsible non-emulatable symbol.
 The store (`:rdma-store`) exposes:
 
 - `POST /resync` — on every re-sync (screen open + periodically) the client sends
-  `(id, version, builtAgainst, hostVersion)` and receives
-  `{state, severity, status, targetVersion, bundleHash, polyfills}`.
+  `(id, version, builtAgainstKernel, hostVersion, hostGeneration)` and receives
+  `{state, severity, status, targetVersion, manifest, missing, polyfills}`.
 - `GET /health` — liveness/readiness.
 
 State and severity follow the P1–P4 machine and the severity table in

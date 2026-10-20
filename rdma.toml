@@ -1,0 +1,22 @@
+# Kardman configuration (toolchain_compatibility.md §4).
+# Single source of truth for the framework config + the support policy.
+#
+# Support policy is expressed as explicit floors: everything at or above the
+# floor is supported, everything below is out of support.
+#
+#   kernel.oldestActiveKernel      oldest kernel version H still supported
+#   toolchain.oldestActiveGeneration  oldest toolchain generation still live (FIFO)
+
+[kernel]
+rootPackage = "com.example.kernel"
+project = ":tests:stand:kernel"
+internals = [":tests:stand:kernel:internal"]
+
+[plugin]
+rootPackage = "com.example.plugin"
+project = ":tests:stand:plugin"
+
+[toolchain]
+
+[hermes]
+path = "third_party/bin/hermesc"

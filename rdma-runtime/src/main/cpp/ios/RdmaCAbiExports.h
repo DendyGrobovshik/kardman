@@ -32,6 +32,7 @@ void* rdma_vtableDispatch(int64_t vtablePtr, int32_t vtableId);
 void rdma_start(void* ctx);
 int32_t rdma_is_ready(void);
 void rdma_eval_bytes(const void* code, int32_t len);
+void rdma_eval_file(const char* path);
 
 // Function-pointer registry (see RdmaCAbiRegistry.h). Kotlin/Native registers its
 // C-compatible shim functions here at startup; C++ looks them up by name.

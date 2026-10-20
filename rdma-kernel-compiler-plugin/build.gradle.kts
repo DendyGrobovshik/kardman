@@ -72,6 +72,8 @@ fun releaseTask(name: String, command: String) = tasks.register<JavaExec>(name) 
         project.findProperty("polyfillOutDir")?.toString() ?: "",
         project.findProperty("internalModules")?.toString() ?: "internal",
         project.findProperty("telemetryFile")?.toString() ?: "",
+        "--rdmaConfig",
+        rdmaPolicyFile(),
     )
 }
 
@@ -79,17 +81,72 @@ releaseTask("staticRelease", "static-release")
 releaseTask("dynamicRelease", "dynamic-release")
 releaseTask("hotfixRelease", "hotfix-release")
 
+// The release CLI reads the support policy (floors) from this file. It is a *separate* property
+// from the framework config (`rdmaConfigFile`), so a test that points the policy at a scratch file
+// does not leak that path into the gradle plugins' framework-config reads.
+fun rdmaPolicyFile(): String {
+    val configured = project.findProperty("rdmaPolicyFile")?.toString()
+    val file = if (configured != null) {
+        val f = File(configured)
+        if (f.isAbsolute) f else File(rootProject.projectDir, configured)
+    } else {
+        File(rootProject.projectDir, "rdma.toml")
+    }
+    return file.absolutePath
+}
+
 tasks.register<JavaExec>("pluginRelease") {
     group = "rdma"
     classpath = sourceSets["main"].runtimeClasspath
     mainClass.set("io.github.dendygrobovshik.kardman.kernel.RdmaReleaseCli")
+    val argList = mutableListOf("plugin-release")
+    if (project.findProperty("noBump")?.toString() == "true") argList += "--no-bump"
+    argList += project.findProperty("versionsDir")?.toString()
+        ?: error("pass -PversionsDir=/path/to/versions")
+    argList += project.findProperty("pluginJson")?.toString()
+        ?: error("pass -PpluginJson=/path/to/plugin.json")
+    // -PgenerationBundles="g1=/path/b1.hbc,g2=/path/b2.hbc" → "<g> <bundlePath>" pairs
+    (project.findProperty("generationBundles")?.toString() ?: "")
+        .split(',')
+        .filter { it.isNotBlank() }
+        .forEach { pair ->
+            val idx = pair.indexOf('=')
+            require(idx > 0) { "generationBundles must be <generation>=<bundlePath> pairs, got '$pair'" }
+            argList += pair.substring(0, idx)
+            argList += pair.substring(idx + 1)
+        }
+    argList += "--rdmaConfig"
+    argList += rdmaPolicyFile()
+    args(argList)
+}
+
+tasks.register<JavaExec>("generationRelease") {
+    group = "rdma"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.github.dendygrobovshik.kardman.kernel.RdmaReleaseCli")
     args(
-        "plugin-release",
-        project.findProperty("pluginJson")?.toString()
-            ?: error("pass -PpluginJson=/path/to/plugin.json"),
+        "generation-release",
+        project.findProperty("generation")?.toString()
+            ?: error("pass -Pgeneration=<g>"),
         project.findProperty("versionsDir")?.toString()
             ?: error("pass -PversionsDir=/path/to/versions"),
-        project.findProperty("bundlePath")?.toString()
-            ?: error("pass -PbundlePath=/path/to/plugin.hbc"),
+        project.findProperty("alias")?.toString() ?: "",
+        "--rdmaConfig",
+        rdmaPolicyFile(),
+    )
+}
+
+tasks.register<JavaExec>("retireGeneration") {
+    group = "rdma"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.github.dendygrobovshik.kardman.kernel.RdmaReleaseCli")
+    args(
+        "retire-generation",
+        project.findProperty("generation")?.toString()
+            ?: error("pass -Pgeneration=<g>"),
+        project.findProperty("versionsDir")?.toString()
+            ?: error("pass -PversionsDir=/path/to/versions"),
+        "--rdmaConfig",
+        rdmaPolicyFile(),
     )
 }

@@ -24,6 +24,7 @@ version = "1.0"
 
 dependencies {
     compileOnly(libs.kotlin.gradle.plugin.api)
+    implementation(project(":rdma-types"))
 }
 
 gradlePlugin {

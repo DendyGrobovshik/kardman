@@ -16,6 +16,8 @@
 package io.github.dendygrobovshik.kardman.app
 
 import com.android.build.api.dsl.ApplicationExtension
+import io.github.dendygrobovshik.kardman.types.RdmaConfig
+import io.github.dendygrobovshik.kardman.types.RdmaToml
 import org.gradle.api.Action
 import org.gradle.api.Plugin
 import org.gradle.api.Project
@@ -33,36 +35,38 @@ private const val DEFAULT_PLUGIN_PROJECT = ":plugin"
 private const val RDMA_RUNTIME_VERSION = "1.0"
 private const val HERMES_VERSION = "0.76.9"
 
+/** Loads the project's `rdma.toml` (overridable via `-PrdmaConfigFile`). */
+private fun Project.rdmaConfig(): RdmaConfig {
+    val file = findProperty("rdmaConfigFile")?.toString()?.let {
+        val f = File(it); if (f.isAbsolute) f else File(rootProject.projectDir, it)
+    } ?: File(rootProject.projectDir, "rdma.toml")
+    return RdmaToml.load(file)
+}
+
 /**
  * Applied to the app module. It discovers the kernel modules (subprojects of
- * `rdmaKernelProject`) and plugin modules (subprojects of `rdmaPluginProject`), then:
+ * `kernel.project`) and plugin modules (subprojects of `plugin.project`), then:
  *   - adds every kernel module as a dependency,
  *   - copies the generated `@RDMA` C++ from all kernel modules and compiles it, together
  *     with a generated aggregate bridge, into a single `librdma_user.so`,
  *   - wires the compiled plugin JS from every plugin module into the app's assets.
  *
- * Configuration (via `gradle.properties`, single source of truth):
- *   rdmaKernelRootPackage  root package of kernel modules (default `com.example.kernel`)
- *   rdmaKernelProject      container path of kernel modules (default `:kernel`)
- *   rdmaKernelInternals    comma-separated project paths of framework-owned kernel modules
- *   rdmaPluginRootPackage  root package of plugin modules (default `com.example.plugin`)
- *   rdmaPluginProject      container path of plugin modules (default `:plugin`)
- *   rdmaHermesc            path to the Hermes compiler (optional).
+ * Configuration (via `rdma.toml`, single source of truth):
+ *   kernel.rootPackage  root package of kernel modules (default `com.example.kernel`)
+ *   kernel.project      container path of kernel modules (default `:kernel`)
+ *   kernel.internals    framework-owned kernel modules
+ *   plugin.rootPackage  root package of plugin modules (default `com.example.plugin`)
+ *   plugin.project      container path of plugin modules (default `:plugin`)
+ *   hermes.path         path to the Hermes compiler (optional).
  */
 class RdmaAppGradlePlugin : Plugin<Project> {
 
     override fun apply(target: Project) {
-        val kernelContainer = target.findProperty("rdmaKernelProject")?.toString()
-            ?: target.rootProject.findProperty("rdmaKernelProject")?.toString()
-            ?: DEFAULT_KERNEL_PROJECT
-        val pluginContainer = target.findProperty("rdmaPluginProject")?.toString()
-            ?: target.rootProject.findProperty("rdmaPluginProject")?.toString()
-            ?: DEFAULT_PLUGIN_PROJECT
-        val kernelRootPackage = target.findProperty("rdmaKernelRootPackage")?.toString()
-            ?: target.rootProject.findProperty("rdmaKernelRootPackage")?.toString()
-            ?: DEFAULT_KERNEL_ROOT_PACKAGE
-        val hermesc = target.findProperty("rdmaHermesc")?.toString()
-            ?: target.rootProject.findProperty("rdmaHermesc")?.toString()
+        val config = target.rdmaConfig()
+        val kernelContainer = config.kernel.project.ifEmpty { DEFAULT_KERNEL_PROJECT }
+        val pluginContainer = config.plugin.project.ifEmpty { DEFAULT_PLUGIN_PROJECT }
+        val kernelRootPackage = config.kernel.rootPackage.ifEmpty { DEFAULT_KERNEL_ROOT_PACKAGE }
+        val hermesc = config.hermes.path
 
         // Enumerate kernel/plugin modules by project path (stable at configuration time).
         // Gradle auto-creates the intermediate container projects (`:plugin:alice`, …),

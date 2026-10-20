@@ -15,6 +15,8 @@
  */
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.RdmaConfig
+import io.github.dendygrobovshik.kardman.types.RdmaToml
 import org.gradle.api.Project
 import org.gradle.api.provider.Provider
 import org.jetbrains.kotlin.gradle.plugin.KotlinCompilation
@@ -27,23 +29,25 @@ import java.io.File
 private const val DEFAULT_KERNEL_PROJECT = ":kernel"
 private const val DEFAULT_KERNEL_ROOT_PACKAGE = "com.example.kernel"
 
+/** Loads the project's `rdma.toml` (overridable via `-PrdmaConfigFile`). */
+private fun Project.rdmaConfig(): RdmaConfig {
+    val file = findProperty("rdmaConfigFile")?.toString()?.let {
+        val f = File(it); if (f.isAbsolute) f else File(rootProject.projectDir, it)
+    } ?: File(rootProject.projectDir, "rdma.toml")
+    return RdmaToml.load(file)
+}
+
 /** The package of this kernel module, derived from its project path. */
 private fun Project.kernelPackage(): String {
-    val rootPackage = findProperty("rdmaKernelRootPackage")?.toString()
-        ?: rootProject.findProperty("rdmaKernelRootPackage")?.toString()
-        ?: DEFAULT_KERNEL_ROOT_PACKAGE
-    val container = findProperty("rdmaKernelProject")?.toString()
-        ?: rootProject.findProperty("rdmaKernelProject")?.toString()
-        ?: DEFAULT_KERNEL_PROJECT
+    val rootPackage = rdmaConfig().kernel.rootPackage.ifEmpty { DEFAULT_KERNEL_ROOT_PACKAGE }
+    val container = rdmaConfig().kernel.project.ifEmpty { DEFAULT_KERNEL_PROJECT }
     val suffix = path.removePrefix(container).removePrefix(":").replace(':', '.')
     return if (suffix.isEmpty()) rootPackage else "$rootPackage.$suffix"
 }
 
 /** A sanitized, filesystem/C++-safe identifier for this kernel module. */
 private fun Project.kernelModuleId(): String {
-    val container = findProperty("rdmaKernelProject")?.toString()
-        ?: rootProject.findProperty("rdmaKernelProject")?.toString()
-        ?: DEFAULT_KERNEL_PROJECT
+    val container = rdmaConfig().kernel.project.ifEmpty { DEFAULT_KERNEL_PROJECT }
     val suffix = path.removePrefix(container).removePrefix(":").replace(':', '_').replace('.', '_')
     return if (suffix.isEmpty()) "default" else suffix
 }

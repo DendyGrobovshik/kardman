@@ -18,6 +18,7 @@
 package io.github.dendygrobovshik.kardman.runtime
 
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_eval_bytes
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_eval_file
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_is_ready
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_start
 import kotlinx.cinterop.addressOf
@@ -40,5 +41,9 @@ object RdmaBridge {
         bytes.usePinned { pinned ->
             rdma_eval_bytes(pinned.addressOf(0), bytes.size)
         }
+    }
+
+    fun nativeEvalFile(path: String) {
+        rdma_eval_file(path)
     }
 }

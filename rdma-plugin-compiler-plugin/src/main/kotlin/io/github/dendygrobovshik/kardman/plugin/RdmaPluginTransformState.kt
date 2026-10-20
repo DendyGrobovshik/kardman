@@ -37,7 +37,8 @@ object RdmaPluginTransformState {
     var kernelRootPackage: String = ""
     var pluginId: String = ""
     var pluginVersion: Int = 1
-    var builtAgainst: Int = 0
+    var builtAgainstKernel: Int = 0
+    var builtAgainstToolchain: String = ""
     var moduleDeps: List<String> = emptyList()
         private set
     var floorMap: Map<String, Int> = emptyMap()
@@ -69,7 +70,8 @@ object RdmaPluginTransformState {
         outputDir: String?,
         pluginId: String?,
         pluginVersion: Int?,
-        builtAgainst: Int?,
+        builtAgainstKernel: Int?,
+        builtAgainstToolchain: String?,
         moduleDeps: List<String>,
         floorMap: Map<String, Int>,
     ) {
@@ -79,7 +81,8 @@ object RdmaPluginTransformState {
         kernelRootPackage?.let { this.kernelRootPackage = it }
         pluginId?.let { this.pluginId = it }
         pluginVersion?.let { this.pluginVersion = it }
-        builtAgainst?.let { this.builtAgainst = it }
+        builtAgainstKernel?.let { this.builtAgainstKernel = it }
+        builtAgainstToolchain?.let { this.builtAgainstToolchain = it }
         this.moduleDeps = moduleDeps
         this.floorMap = floorMap
         usedSymbols.clear()
@@ -194,7 +197,8 @@ object RdmaPluginTransformState {
         val contract = RdmaPluginContract(
             pluginId = pluginId,
             version = pluginVersion,
-            builtAgainst = builtAgainst,
+            builtAgainstKernel = builtAgainstKernel,
+            builtAgainstToolchain = builtAgainstToolchain,
             minHost = minHost,
             moduleDeps = moduleDeps,
             usedSymbols = usedSymbols.toList(),

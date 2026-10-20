@@ -18,10 +18,14 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 
 #include "RdmaPlatform.h"
 
 namespace facebook {
+namespace jsi {
+class Buffer;
+}
 namespace rdma {
 
 // Result of a UI-thread compose op, conveyed back to the JS thread. Because
@@ -93,6 +97,14 @@ void rdmaStart(HostContext ctx);
 
 // Async enqueue of a JS asset eval on the Hermes thread.
 void rdmaEvalAsset(const std::string& code);
+
+// Async enqueue of a bytecode buffer eval on the Hermes thread. The buffer (e.g. an mmap of a
+// file) is retained by the queued task and then by Hermes during lazy bytecode loading.
+void rdmaEvalBuffer(std::shared_ptr<const facebook::jsi::Buffer> buffer, const std::string& sourceURL);
+
+// Async enqueue of a file-backed bytecode eval: mmaps the file (zero-copy) and evals it.
+// No-op with a log line if the file cannot be mapped.
+void rdmaEvalFile(const std::string& path);
 
 // True once the runtime is ready and all enqueued evals have finished.
 bool rdmaIsReady();

@@ -23,7 +23,7 @@ against a scratch directory under `mktemp -d`, so each run starts from an empty 
 
 ## `changelog.json`
 
-An append-only JSON journal — one entry per kernel release. A single global monotonic counter
+An append-only JSON journal — one entry per kernel release. A single global monotonic kernel version
 `version` is written directly into each entry, plus a `time` timestamp as a safety net. `h` is the
 native version: the counter value baked into the app at the last `static-release`.
 

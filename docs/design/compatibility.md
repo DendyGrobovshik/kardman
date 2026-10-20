@@ -9,6 +9,12 @@ Kardman lets you load code into an app **without updating the app itself**. The 
 
 This document describes how versions are structured, what a polyfill is (a JS replacement for native kernel code) and how the system guarantees both kinds of compatibility while requiring almost nothing from the plugin developer.
 
+This is the **kernel** axis: it answers whether a plugin's *source* still matches the
+kernel API. The **toolchain** axis — whether a *compiled* bundle still loads into an
+app's runtime when Kotlin/Compose/Hermes change — is covered in
+[toolchain_compatibility.md](toolchain_compatibility.md); the store and bundle format in
+[store_and_sync.md](store_and_sync.md).
+
 ## 1. Terminology
 
 - **Plugin** — code written by the user and loaded dynamically.
@@ -20,12 +26,14 @@ This document describes how versions are structured, what a polyfill is (a JS re
 - **Changelog** — an append-only JSON journal of kernel changes; the single source of truth.
 - **Manifest** — the current state of a module (`symbol → hash`); derived from the changelog.
 - **Native state** — the set of kernel symbols baked into the native at a specific version `H`; derived from the changelog.
-- **Kernel version (counter)** — a single global monotonic number; **bumped only on a kernel change**.
+- **Kernel version** — a single global monotonic number; **bumped only on a kernel change**.
 - **H** — the native version: the counter value baked into the app at `release-static`.
-- **Plugin version** — `version` (a monotonic number) + `builtAgainst` (the kernel version the plugin was compiled against).
+- **Plugin version** — `version` (a monotonic number) + `builtAgainstKernel` (the kernel version the plugin was compiled against) + `builtAgainstToolchain` (the toolchain generation).
 - **Store** — server/storage that serves bundles and from which the client does re-sync.
 
 Manual annotations (the only ones the developer writes): `@RDMA`, `@Deprecated`, `@Polyfill`.
+
+- **Generation (`G`)** — a content hash of the toolchain (Kotlin fork commit, Compose runtime version, Hermes commit), baked into the app. The binary-compatibility axis; an exact match (unlike the `minHost` floor). See [toolchain_compatibility.md](toolchain_compatibility.md).
 
 ## 2. Version model
 
@@ -51,12 +59,12 @@ The changelog is the source of truth. **Manifest** and **native state** are deri
 The plugin has three numeric characteristics:
 
 - **`version`** — a monotonic number per plugin, incremented on every plugin release. From it the store and the client know whether the plugin is stale and whether an urgent update is needed, e.g. in the case of a critical bug.
-- **`builtAgainst`** — the kernel version the plugin was compiled against. From it the store knows whether the plugin uses deprecated (`@Deprecated`) or removed API.
+- **`builtAgainstKernel`** — the kernel version the plugin was compiled against. From it the store knows whether the plugin uses deprecated (`@Deprecated`) or removed API.
 - **`minHost`** — the minimum host version the plugin runs on (see §5.3).
 
 ### 2.3 Plugin contract
 
-> `[version, builtAgainst, minHost, module-deps]` + code.
+> `[version, builtAgainstKernel, builtAgainstToolchain, minHost, module-deps]` + code.
 
 `module-deps` — the fixed set of kernel modules the plugin sees (`internal` + its own `user:*`). `H` comes from the app itself.
 
@@ -104,10 +112,12 @@ Principle: **compatibility is determined by the API used, and the range is a con
 
 There are two sets of polyfills, and it is important not to confuse them:
 
-- **`F(module, H)`** — "what was *added or changed* in the kernel after version `H`". These are polyfills that let a **new plugin** work on an **old** app: the symbol appeared after `H`, so it isn't in the old native — we provide a JS version.
-- **`R(module)`** — "what was removed from the kernel *without a completed migration*". A safety net: normally removal is preceded by a `@Deprecated` period, so there are no old users; `R` catches only those who didn't migrate in time (or removed without deprecation). That is, these are polyfills that let an old plugin work on a new app where some functionality was cut out of the kernel.
+- **`F(module, H, G)`** — "what was *added or changed* in the kernel after version `H`". These are polyfills that let a **new plugin** work on an **old** app: the symbol appeared after `H`, so it isn't in the old native — we provide a JS version.
+- **`R(module, G)`** — "what was removed from the kernel *without a completed migration*". A safety net: normally removal is preceded by a `@Deprecated` period, so there are no old users; `R` catches only those who didn't migrate in time (or removed without deprecation). That is, these are polyfills that let an old plugin work on a new app where some functionality was cut out of the kernel.
 
-Both sets are pre-built and live in the store; the app downloads what it needs by `H` and `module-deps` (details in §8.1).
+`G` in the keys: a polyfill is compiled to Hermes bytecode, so it is bound to the
+generation's `hermesc`/bytecode version (see [toolchain_compatibility.md](toolchain_compatibility.md)).
+Both sets are pre-built and live in the store; the app downloads what it needs by `H`, `G` and `module-deps` (details in §8.1).
 
 ### 5.2 Emulatability — three levels
 
@@ -132,7 +142,7 @@ The compiler does not distinguish level 2 from level 3 (the materializer just fa
 
 ### 5.4 Backward compatibility (new plugin on an old host `H`)
 
-- The plugin uses an **emulatable** `S`, introduced after `H` → the store sends `F(module, H)` (the polyfill for `S`).
+- The plugin uses an **emulatable** `S`, introduced after `H` → the store sends `F(module, H, G)` (the polyfill for `S`).
 - The plugin uses a **non-emulatable** `S` with `floor(S) > H` → `minHost > H` → **refusal** (on such an old host the new plugin version cannot be used).
 
 ### 5.5 Forward compatibility (old plugin on a new host)
@@ -224,7 +234,7 @@ After S4 the FQN is **tombstoned** and never reappears.
 
 ### 7.2 Plugin state machine (P1–P4)
 
-The store computes the state on every re-sync from `builtAgainst` + the changelog:
+The store computes the state on every re-sync from `builtAgainstKernel` + the changelog:
 
 ```
              deprecate            remove (→ R)              drop R
@@ -239,7 +249,7 @@ Degradation (to the right) is driven by the **kernel**; recovery (up) by a **plu
 
 ### 7.3 Retention policy (removal from `R`)
 
-`R` exists only as a safety net against violations (removal without `@Deprecated` in a user module), so it is small. A symbol is removed from `R` when **both**: (a) **≥ 90 days** have passed since removal, **and** (b) live plugins using it (per re-sync) are **< 0.01%**. `F(module, H)` is kept for the supported window of app versions.
+`R` exists only as a safety net against violations (removal without `@Deprecated` in a user module), so it is small. A symbol is removed from `R` when **both**: (a) **≥ 90 days** have passed since removal, **and** (b) live plugins using it (per re-sync) are **< 0.01%**. `F(module, H, G)` is kept for the supported window of app versions.
 
 ### 7.4 Update mandatoriness
 
@@ -259,15 +269,15 @@ Soft mandatory: while the symbol is in `R`, the client works and receives a noti
 
 ### 8.1 Artifacts (all pre-built, static store)
 
-- **`F(module, H)`** — symbols of the module added+changed after `H`, in current versions. Key `(module, H)`, shared by all plugins on the host.
-- **`R(module)`** — removed symbols (re-provide). Key `(module)`, shared.
+- **`F(module, H, G)`** — symbols of the module added+changed after `H`, in current versions. Key `(module, H, G)`, shared by all plugins on the host.
+- **`R(module, G)`** — removed symbols (re-provide). Key `(module, G)`, shared.
 - **plugin bundle** — the code of a specific plugin.
 
 Resolution is done by CI at release; the app downloads by deterministic links. Consistency is a shared "snapshot" of the release (one symbol = one implementation).
 
 ### 8.2 Reconciliation protocol (re-sync)
 
-The client keeps `(id → version)` of loaded plugins and reconciles: **on screen open** and **periodically** (e.g. once a minute) it sends the store `(id, version, builtAgainst)`. For each `id` the store resolves the **newest version with `minHost ≤ H`**:
+The client keeps `(id → version)` of loaded plugins and reconciles: **on screen open** and **periodically** (e.g. once a minute) it sends the store `(id, version, builtAgainstKernel, hostVersion, hostGeneration)`. For each `id` the store resolves the **newest version with `minHost ≤ H` and `builtAgainstToolchain == G`**:
 
 - no such version → the plugin is **unavailable** on this host;
 - the newest compatible is newer than the current → the store replies "here's the right version + hash + polyfills + severity";
@@ -288,14 +298,14 @@ Without the optimization the polyfill bundle is monolithic and the client downlo
 ## 9. Releases
 
 - **`release-dynamic`** — a dynamic release (no app update). It determines what changed by hash diff:
-  - only the plugin → a new plugin bundle (`version`++), the kernel counter is **not touched**;
-  - only the kernel → bump the counter + changelog + polyfill materialization;
+  - only the plugin → a new plugin bundle (`version`++), the kernel version is **not touched**;
+  - only the kernel → bump the kernel version + changelog + polyfill materialization;
   - plugin + kernel → both atomically (one bump for the kernel part).
 - **`release-static`** — bake the accumulated changes into the native: bump the counter + move `H` (a heavy, rare operation; app rebuild).
 
 **Release order** (protection against a half-done state): first **build → checks → tests**, and only after success — writing the changelog. The write is the commit point; any error before it writes nothing.
 
-**Who writes the changelog**: only CI, at merge time. The counter is bumped **on a kernel change**; one release = one bump = a set of changes; tests are a hard gate.
+**Who writes the changelog**: only CI, at merge time. The kernel version is bumped **on a kernel change**; one release = one bump = a set of changes; tests are a hard gate.
 
 **Hotfix and `minHost`.** A hotfix (bugfix, API unchanged) **must not bump `minHost`**: if a release is declared a hotfix but `minHost` grew — that's an error. A rise in `minHost` is allowed only for a deliberate feature release that narrows the audience.
 

@@ -89,11 +89,18 @@ release() { # release <command> <analysisJson> <polyfillOutDir>
     "$ROOT_DIR/scripts/release.sh" "$1" "$2" "$VERSIONS_DIR" "$3" "internal" ""
 }
 
+generation_release() { # generation_release <g> [alias]
+    run_gradle ":rdma-kernel-compiler-plugin:generationRelease" \
+        -Pgeneration="$1" -PversionsDir="$VERSIONS_DIR" -Palias="${2:-}" \
+        -PrdmaPolicyFile="$IT_DIR/rdma.toml"
+}
+
 plugin_release() { # plugin_release <pluginJson> <bundlePath>  → prints "hash version" on one line
     local pluginJson="$1" bundle="$2"
     local out hash version
     out=$(run_gradle ":rdma-kernel-compiler-plugin:pluginRelease" \
-        -PpluginJson="$pluginJson" -PversionsDir="$VERSIONS_DIR" -PbundlePath="$bundle")
+        -PpluginJson="$pluginJson" -PversionsDir="$VERSIONS_DIR" -PgenerationBundles="g1=$bundle" \
+        -PrdmaPolicyFile="$IT_DIR/rdma.toml")
     hash=$(echo "$out" | grep -oE "bundle [0-9a-f]{64}" | awk '{print $2}')
     version=$(echo "$out" | grep -oE "v[0-9]+" | head -1 | tr -d 'v')
     echo "$hash $version"
@@ -103,7 +110,9 @@ build_plugin_bundle() { # build_plugin_bundle <outHbc>  → compiles NEWPLUG js 
     local out="$1"
     run_gradle "$NEWPLUG:jsProductionExecutableCompileSync"
     local js
-    js=$(find "$ROOT_DIR/tests/stand/plugin/itest/newplug/build/compileSync" -name 'RDMAHermes-plugin-itest-newplug.js' | head -1)
+    # The plugin's own module is the only JS not matching a shared dependency prefix.
+    js=$(find "$ROOT_DIR/tests/stand/plugin/itest/newplug/build/compileSync" -name '*.js' \
+        | grep -Ev '/(kotlin-|androidx-|compose-|kotlinx-|kotlin_)' | head -1)
     [ -n "$js" ] || fail "no plugin JS produced"
     "$HERMESC" -O -emit-binary -out "$out" "$js"
 }
@@ -116,6 +125,7 @@ build_plugin_bundle() { # build_plugin_bundle <outHbc>  → compiles NEWPLUG js 
 # below have a changelog to read (`builtAgainstVersion()` fails without one).
 step_0_static_release() {
     step "0: static release the kernel from empty versions"
+    generation_release "g1" "legacy-single-generation"
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
     release "static-release" "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-0"
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
@@ -132,8 +142,8 @@ step_1_build_and_launch_app() {
     adb shell am force-stop "$APP_ID"
     adb shell am start -n "$APP_ID/.MainActivity" >/dev/null
     wait_logcat "RDMA" "Runtime ready"
-    register_baked_plugin "alice:counter" "$ROOT_DIR/tests/stand/androidApp/src/main/assets/kotlin/RDMAHermes-plugin-alice-counter.hbc"
-    register_baked_plugin "bob:services" "$ROOT_DIR/tests/stand/androidApp/src/main/assets/kotlin/RDMAHermes-plugin-bob-services.hbc"
+    register_baked_plugin "alice:counter" "$ROOT_DIR/tests/stand/androidApp/src/main/assets/kotlin/RDMAHermes-tests-stand-plugin-alice-counter.hbc"
+    register_baked_plugin "bob:services" "$ROOT_DIR/tests/stand/androidApp/src/main/assets/kotlin/RDMAHermes-tests-stand-plugin-bob-services.hbc"
 }
 
 register_baked_plugin() { # register_baked_plugin <pluginId> <hbc>

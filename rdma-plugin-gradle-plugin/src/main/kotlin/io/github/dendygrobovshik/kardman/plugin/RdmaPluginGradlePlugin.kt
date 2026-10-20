@@ -15,6 +15,8 @@
  */
 package io.github.dendygrobovshik.kardman.plugin
 
+import io.github.dendygrobovshik.kardman.types.RdmaConfig
+import io.github.dendygrobovshik.kardman.types.RdmaToml
 import org.gradle.api.GradleException
 import org.gradle.api.Project
 import org.gradle.api.provider.Provider
@@ -33,20 +35,24 @@ private const val DEFAULT_PLUGIN_ROOT_PACKAGE = "com.example.plugin"
 private const val DEFAULT_KERNEL_PROJECT = ":kernel"
 private const val DEFAULT_KERNEL_ROOT_PACKAGE = "com.example.kernel"
 
+/** Loads the project's `rdma.toml` (overridable via `-PrdmaConfigFile`). */
+private fun Project.rdmaConfig(): RdmaConfig {
+    val file = findProperty("rdmaConfigFile")?.toString()?.let {
+        val f = File(it); if (f.isAbsolute) f else File(rootProject.projectDir, it)
+    } ?: File(rootProject.projectDir, "rdma.toml")
+    return RdmaToml.load(file)
+}
+
 /** The package of this plugin module, derived from its username path segment. */
 private fun Project.pluginPackage(): String {
-    val rootPackage = findProperty("rdmaPluginRootPackage")?.toString()
-        ?: rootProject.findProperty("rdmaPluginRootPackage")?.toString()
-        ?: DEFAULT_PLUGIN_ROOT_PACKAGE
+    val rootPackage = rdmaConfig().plugin.rootPackage.ifEmpty { DEFAULT_PLUGIN_ROOT_PACKAGE }
     val username = pluginUsername()
     return if (username.isEmpty()) rootPackage else "$rootPackage.$username"
 }
 
 /** The username segment of this plugin module (first path segment after the plugin container). */
 private fun Project.pluginUsername(): String {
-    val container = findProperty("rdmaPluginProject")?.toString()
-        ?: rootProject.findProperty("rdmaPluginProject")?.toString()
-        ?: DEFAULT_PLUGIN_PROJECT
+    val container = rdmaConfig().plugin.project.ifEmpty { DEFAULT_PLUGIN_PROJECT }
     return path.removePrefix(container).removePrefix(":").substringBefore(':')
 }
 
@@ -64,9 +70,7 @@ private fun kernelModuleIdOf(kernelContainer: String, kernelPath: String): Strin
 
 /** Stable plugin id from the project path, e.g. `:plugin:alice:counter` → `alice:counter`. */
 private fun Project.pluginId(): String {
-    val container = findProperty("rdmaPluginProject")?.toString()
-        ?: rootProject.findProperty("rdmaPluginProject")?.toString()
-        ?: DEFAULT_PLUGIN_PROJECT
+    val container = rdmaConfig().plugin.project.ifEmpty { DEFAULT_PLUGIN_PROJECT }
     val suffix = path.removePrefix(container).removePrefix(":")
     return suffix.replace(':', '.').replaceFirst('.', ':')
 }
@@ -80,7 +84,7 @@ private fun Project.rdmaVersionsDir(): File {
     return if (file.isAbsolute) file else File(rootProject.projectDir, dir)
 }
 
-/** Latest kernel version from `<rdmaVersionsDir>/changelog.json` (the `builtAgainst` value). */
+/** Latest kernel version from `<rdmaVersionsDir>/changelog.json` (the `builtAgainstKernel` value). */
 private fun Project.builtAgainstVersion(): Int {
     val changelog = File(rdmaVersionsDir(), "changelog.json")
     if (!changelog.isFile) {
@@ -240,18 +244,12 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
             val outputDir = "${project.buildDir}/generated/rdma"
             val pluginPackage = project.pluginPackage()
 
-            val kernelContainer = project.findProperty("rdmaKernelProject")?.toString()
-                ?: project.rootProject.findProperty("rdmaKernelProject")?.toString()
-                ?: DEFAULT_KERNEL_PROJECT
-            val kernelRootPackage = project.findProperty("rdmaKernelRootPackage")?.toString()
-                ?: project.rootProject.findProperty("rdmaKernelRootPackage")?.toString()
-                ?: DEFAULT_KERNEL_ROOT_PACKAGE
+            val kernelContainer = project.rdmaConfig().kernel.project.ifEmpty { DEFAULT_KERNEL_PROJECT }
+            val kernelRootPackage = project.rdmaConfig().kernel.rootPackage.ifEmpty { DEFAULT_KERNEL_ROOT_PACKAGE }
 
             // Internal kernel modules are always visible; the plugin additionally sees
             // its own user module `:kernel:user:<username>`.
-            val internals = (project.findProperty("rdmaKernelInternals")?.toString()
-                ?: project.rootProject.findProperty("rdmaKernelInternals")?.toString()
-                ?: "").split(',').map { it.trim() }.filter { it.isNotEmpty() }
+            val internals = project.rdmaConfig().kernel.internals
             val username = project.pluginUsername()
             val ownModule = if (username.isEmpty()) null else "$kernelContainer:user:$username"
 
@@ -271,7 +269,10 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
             val pluginVersion = (project.findProperty("rdmaPluginVersion")?.toString()
                 ?: project.rootProject.findProperty("rdmaPluginVersion")?.toString()
                 ?: "1").toIntOrNull() ?: 1
-            val builtAgainst = project.builtAgainstVersion()
+            val builtAgainstKernel = project.builtAgainstVersion()
+            val builtAgainstToolchain = project.findProperty("rdmaBuiltAgainstToolchain")?.toString()
+                ?: project.rootProject.findProperty("rdmaBuiltAgainstToolchain")?.toString()
+                ?: ""
             // The floor map JSON may contain commas, which would break the comma-separated
             // `plugin:<id>:<option>=<value>` CLI option format; URL-encode it (the compiler
             // plugin URL-decodes it back before parsing the JSON).
@@ -288,7 +289,8 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
                 SubpluginOption("rdmaOutputDir", outputDir),
                 SubpluginOption("pluginId", pluginId),
                 SubpluginOption("pluginVersion", pluginVersion.toString()),
-                SubpluginOption("builtAgainst", builtAgainst.toString()),
+                SubpluginOption("builtAgainstKernel", builtAgainstKernel.toString()),
+                SubpluginOption("builtAgainstToolchain", builtAgainstToolchain),
                 SubpluginOption("rdmaModuleDeps", moduleDeps.joinToString(File.pathSeparator)),
                 SubpluginOption("rdmaFloorMap", floorMapJson),
             )

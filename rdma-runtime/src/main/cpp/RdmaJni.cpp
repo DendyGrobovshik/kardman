@@ -94,16 +94,10 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalAsset(JNIEnv
 extern "C" JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalFile(JNIEnv* env, jclass, jstring filePath) {
     const char* path = env->GetStringUTFChars(filePath, nullptr);
-    std::ifstream in(path, std::ios::binary);
+    std::string pathStr(path);
     env->ReleaseStringUTFChars(filePath, path);
-    if (!in) {
-        LOGI("nativeEvalFile: failed to open %s", path);
-        return;
-    }
-    std::string code((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (!code.empty()) {
-        facebook::rdma::rdmaEvalAsset(code);
-    }
+    // mmap the file (zero-copy) and evaluate it as bytecode on the Hermes thread.
+    facebook::rdma::rdmaEvalFile(pathStr);
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -62,7 +62,8 @@ class StoreStateMachineTest {
     private fun release(
         pluginId: String,
         version: Int,
-        builtAgainst: Int = 1,
+        builtAgainstKernel: Int = 1,
+        builtAgainstToolchain: String = "",
         minHost: Int = 0,
         moduleDeps: List<String> = listOf("internal"),
         usedSymbols: List<String> = emptyList(),
@@ -70,7 +71,8 @@ class StoreStateMachineTest {
         RdmaPluginContract(
             pluginId = pluginId,
             version = version,
-            builtAgainst = builtAgainst,
+            builtAgainstKernel = builtAgainstKernel,
+            builtAgainstToolchain = builtAgainstToolchain,
             minHost = minHost,
             moduleDeps = moduleDeps,
             usedSymbols = usedSymbols,
@@ -78,8 +80,8 @@ class StoreStateMachineTest {
         bundleHash = "hash-$pluginId-$version",
     )
 
-    private fun req(pluginId: String, version: Int, builtAgainst: Int = 1, hostVersion: Int = 1) =
-        ResyncRequest(pluginId, version, builtAgainst, hostVersion)
+    private fun req(pluginId: String, version: Int, builtAgainstKernel: Int = 1, hostVersion: Int = 1, hostGeneration: String = "") =
+        ResyncRequest(pluginId, version, builtAgainstKernel, hostVersion, hostGeneration)
 
     // S3: the normal lifecycle — deprecate, then the plugin author migrates, back to Current.
     @Test
@@ -253,5 +255,66 @@ class StoreStateMachineTest {
 
         assertEquals(PluginState.AGING, store.resync(req("a", 1), t0).state)
         assertEquals(PluginState.CURRENT, store.resync(req("b", 1), t0).state)
+    }
+
+    // toolchain_compatibility.md §2: resolution is gated by `builtAgainstToolchain == G`.
+    @Test
+    fun `toolchain generation resolves the matching bundle`() {
+        val store = RdmaStore()
+        store.setChangelog(Changelog(h = 1))
+        store.registerRelease(release("alice", 1, builtAgainstToolchain = "g1"))
+        store.registerRelease(release("alice", 2, builtAgainstToolchain = "g1"))
+        store.registerRelease(release("alice", 1, builtAgainstToolchain = "g2"))
+
+        val g1 = store.resync(req("alice", 1, hostGeneration = "g1"))
+        assertEquals(2, g1.targetVersion)
+        assertEquals(ResyncStatus.UPDATE, g1.status)
+
+        val g2 = store.resync(req("alice", 0, hostGeneration = "g2"))
+        assertEquals(1, g2.targetVersion)
+        assertEquals(ResyncStatus.UPDATE, g2.status)
+
+        // A blank generation (legacy host) falls back to newest across all generations.
+        val legacy = store.resync(req("alice", 1))
+        assertEquals(2, legacy.targetVersion)
+    }
+
+    // toolchain_compatibility.md §5: a release scoped to one generation freezes the others.
+    @Test
+    fun `release scoped to one generation freezes the other`() {
+        val store = RdmaStore()
+        store.setChangelog(Changelog(h = 1))
+        store.registerRelease(release("alice", 1, builtAgainstToolchain = "g1"))
+        store.registerRelease(release("alice", 2, builtAgainstToolchain = "g1"))
+        store.registerRelease(release("alice", 1, builtAgainstToolchain = "g2"))
+        // v3 exists only for g2.
+        store.registerRelease(release("alice", 3, builtAgainstToolchain = "g2"))
+
+        val g1 = store.resync(req("alice", 2, hostGeneration = "g1"))
+        assertEquals(2, g1.targetVersion)
+        assertEquals(ResyncStatus.CURRENT, g1.status)
+
+        val g2 = store.resync(req("alice", 1, hostGeneration = "g2"))
+        assertEquals(3, g2.targetVersion)
+        assertEquals(ResyncStatus.UPDATE, g2.status)
+    }
+
+    // toolchain_compatibility.md §3 / compatibility.md §8.1: polyfill keys carry the generation.
+    @Test
+    fun `polyfill keys are scoped by generation`() {
+        val store = RdmaStore()
+        store.setChangelog(Changelog(h = 1))
+        store.registerRelease(release("alice", 1, builtAgainstToolchain = "g1", moduleDeps = listOf("internal")))
+        store.registerRelease(release("alice", 1, builtAgainstToolchain = "g2", moduleDeps = listOf("internal")))
+        store.registerRelease(release("alice", 1, moduleDeps = listOf("internal")))
+
+        val g1 = store.resync(req("alice", 1, hostVersion = 2, hostGeneration = "g1"))
+        assertContains(g1.polyfills, "F:internal:2:g1")
+
+        val g2 = store.resync(req("alice", 1, hostVersion = 2, hostGeneration = "g2"))
+        assertContains(g2.polyfills, "F:internal:2:g2")
+
+        val legacy = store.resync(req("alice", 1, hostVersion = 2))
+        assertContains(legacy.polyfills, "F:internal:2")
     }
 }

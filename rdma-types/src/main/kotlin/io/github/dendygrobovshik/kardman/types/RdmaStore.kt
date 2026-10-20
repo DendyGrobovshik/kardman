@@ -38,13 +38,14 @@ data class PluginRelease(
     val bundleHash: String,
 )
 
-/** Client → store re-sync request (§8.2): `(id, version, builtAgainst)` + the host's native `H`. */
+/** Client → store re-sync request (§8.2): `(id, version, builtAgainstKernel)` + the host's native `H` and toolchain generation `G`. */
 @Serializable
 data class ResyncRequest(
     val pluginId: String,
     val version: Int,
-    val builtAgainst: Int,
+    val builtAgainstKernel: Int,
     val hostVersion: Int,
+    val hostGeneration: String = "",
 )
 
 /** Store → client re-sync response (§8.2, §7.4). */

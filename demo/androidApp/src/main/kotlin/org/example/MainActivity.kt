@@ -54,9 +54,10 @@ class MainActivity : ComponentActivity() {
             val pluginId = intent?.getStringExtra(EXTRA_PLUGIN_ID) ?: return
             val version = intent.getIntExtra(EXTRA_VERSION, knownPlugins[pluginId] ?: 1)
             val builtAgainst = intent.getIntExtra(EXTRA_BUILT_AGAINST, DEMO_HOST_VERSION)
-            Log.i("RDMA", "re-sync requested for $pluginId v$version (builtAgainst=$builtAgainst)")
+            val hostGeneration = intent.getStringExtra(EXTRA_HOST_GENERATION) ?: ""
+            Log.i("RDMA", "re-sync requested for $pluginId v$version (builtAgainst=$builtAgainst, generation=$hostGeneration)")
             knownPlugins[pluginId] = version
-            syncPlugins(listOf(Triple(pluginId, version, builtAgainst)))
+            syncPlugins(listOf(Triple(pluginId, version, builtAgainst)), hostGeneration)
         }
     }
 
@@ -145,7 +146,7 @@ class MainActivity : ComponentActivity() {
      * downloaded bundle/polyfill. On UPDATE the tracked version is bumped so the next re-sync
      * reports CURRENT. Unreachable store → falls back to local dev loading (already applied).
      */
-    private fun syncPlugins(plugins: List<Triple<String, Int, Int>>) {
+    private fun syncPlugins(plugins: List<Triple<String, Int, Int>>, hostGeneration: String = "") {
         if (plugins.isEmpty()) return
         val client = RdmaSyncClient(STORE_URL)
         val hostVersion = DEMO_HOST_VERSION
@@ -153,11 +154,11 @@ class MainActivity : ComponentActivity() {
             try {
                 while (!RdmaBridge.nativeIsReady()) Thread.sleep(16)
                 for ((id, version, builtAgainst) in plugins) {
-                    val resp = client.resync(ResyncRequest(id, version, builtAgainst, hostVersion))
+                    val resp = client.resync(ResyncRequest(id, version, builtAgainst, hostVersion, hostGeneration))
                     when (resp.status) {
                         ResyncStatus.UPDATE -> {
                             resp.bundleHash?.let { h ->
-                                client.download(h)?.let { RdmaBridge.nativeEvalBytes(it) }
+                                client.download(h)?.let { cacheAndEvalBundle(h, it) }
                             }
                             evalPolyfills(client, resp.polyfills)
                             knownPlugins[id] = resp.targetVersion
@@ -189,6 +190,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Caches a downloaded plugin bundle to `cacheDir/rdma/<hash>.hbc` (content-addressed, so a
+     * repeated download is skipped) and mmap-loads it through the native runtime.
+     */
+    private fun cacheAndEvalBundle(hash: String, bytes: ByteArray) {
+        val dir = File(cacheDir, "rdma")
+        if (!dir.isDirectory) dir.mkdirs()
+        val file = File(dir, "$hash.hbc")
+        if (!file.isFile) file.writeBytes(bytes)
+        RdmaBridge.nativeEvalFile(file.absolutePath)
+    }
+
     private companion object {
         // Emulator loopback to the host's localhost.
         const val STORE_URL = "http://10.0.2.2:8080"
@@ -199,5 +212,6 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PLUGIN_ID = "pluginId"
         const val EXTRA_VERSION = "version"
         const val EXTRA_BUILT_AGAINST = "builtAgainst"
+        const val EXTRA_HOST_GENERATION = "hostGeneration"
     }
 }

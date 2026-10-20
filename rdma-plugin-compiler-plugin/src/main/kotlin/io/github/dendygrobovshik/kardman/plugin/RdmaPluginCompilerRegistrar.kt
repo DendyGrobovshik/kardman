@@ -36,7 +36,8 @@ object RdmaPluginKeys {
     val OUTPUT_DIR: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("rdmaOutputDir")
     val PLUGIN_ID: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("pluginId")
     val PLUGIN_VERSION: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("pluginVersion")
-    val BUILT_AGAINST: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("builtAgainst")
+    val BUILT_AGAINST_KERNEL: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("builtAgainstKernel")
+    val BUILT_AGAINST_TOOLCHAIN: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("builtAgainstToolchain")
     val MODULE_DEPS: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("rdmaModuleDeps")
     val FLOOR_MAP: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("rdmaFloorMap")
 }
@@ -52,7 +53,8 @@ class RdmaPluginCommandLineProcessor : CommandLineProcessor {
         CliOption("rdmaOutputDir", "<dir>", "Output directory for generated plugin sources", required = false),
         CliOption("pluginId", "<id>", "Stable plugin identifier (username:name)", required = false),
         CliOption("pluginVersion", "<int>", "Monotonic plugin version", required = false),
-        CliOption("builtAgainst", "<int>", "Kernel version the plugin is compiled against", required = false),
+        CliOption("builtAgainstKernel", "<int>", "Kernel version the plugin is compiled against", required = false),
+        CliOption("builtAgainstToolchain", "<g>", "Toolchain generation the plugin is compiled against", required = false),
         CliOption("rdmaModuleDeps", "<ids>", "Kernel module ids visible to the plugin, joined by the platform path separator", required = false),
         CliOption("rdmaFloorMap", "<json>", "Merged kernel floor map (node FQN -> floor) as a JSON object", required = false),
     )
@@ -66,7 +68,8 @@ class RdmaPluginCommandLineProcessor : CommandLineProcessor {
             "rdmaOutputDir" -> configuration.put(RdmaPluginKeys.OUTPUT_DIR, value)
             "pluginId" -> configuration.put(RdmaPluginKeys.PLUGIN_ID, value)
             "pluginVersion" -> configuration.put(RdmaPluginKeys.PLUGIN_VERSION, value)
-            "builtAgainst" -> configuration.put(RdmaPluginKeys.BUILT_AGAINST, value)
+            "builtAgainstKernel" -> configuration.put(RdmaPluginKeys.BUILT_AGAINST_KERNEL, value)
+            "builtAgainstToolchain" -> configuration.put(RdmaPluginKeys.BUILT_AGAINST_TOOLCHAIN, value)
             "rdmaModuleDeps" -> configuration.put(RdmaPluginKeys.MODULE_DEPS, value)
             "rdmaFloorMap" -> configuration.put(RdmaPluginKeys.FLOOR_MAP, value)
         }
@@ -100,7 +103,8 @@ class RdmaPluginCompilerRegistrar : CompilerPluginRegistrar() {
             outputDir = configuration.get(RdmaPluginKeys.OUTPUT_DIR),
             pluginId = configuration.get(RdmaPluginKeys.PLUGIN_ID),
             pluginVersion = configuration.get(RdmaPluginKeys.PLUGIN_VERSION)?.toIntOrNull(),
-            builtAgainst = configuration.get(RdmaPluginKeys.BUILT_AGAINST)?.toIntOrNull(),
+            builtAgainstKernel = configuration.get(RdmaPluginKeys.BUILT_AGAINST_KERNEL)?.toIntOrNull(),
+            builtAgainstToolchain = configuration.get(RdmaPluginKeys.BUILT_AGAINST_TOOLCHAIN),
             moduleDeps = moduleDeps,
             floorMap = floorMap,
         )

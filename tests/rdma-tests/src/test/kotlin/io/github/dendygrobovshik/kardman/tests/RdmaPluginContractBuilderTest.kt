@@ -28,14 +28,14 @@ class RdmaPluginContractBuilderTest {
         val contract = RdmaPluginContractBuilder.build(
             pluginId = "alice:counter",
             version = 3,
-            builtAgainst = 7,
+            builtAgainstKernel = 7,
             moduleDeps = listOf("internal", "user_alice"),
             usedSymbols = listOf("a.Text", "a.Person", "a.HttpClient"),
             floor = mapOf("a.Text" to 5, "a.Person" to 0, "a.HttpClient" to 2),
         )
         assertEquals(5, contract.minHost)
         assertEquals(3, contract.version)
-        assertEquals(7, contract.builtAgainst)
+        assertEquals(7, contract.builtAgainstKernel)
         assertEquals(listOf("internal", "user_alice"), contract.moduleDeps)
     }
 
@@ -44,7 +44,7 @@ class RdmaPluginContractBuilderTest {
         val contract = RdmaPluginContractBuilder.build(
             pluginId = "bob:services",
             version = 1,
-            builtAgainst = 7,
+            builtAgainstKernel = 7,
             moduleDeps = listOf("internal"),
             usedSymbols = listOf("a.HttpClient"),
             floor = emptyMap(),
@@ -57,7 +57,7 @@ class RdmaPluginContractBuilderTest {
         val contract = RdmaPluginContractBuilder.build(
             pluginId = "alice:counter",
             version = 1,
-            builtAgainst = 0,
+            builtAgainstKernel = 0,
             moduleDeps = emptyList(),
             usedSymbols = listOf("a.B", "a.A", "a.B"),
             floor = emptyMap(),
@@ -70,7 +70,7 @@ class RdmaPluginContractBuilderTest {
         val contract = RdmaPluginContractBuilder.build(
             pluginId = "alice:counter",
             version = 4,
-            builtAgainst = 9,
+            builtAgainstKernel = 9,
             moduleDeps = listOf("internal", "user_alice"),
             usedSymbols = listOf("a.Text"),
             floor = mapOf("a.Text" to 9),

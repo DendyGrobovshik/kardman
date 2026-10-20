@@ -98,7 +98,7 @@ class RdmaStore(
 
     fun resync(request: ResyncRequest, now: Instant = Instant.now()): ResyncResponse {
         val pluginReleases = releases[request.pluginId].orEmpty()
-        val target = RdmaStoreEngine.resolveNewest(pluginReleases, request.hostVersion)
+        val target = RdmaStoreEngine.resolveNewest(pluginReleases, request.hostVersion, request.hostGeneration)
 
         val current = pluginReleases.firstOrNull { it.contract.version == request.version }
         fun rRetained(fqn: String): Boolean {
@@ -122,7 +122,7 @@ class RdmaStore(
             )
         }
 
-        val polyfills = polyfillKeys(target, request.hostVersion, state)
+        val polyfills = polyfillKeys(target, request.hostVersion, request.hostGeneration, state)
 
         return when {
             state == PluginState.BROKEN -> ResyncResponse(
@@ -156,11 +156,16 @@ class RdmaStore(
         }
     }
 
-    private fun polyfillKeys(target: PluginRelease, hostVersion: Int, state: PluginState): List<String> {
+    private fun polyfillKeys(target: PluginRelease, hostVersion: Int, hostGeneration: String, state: PluginState): List<String> {
         val keys = mutableListOf<String>()
-        for (module in target.contract.moduleDeps) keys += "F:$module:$hostVersion"
+        val g = hostGeneration
+        for (module in target.contract.moduleDeps) {
+            keys += if (g.isBlank()) "F:$module:$hostVersion" else "F:$module:$hostVersion:$g"
+        }
         if (state == PluginState.AT_RISK) {
-            for (module in target.contract.moduleDeps) keys += "R:$module"
+            for (module in target.contract.moduleDeps) {
+                keys += if (g.isBlank()) "R:$module" else "R:$module:$g"
+            }
         }
         return keys
     }

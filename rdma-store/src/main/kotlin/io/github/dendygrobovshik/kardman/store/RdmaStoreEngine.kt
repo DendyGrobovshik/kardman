@@ -32,9 +32,21 @@ object RdmaStoreEngine {
     const val RETENTION_DAYS: Long = 90
     const val USAGE_THRESHOLD: Double = 0.0001 // 0.01%
 
-    /** The newest compatible release on host [hostVersion] (`minHost ≤ H`), or null. */
-    fun resolveNewest(releases: List<PluginRelease>, hostVersion: Int): PluginRelease? =
-        releases.filter { it.contract.minHost <= hostVersion }.maxByOrNull { it.contract.version }
+    /**
+     * The newest compatible release on host [hostVersion] (`minHost ≤ H`) and, when
+     * [hostGeneration] is non-blank, the matching toolchain generation
+     * (`builtAgainstToolchain == hostGeneration`), or null. A blank generation skips the
+     * generation filter (legacy hosts / bundles not yet tagged).
+     */
+    fun resolveNewest(
+        releases: List<PluginRelease>,
+        hostVersion: Int,
+        hostGeneration: String = "",
+    ): PluginRelease? =
+        releases
+            .filter { it.contract.minHost <= hostVersion }
+            .filter { hostGeneration.isBlank() || it.contract.builtAgainstToolchain == hostGeneration }
+            .maxByOrNull { it.contract.version }
 
     /** The worst state among a collection (enum ordinals: CURRENT < AGING < AT_RISK < BROKEN). */
     fun worstState(states: Iterable<PluginState>): PluginState =

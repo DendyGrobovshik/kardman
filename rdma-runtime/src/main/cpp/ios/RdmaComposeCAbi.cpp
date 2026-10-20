@@ -669,6 +669,11 @@ void rdma_eval_bytes(const void* code, int32_t len) {
     facebook::rdma::rdmaEvalAsset(std::string((const char*)code, (size_t)len));
 }
 
+void rdma_eval_file(const char* path) {
+    if (!path) return;
+    facebook::rdma::rdmaEvalFile(std::string(path));
+}
+
 void* rdma_vtableDispatch(int64_t vtablePtr, int32_t vtableId) {
     using namespace facebook::rdma;
     if (vtablePtr == 0) return nullptr;
