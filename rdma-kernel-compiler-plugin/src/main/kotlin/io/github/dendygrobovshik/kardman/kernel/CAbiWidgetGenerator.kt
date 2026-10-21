@@ -47,12 +47,16 @@ class CAbiWidgetGenerator(
         data class Ref(val name: String, val fqn: String, val nullable: Boolean) : Param()
         data class Content(val name: String, val arity: Int) : Param()
         data class Callback(val name: String, val arity: Int, val paramTypes: List<RdmaTypeRef>) : Param()
+        data class ListVal(val name: String, val elemType: RdmaTypeRef) : Param()
+        data class ListHandle(val name: String, val arity: Int) : Param()
 
         val idName: String get() = when (this) {
             is Value -> name
             is Ref -> name
             is Content -> name + "Id"
             is Callback -> name + "Id"
+            is ListVal -> name
+            is ListHandle -> name
         }
     }
 
@@ -66,9 +70,15 @@ class CAbiWidgetGenerator(
 
     private fun classify(fn: RdmaFunctionInfo): List<Param> = fn.parameters.map { p ->
         val fnType = p.type.type as? RdmaType.FunctionType
+        val listType = p.type.type as? RdmaType.ListType
         when {
             fnType != null && p.composable -> Param.Content(p.name, fnType.parameters.size)
             fnType != null -> Param.Callback(p.name, fnType.parameters.size, fnType.parameters)
+            listType != null -> {
+                val elem = listType.element
+                if (elem.type is RdmaType.FunctionType) Param.ListHandle(p.name, (elem.type as RdmaType.FunctionType).parameters.size)
+                else Param.ListVal(p.name, elem)
+            }
             p.type.type is RdmaType.Ref ->
                 Param.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable)
             else -> Param.Value(p.name, valueFqn(p.type.type))
@@ -122,7 +132,10 @@ import kotlin.native.EagerInitialization
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.asStableRef
 import kotlinx.cinterop.staticCFunction
+
+private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
 
 """)
         val refFqns = widgets
@@ -182,6 +195,14 @@ import kotlinx.cinterop.staticCFunction
             }
             "fun ${cName}_${p.name}(${p.idName}: Long): $ret = $lambda\n"
         }
+        is Param.ListVal -> {
+            val elemKotlin = refKotlinType(p.elemType)
+            "fun ${cName}_${p.name}(${p.name}: COpaquePointer): List<$elemKotlin> = ${p.name}.obj<List<$elemKotlin>>()\n"
+        }
+        is Param.ListHandle -> when (p.arity) {
+            0 -> "fun ${cName}_${p.name}(${p.name}: COpaquePointer): List<() -> Unit> = ${p.name}.obj<List<Long>>().map { { RdmaComposeHost.nativeInvokeCallback(it, emptyArray<Any?>()) } }\n"
+            else -> error("List callback arity ${p.arity} is not supported (only 0)")
+        }
         else -> null
     }
 
@@ -208,6 +229,7 @@ import kotlinx.cinterop.staticCFunction
         }
         is Param.Ref -> "${p.idName}: COpaquePointer"
         is Param.Content, is Param.Callback -> "${p.idName}: Long"
+        is Param.ListVal, is Param.ListHandle -> "${p.idName}: COpaquePointer"
     }
     private fun cParamTypeOnly(p: Param): String = when (p) {
         is Param.Value -> when (p.jvmType) {
@@ -220,6 +242,7 @@ import kotlinx.cinterop.staticCFunction
         }
         is Param.Ref -> "void*"
         is Param.Content, is Param.Callback -> "int64_t"
+        is Param.ListVal, is Param.ListHandle -> "void*"
     }
 
     private fun cParamType(p: Param): String = "${cParamTypeOnly(p)} ${p.idName}"
@@ -268,6 +291,8 @@ $nsClose} // namespace rdma
 namespace facebook {
 namespace rdma {
 $nsOpen
+void* materializeList(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& elementType);
+
 void installRdmaWidgetBridge(jsi::Runtime& rt, jsi::Object& rdma) {
 """)
         for (fn in widgets) {
@@ -311,12 +336,14 @@ $extractions
         is Param.Value -> "cpp_p$i"
         is Param.Ref -> "cpp_p$i"
         is Param.Content, is Param.Callback -> "cpp_p$i"
+        is Param.ListVal, is Param.ListHandle -> "cpp_p$i"
     }
 
     private fun callArgExpr(i: Int, p: Param): String = when (p) {
         is Param.Value -> if (p.jvmType == "kotlin.String") "cpp_p$i.c_str()" else "cpp_p$i"
         is Param.Ref -> "cpp_p$i"
         is Param.Content, is Param.Callback -> "cpp_p$i"
+        is Param.ListVal, is Param.ListHandle -> "cpp_p$i"
     }
 
     private fun extraction(i: Int, p: Param): String = when (p) {
@@ -343,5 +370,19 @@ $extractions
                 "                }\n"
         is Param.Content, is Param.Callback ->
             "                int64_t cpp_p$i = count > $i && args[$i].isNumber() ? (int64_t)args[$i].getNumber() : 0;\n"
+        is Param.ListVal, is Param.ListHandle -> {
+            val elemType = if (p is Param.ListVal) elemTypeFqn(p.elemType) else "kotlin.Long"
+            "                void* cpp_p$i = nullptr;\n" +
+                "                if (count > $i && args[$i].isObject()) {\n" +
+                "                    auto listObj_$i = args[$i].asObject(r);\n" +
+                "                    cpp_p$i = materializeList(r, listObj_$i, \"$elemType\");\n" +
+                "                }\n"
+        }
+    }
+
+    private fun elemTypeFqn(t: RdmaTypeRef): String = when (val ty = t.type) {
+        is RdmaType.Primitive -> ty.fqn
+        is RdmaType.Ref -> ty.fqn
+        else -> "kotlin.Any"
     }
 }

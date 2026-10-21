@@ -210,7 +210,9 @@ class RdmaAppGradlePlugin : Plugin<Project> {
         // 3) Wire the compiled plugin JS of every plugin module into the app's assets.
         // `hermesc` is resolved from the configured `rdmaHermesc` path or, when unset, from
         // the `hermesc` maven artifact (see `resolveHermesc`), so the AOT path is always used.
-        if (pluginProjects.isNotEmpty()) {
+        // The shared-runtime bundles are emitted even with no baked-in plugins, because
+        // store-delivered (dynamic) plugins depend on them at load time.
+        if (sharedRuntimeProject != null || pluginProjects.isNotEmpty()) {
             val (hermescResolve, hermescBinary) = resolveHermesc(target, hermesc ?: "")
             val aotCompileJs = target.tasks.register("aotCompileJs") { task ->
                 pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }

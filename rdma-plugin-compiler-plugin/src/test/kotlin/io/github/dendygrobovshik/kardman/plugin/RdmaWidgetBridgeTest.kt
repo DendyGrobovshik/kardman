@@ -55,4 +55,23 @@ class RdmaWidgetBridgeTest {
         assertContains(src, "fun rdmaCard(content: @Composable () -> Unit)")
         assertContains(src, "js(\"RDMA\").composeCard(js(\"RDMA\").registerBlock(content))")
     }
+
+    @Test
+    fun `generates widget bridge for list values and list block handles`() {
+        val fn = RdmaPluginFunction(
+            name = "NavigationPanel",
+            qualifiedName = "com.example.kernel.NavigationPanel",
+            composable = true,
+            parameters = listOf(
+                RdmaPluginParameter("title", RdmaParamKind.VALUE, "String"),
+                RdmaPluginParameter("actionLabels", RdmaParamKind.LIST_VALUE, "List<String>", 0),
+                RdmaPluginParameter("actions", RdmaParamKind.LIST_HANDLE, "List<() -> Unit>", 0),
+                RdmaPluginParameter("content", RdmaParamKind.CONTENT, "@Composable () -> Unit", 0),
+            ),
+        )
+        val src = RdmaPluginTransformState.buildWidgetBridge(listOf(fn))
+        assertContains(src, "fun rdmaNavigationPanel(title: String, actionLabels: List<String>, actions: List<() -> Unit>, content: @Composable () -> Unit)")
+        assertContains(src, "actions.map { js(\"RDMA\").registerBlock(it) }")
+        assertContains(src, "js(\"RDMA\").composeNavigationPanel(title, actionLabels, actions.map { js(\"RDMA\").registerBlock(it) }, js(\"RDMA\").registerBlock(content))")
+    }
 }

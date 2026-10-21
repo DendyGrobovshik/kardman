@@ -20,6 +20,7 @@ package io.github.dendygrobovshik.kardman.runtime
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_eval_bytes
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_eval_file
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_is_ready
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_content_version
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_start
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
@@ -35,6 +36,8 @@ object RdmaBridge {
     }
 
     fun nativeIsReady(): Boolean = rdma_is_ready() != 0
+
+    fun nativeContentVersion(): Int = rdma_content_version()
 
     fun nativeEvalBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return

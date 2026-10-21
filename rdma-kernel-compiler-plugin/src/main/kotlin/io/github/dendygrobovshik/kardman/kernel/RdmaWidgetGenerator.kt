@@ -48,12 +48,16 @@ class RdmaWidgetGenerator(
         data class Ref(val name: String, val fqn: String, val nullable: Boolean) : Param()
         data class Content(val name: String, val arity: Int) : Param()
         data class Callback(val name: String, val arity: Int) : Param()
+        data class ListVal(val name: String, val elemFqn: String) : Param()
+        data class ListHandle(val name: String, val arity: Int) : Param()
 
         val idName: String get() = when (this) {
             is Value -> name
             is Ref -> name
             is Content -> name + "Id"
             is Callback -> name + "Id"
+            is ListVal -> name
+            is ListHandle -> name
         }
     }
 
@@ -67,9 +71,15 @@ class RdmaWidgetGenerator(
 
     private fun classify(fn: RdmaFunctionInfo): List<Param> = fn.parameters.map { p ->
         val fnType = p.type.type as? RdmaType.FunctionType
+        val listType = p.type.type as? RdmaType.ListType
         when {
             fnType != null && p.composable -> Param.Content(p.name, fnType.parameters.size)
             fnType != null -> Param.Callback(p.name, fnType.parameters.size)
+            listType != null -> {
+                val elem = listType.element.type
+                if (elem is RdmaType.FunctionType) Param.ListHandle(p.name, elem.parameters.size)
+                else Param.ListVal(p.name, valueFqn(elem))
+            }
             p.type.type is RdmaType.Ref ->
                 Param.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable)
             else -> Param.Value(p.name, valueFqn(p.type.type))
@@ -121,6 +131,7 @@ class RdmaWidgetGenerator(
         is Param.Value -> jniType(jvmType)
         is Param.Ref -> refJniType(fqn)
         is Param.Content, is Param.Callback -> "J" // block id is a Long
+        is Param.ListVal, is Param.ListHandle -> "Ljava/util/List;"
     }
 
     // ---------------------------------------------------------- Kotlin entries
@@ -159,6 +170,8 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
                 is Param.Value -> "${p.idName}: ${kotlinType(p.jvmType)}"
                 is Param.Ref -> "${p.idName}: ${simpleName(p.fqn)}${if (p.nullable) "?" else ""}"
                 is Param.Content, is Param.Callback -> "${p.idName}: Long"
+                is Param.ListVal -> "${p.idName}: List<${kotlinType(p.elemFqn)}>"
+                is Param.ListHandle -> "${p.idName}: List<Long>"
             }
         }
         val args = params.joinToString(",\n        ") { p -> callArg(p) }
@@ -189,6 +202,11 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
                 val array = (0 until p.arity).joinToString(", ") { "p$it" }
                 "${p.name} = { $lambdaParams -> RdmaComposeHost.nativeInvokeCallback(${p.idName}, arrayOf<Any?>($array)) }"
             }
+        }
+        is Param.ListVal -> "${p.name} = ${p.idName}"
+        is Param.ListHandle -> when (p.arity) {
+            0 -> "${p.name} = ${p.idName}.map { { RdmaComposeHost.nativeInvokeCallback(it, emptyArray<Any?>()) } }"
+            else -> error("List callback arity ${p.arity} is not supported (only 0)")
         }
     }
 
@@ -227,6 +245,7 @@ $nsClose} // namespace rdma
         val out = cppOutput("RdmaWidgetBridge$fileSuffix.cpp", "RdmaWidgetBridge$fileSuffix.cpp").bufferedWriter()
         out.write("""#include "RdmaWidgetBridge$fileSuffix.h"
 #include "RdmaCompose.h"
+#include "ListHandle.h"
 
 #include <string>
 #include <memory>
@@ -274,7 +293,11 @@ $nsClose} // namespace rdma
         val captureList = if (captures.isEmpty()) "" else ", $captures"
         val callArgs = params.mapIndexed { i, p -> callArgExpr(i, p) }.joinToString(", ")
         val cleanups = params.mapIndexedNotNull { i, p ->
-            if (p is Param.Value && p.jvmType == "kotlin.String") "        if (j_p${i}g) e->DeleteGlobalRef(j_p${i}g);\n" else null
+            when {
+                p is Param.Value && p.jvmType == "kotlin.String" -> "        if (j_p${i}g) e->DeleteGlobalRef(j_p${i}g);\n"
+                p is Param.ListVal || p is Param.ListHandle -> "        if (cpp_p$i) e->DeleteGlobalRef(cpp_p$i);\n"
+                else -> null
+            }
         }.joinToString("")
         val changedArgs = changedCallArgs(arity)
         return """
@@ -304,12 +327,14 @@ $cleanups
         is Param.Value -> if (p.jvmType == "kotlin.String") "j_p${i}g" else "cpp_p$i"
         is Param.Ref -> "cpp_p$i"
         is Param.Content, is Param.Callback -> "cpp_p$i"
+        is Param.ListVal, is Param.ListHandle -> "cpp_p$i"
     }
 
     private fun callArgExpr(i: Int, p: Param): String = when (p) {
         is Param.Value -> if (p.jvmType == "kotlin.String") "j_p${i}g" else "cpp_p$i"
         is Param.Ref -> "cpp_p$i"
         is Param.Content, is Param.Callback -> "cpp_p$i"
+        is Param.ListVal, is Param.ListHandle -> "cpp_p$i"
     }
 
     private fun extraction(i: Int, p: Param): String = when (p) {
@@ -338,5 +363,13 @@ $cleanups
                 "                }\n"
         is Param.Content, is Param.Callback ->
             "                jlong cpp_p$i = count > $i && args[$i].isNumber() ? (jlong)args[$i].getNumber() : 0;\n"
+        is Param.ListVal, is Param.ListHandle -> {
+            val elemType = if (p is Param.ListVal) p.elemFqn else "kotlin.Long"
+            "                jobject cpp_p$i = nullptr;\n" +
+                "                if (count > $i && args[$i].isObject()) {\n" +
+                "                    auto listObj_$i = args[$i].asObject(r);\n" +
+                "                    cpp_p$i = materializeArray(e, r, jvm, listObj_$i, \"$elemType\");\n" +
+                "                }\n"
+        }
     }
 }

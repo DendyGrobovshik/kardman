@@ -16,6 +16,7 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.kotlinSerialization)
     alias(libs.plugins.androidMultiplatformLibrary)
     id("io.github.dendygrobovshik.kardman.rdma-kernel-compiler") version "1.0"
 }
@@ -43,12 +44,19 @@ kotlin {
         }
         androidMain {
             kotlin.srcDir("build/generated/rdma/androidMain")
+            dependencies {
+                implementation("io.github.dendygrobovshik.kardman:rdma-runtime:1.0")
+                implementation("io.github.dendygrobovshik.kardman:rdma-types:1.0")
+                implementation(libs.kotlinx.serialization.json)
+                implementation("org.jetbrains.compose.material:material-icons-extended:1.7.3")
+            }
         }
         iosMain {
             kotlin.srcDir("build/generated/rdma/iosMain")
             kotlin.srcDir("build/generated/rdma/capi/kotlin")
             dependencies {
                 implementation("io.github.dendygrobovshik.kardman:rdma-runtime-ios:1.0")
+                implementation(libs.kotlinx.serialization.json)
             }
         }
     }

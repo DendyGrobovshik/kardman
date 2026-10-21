@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <atomic>
 #include <dispatch/dispatch.h>
 
 #define LOG_TAG "RdmaComposeCAbi"
@@ -53,6 +54,7 @@ namespace facebook {
 namespace rdma {
 
 static std::shared_ptr<jsi::Function> g_content;
+static std::atomic<int> g_contentVersion{0};
 std::shared_ptr<jsi::Object> g_empty;
 static std::unordered_map<int64_t, std::shared_ptr<jsi::Function>> g_scopeBlocks;
 static int64_t g_nextScopeBlockId = 1;
@@ -461,6 +463,7 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
             if (count > 0 && args[0].isObject() && args[0].asObject(r).isFunction(r)) {
                 g_content = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
+                g_contentVersion.fetch_add(1, std::memory_order_release);
                 LOGI("Content registered");
             }
             return jsi::Value::undefined();
@@ -672,6 +675,10 @@ void rdma_eval_bytes(const void* code, int32_t len) {
 void rdma_eval_file(const char* path) {
     if (!path) return;
     facebook::rdma::rdmaEvalFile(std::string(path));
+}
+
+int32_t rdma_content_version(void) {
+    return facebook::rdma::g_contentVersion.load(std::memory_order_acquire);
 }
 
 void* rdma_vtableDispatch(int64_t vtablePtr, int32_t vtableId) {

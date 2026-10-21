@@ -17,20 +17,15 @@
 
 package org.example
 
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.window.ComposeUIViewController
+import com.example.kernel.internal.services.installStore
 import io.github.dendygrobovshik.kardman.runtime.RdmaBridge
-import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
-import kotlinx.coroutines.delay
 import org.example.ios.rdma_userBridgeInstall
+import org.example.ui.DemoShell
 import platform.Foundation.NSBundle
+import platform.Foundation.NSTemporaryDirectory
 import platform.UIKit.UIViewController
 import platform.posix.SEEK_END
 import platform.posix.SEEK_SET
@@ -42,32 +37,19 @@ import platform.posix.ftell
 
 /**
  * iOS host entry point. Bootstraps the Hermes runtime + user bridge, evaluates the
- * plugin `.hbc` bundles (dependencies first, then plugins), then hosts the plugin
- * content (RdmaComposeHost.Content) inside a Compose UIViewController.
+ * shared-runtime `.hbc` bundles, then hosts the demo shell (edit/preview). Dynamic
+ * plugins are delivered through the store and evaluated on re-sync.
  */
 fun MainViewController(): UIViewController {
     rdma_userBridgeInstall()
     RdmaBridge.nativeInit()
     loadBundles()
-    return ComposeUIViewController { Content() }
-}
-
-@Composable
-private fun Content() {
-    var ready by remember { mutableStateOf(RdmaBridge.nativeIsReady()) }
-    LaunchedEffect(Unit) {
-        while (!ready) {
-            delay(16)
-            ready = RdmaBridge.nativeIsReady()
-        }
-    }
-    if (ready) {
-        RdmaComposeHost.Content()
-    }
+    installStore("http://localhost:8080", NSTemporaryDirectory() + "rdma", 1)
+    return ComposeUIViewController { DemoShell() }
 }
 
 // Load order comes from the build-generated `rdma-modules.json` manifest (shared
-// dependencies first, then the baked-in plugin bundles).
+// dependencies first, then any baked-in plugin bundles).
 private fun loadBundles() {
     for (name in readModuleManifest()) {
         evalBundle(name)
@@ -107,6 +89,5 @@ private fun evalBundle(name: String) {
         println("RDMA: bundle not found: $name.hbc")
         return
     }
-    // mmap the bundle file (zero-copy) and evaluate it as bytecode.
     RdmaBridge.nativeEvalFile(path)
 }

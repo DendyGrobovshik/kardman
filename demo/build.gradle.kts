@@ -30,11 +30,10 @@ tasks.register<Delete>("cleanGenerated") {
 
     delete(
         "kernel/internal/build/generated",
-        "kernel/user/alice/build/generated",
-        "plugin/alice/counter/build/generated",
-        "plugin/alice/counter/build/compileSync",
-        "plugin/alice/counter/build/kotlin-webpack",
-        "plugin/alice/counter/build/dist",
+        "plugin/generated/build/generated",
+        "plugin/generated/build/compileSync",
+        "plugin/generated/build/kotlin-webpack",
+        "plugin/generated/build/dist",
         "androidApp/src/main/assets/kotlin",
     )
 }

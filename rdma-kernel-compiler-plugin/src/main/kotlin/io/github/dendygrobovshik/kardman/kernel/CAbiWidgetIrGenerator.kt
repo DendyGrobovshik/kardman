@@ -79,6 +79,8 @@ class CAbiWidgetIrGenerator(
         data class Ref(override val name: String, val fqn: String, val nullable: Boolean) : WParam()
         data class Content(override val name: String) : WParam()
         data class Callback(override val name: String) : WParam()
+        data class ListVal(override val name: String, val elemFqn: String) : WParam()
+        data class ListHandle(override val name: String) : WParam()
     }
 
     fun generate(widgets: List<RdmaFunctionInfo>) {
@@ -106,9 +108,15 @@ class CAbiWidgetIrGenerator(
 
     private fun classify(fn: RdmaFunctionInfo): List<WParam> = fn.parameters.map { p ->
         val fnType = p.type.type as? RdmaType.FunctionType
+        val listType = p.type.type as? RdmaType.ListType
         when {
             fnType != null && p.composable -> WParam.Content(p.name)
             fnType != null -> WParam.Callback(p.name)
+            listType != null -> {
+                val elem = listType.element.type
+                if (elem is RdmaType.FunctionType) WParam.ListHandle(p.name)
+                else WParam.ListVal(p.name, valueFqn(elem))
+            }
             p.type.type is RdmaType.Ref -> WParam.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable)
             else -> WParam.Value(p.name, valueFqn(p.type.type))
         }
@@ -130,7 +138,7 @@ class CAbiWidgetIrGenerator(
     ): Map<String, IrSimpleFunctionSymbol>? {
         val result = mutableMapOf<String, IrSimpleFunctionSymbol>()
         for (p in params) {
-            if (p is WParam.Content || p is WParam.Callback) {
+            if (p is WParam.Content || p is WParam.Callback || p is WParam.ListVal || p is WParam.ListHandle) {
                 val sym = byName[helperName(fn, p)]?.symbol ?: return null
                 result[p.name] = sym
             }
@@ -181,7 +189,7 @@ class CAbiWidgetIrGenerator(
             else -> builder.irGet(stubParam)
         }
         is WParam.Ref -> marshalRef(builder, p, stubParam)
-        is WParam.Content, is WParam.Callback -> {
+        is WParam.Content, is WParam.Callback, is WParam.ListVal, is WParam.ListHandle -> {
             val helper = helpers[p.name]!!
             builder.irCall(helper).apply { arguments[0] = builder.irGet(stubParam) }
         }

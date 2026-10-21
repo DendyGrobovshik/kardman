@@ -31,11 +31,7 @@ dependencies {
     implementation(libs.compose.uiToolingPreview)
     debugImplementation(libs.compose.uiTooling)
 
-    implementation("io.github.dendygrobovshik.kardman:rdma-types:1.0")
-    implementation(libs.kotlinx.serialization.json)
-
-    testImplementation(libs.junit)
-    testImplementation(libs.kotlin.test)
+    implementation(project(":shared-ui"))
 }
 
 android {

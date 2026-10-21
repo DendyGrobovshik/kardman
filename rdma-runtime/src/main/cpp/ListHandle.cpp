@@ -145,6 +145,14 @@ jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object
                     if (je) env->CallBooleanMethod(localList, addMethod, je);
                 }
             }
+        } else {
+            // Primitives / String / boxed numbers (e.g. block-id Longs) cross the
+            // boundary as plain boxed values.
+            jobject boxed = boxJsi(env, rt, elem);
+            if (boxed) {
+                env->CallBooleanMethod(localList, addMethod, boxed);
+                env->DeleteLocalRef(boxed);
+            }
         }
     }
     

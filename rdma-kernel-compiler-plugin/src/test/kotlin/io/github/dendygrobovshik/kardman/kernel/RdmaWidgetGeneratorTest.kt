@@ -97,4 +97,29 @@ class RdmaWidgetGeneratorTest {
         assertTrue(!bridge.contains("FindClass"), "no widgets => no FindClass for the empty entries class")
         assertContains(bridge, "void initWidgetJniCache(JNIEnv* env) {")
     }
+
+    @Test
+    fun `list params marshal values and block handles`() {
+        val widget = RdmaFunctionInfo(
+            name = "NavigationPanel",
+            qualifiedName = "com.example.kernel.NavigationPanel",
+            facadeClass = "com.example.kernel.WidgetsKt",
+            composable = true,
+            parameters = listOf(
+                RdmaParameterInfo("title", RdmaTypeRef(RdmaType.Primitive("kotlin.String"))),
+                RdmaParameterInfo("actionLabels", RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.Primitive("kotlin.String"))))),
+                RdmaParameterInfo("actions", RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.FunctionType(emptyList(), RdmaTypeRef(RdmaType.UnitType)))))),
+                RdmaParameterInfo("content", RdmaTypeRef(RdmaType.FunctionType(emptyList(), RdmaTypeRef(RdmaType.UnitType))), composable = true),
+            ),
+            returnType = RdmaTypeRef(RdmaType.UnitType),
+        )
+        val (cpp, kt) = generate(listOf(widget))
+        val entries = kt["RdmaWidgetEntries.kt"] ?: error("RdmaWidgetEntries.kt not generated")
+        assertContains(entries, "fun composeNavigationPanel(title: String, actionLabels: List<String>, actions: List<Long>, contentId: Long)")
+        assertContains(entries, "actions = actions.map { { RdmaComposeHost.nativeInvokeCallback(it, emptyArray<Any?>()) } }")
+        assertContains(entries, "actionLabels = actionLabels")
+        val bridge = cpp["RdmaWidgetBridge.cpp"] ?: error("not generated")
+        assertContains(bridge, "materializeArray(e, r, jvm, listObj_1, \"kotlin.String\")")
+        assertContains(bridge, "materializeArray(e, r, jvm, listObj_2, \"kotlin.Long\")")
+    }
 }

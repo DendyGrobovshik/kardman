@@ -133,6 +133,29 @@ class RdmaPluginConfigTest {
     }
 
     @Test
+    fun `parses list value and list handle params`() {
+        val manifest = RdmaManifest(
+            functions = listOf(
+                RdmaFunctionInfo(
+                    name = "NavigationPanel", qualifiedName = "com.example.kernel.NavigationPanel",
+                    facadeClass = "com.example.kernel.WidgetsKt", composable = true,
+                    parameters = listOf(
+                        RdmaParameterInfo("actionLabels", RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.Primitive("kotlin.String"))))),
+                        RdmaParameterInfo("actions", RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.FunctionType(emptyList(), RdmaTypeRef(RdmaType.UnitType)))))),
+                    ),
+                    returnType = RdmaTypeRef(RdmaType.UnitType),
+                ),
+            ),
+        )
+        val parsed = RdmaPluginConfig.parseManifest(Json.encodeToString(RdmaManifest.serializer(), manifest))
+        val fn = parsed.functions.first()
+        assertEquals(RdmaParamKind.LIST_VALUE, fn.parameters[0].kind)
+        assertEquals("List<String>", fn.parameters[0].kotlinType)
+        assertEquals(RdmaParamKind.LIST_HANDLE, fn.parameters[1].kind)
+        assertEquals("List<() -> Unit>", fn.parameters[1].kotlinType)
+    }
+
+    @Test
     fun `parses companion statics from manifest`() {
         val manifest = RdmaManifest(
             classes = listOf(

@@ -248,12 +248,14 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
             val kernelRootPackage = project.rdmaConfig().kernel.rootPackage.ifEmpty { DEFAULT_KERNEL_ROOT_PACKAGE }
 
             // Internal kernel modules are always visible; the plugin additionally sees
-            // its own user module `:kernel:user:<username>`.
+            // its own user module `:kernel:user:<username>` — but only when that module
+            // actually exists (a plugin may live under a username with no user kernel module).
             val internals = project.rdmaConfig().kernel.internals
             val username = project.pluginUsername()
             val ownModule = if (username.isEmpty()) null else "$kernelContainer:user:$username"
 
             val visiblePaths = internals + listOfNotNull(ownModule)
+                .filter { project.rootProject.findProject(it) != null }
             val manifestPaths = visiblePaths.mapNotNull { kernelPath ->
                 project.rootProject.findProject(kernelPath)?.let { kp ->
                     File(kp.buildDir, "generated/rdma/rdma_manifest.json").absolutePath

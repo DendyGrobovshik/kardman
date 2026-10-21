@@ -29,11 +29,12 @@ ensure_android_sdk "$ROOT_DIR" || exit 1
     :rdma-plugin-compiler-plugin:publishToMavenLocal \
     :rdma-plugin-gradle-plugin:publishToMavenLocal \
     :rdma-runtime:publishToMavenLocal \
-    :rdma-app-gradle-plugin:publishToMavenLocal
+    :rdma-app-gradle-plugin:publishToMavenLocal \
+    :rdma-store:publishToMavenLocal
 
 if [[ -d "$ROOT_DIR/.hermes-ios/hermes.xcframework" ]]; then
     echo "Publishing iOS runtime artifacts to mavenLocal ..."
-    ./gradlew :rdma-runtime-ios:publishToMavenLocal
+    ./gradlew -p "$ROOT_DIR" :rdma-runtime-ios:publishToMavenLocal
 else
     echo "Skipping iOS runtime publish (run scripts/setup/hermes-ios.sh first)."
 fi

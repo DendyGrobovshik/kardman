@@ -31,7 +31,7 @@ kotlin {
         iosMain.dependencies {
             implementation("io.github.dendygrobovshik.kardman:rdma-runtime-ios:1.0")
             implementation(project(":kernel:internal"))
-            implementation(project(":kernel:user:alice"))
+            implementation(project(":shared-ui"))
             implementation(libs.compose.runtime)
             implementation(libs.compose.ui)
             implementation(libs.compose.foundation)

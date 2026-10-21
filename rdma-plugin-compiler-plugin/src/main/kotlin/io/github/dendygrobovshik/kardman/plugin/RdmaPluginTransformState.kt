@@ -259,16 +259,21 @@ object RdmaPluginTransformState {
         for (fn in plainFunctions) {
             if (fn.composable) continue
             val bridgeName = bridgeNameFor(fn.qualifiedName)
-            val params = fn.parameters.mapIndexed { i, p ->
-                if (p.kind == RdmaParamKind.VALUE) {
-                    "p$i: dynamic"
-                } else {
-                    val inner = (0 until (p.lambdaArity ?: 0)).joinToString(", ") { "dynamic" }
-                    "p$i: ($inner) -> dynamic"
+            val params = fn.parameters.map { p ->
+                when (p.kind) {
+                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE, RdmaParamKind.LIST_HANDLE -> "${p.name}: dynamic"
+                    else -> {
+                        val inner = (0 until (p.lambdaArity ?: 0)).joinToString(", ") { "dynamic" }
+                        "${p.name}: ($inner) -> dynamic"
+                    }
                 }
             }.joinToString(", ")
-            val args = fn.parameters.mapIndexed { i, p ->
-                if (p.kind == RdmaParamKind.VALUE) "p$i" else "js(\"RDMA\").registerBlock(p$i)"
+            val args = fn.parameters.map { p ->
+                when (p.kind) {
+                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
+                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it) }"
+                    else -> "js(\"RDMA\").registerBlock(${p.name})"
+                }
             }.joinToString(", ")
             sb.appendLine("fun $bridgeName($params): dynamic = js(\"RDMA\").${fn.name}($args)")
             sb.appendLine()
@@ -287,7 +292,11 @@ object RdmaPluginTransformState {
             val bridgeName = bridgeNameFor(fn.qualifiedName)
             val params = fn.parameters.joinToString(", ") { p -> "${p.name}: ${p.kotlinType}" }
             val args = fn.parameters.joinToString(", ") { p ->
-                if (p.kind == RdmaParamKind.VALUE) p.name else "js(\"RDMA\").registerBlock(${p.name})"
+                when (p.kind) {
+                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
+                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it) }"
+                    else -> "js(\"RDMA\").registerBlock(${p.name})"
+                }
             }
             val composeName = composeFnName(fn.name)
             sb.appendLine("@Composable")

@@ -55,7 +55,15 @@ plugins {
 }
 
 include(":kernel:internal")
-include(":kernel:user:alice")
-include(":plugin:alice:counter")
+include(":plugin:generated")
+include(":shared-ui")
+include(":server")
 include(":androidApp")
 include(":iosApp")
+
+// The shared-runtime module aggregates the common JS dependencies (Kotlin stdlib,
+// Compose runtime, coroutines, …) into one full-DCE compilation. Its modules are the
+// load-time dependencies of every store-delivered plugin, so they are baked into the
+// app assets even though no plugin is baked in.
+include(":shared-runtime")
+project(":shared-runtime").projectDir = file("../shared-runtime")

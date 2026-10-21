@@ -33,8 +33,8 @@ class RdmaFunctionBridgeTest {
             ),
         )
         val src = RdmaPluginTransformState.buildFunctionBridge(listOf(fn))
-        assertContains(src, "fun rdmaForEach(p0: dynamic, p1: (dynamic) -> dynamic): dynamic")
-        assertContains(src, "js(\"RDMA\").forEach(p0, js(\"RDMA\").registerBlock(p1))")
+        assertContains(src, "fun rdmaForEach(list: dynamic, body: (dynamic) -> dynamic): dynamic")
+        assertContains(src, "js(\"RDMA\").forEach(list, js(\"RDMA\").registerBlock(body))")
     }
 
     @Test
@@ -49,8 +49,8 @@ class RdmaFunctionBridgeTest {
             ),
         )
         val src = RdmaPluginTransformState.buildFunctionBridge(listOf(fn))
-        assertContains(src, "fun rdmaAdd(p0: dynamic, p1: dynamic): dynamic")
-        assertContains(src, "js(\"RDMA\").add(p0, p1)")
+        assertContains(src, "fun rdmaAdd(a: dynamic, b: dynamic): dynamic")
+        assertContains(src, "js(\"RDMA\").add(a, b)")
     }
 
     @Test

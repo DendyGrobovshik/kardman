@@ -34,7 +34,7 @@ data class RdmaPluginFunction(
     val parameters: List<RdmaPluginParameter>,
 )
 
-enum class RdmaParamKind { VALUE, CONTENT, CALLBACK }
+enum class RdmaParamKind { VALUE, CONTENT, CALLBACK, LIST_VALUE, LIST_HANDLE }
 
 data class RdmaPluginParameter(
     val name: String,
@@ -70,6 +70,7 @@ object RdmaPluginConfig {
         val functions = raw.functions.map { fn ->
             val parameters = fn.parameters.map { p ->
                 val fnType = p.type.type as? RdmaType.FunctionType
+                val listType = p.type.type as? RdmaType.ListType
                 when {
                     fnType != null && p.composable -> {
                         val paramTypes = fnType.parameters.map { kotlinTypeFor(fqnOf(it.type)) }
@@ -84,6 +85,27 @@ object RdmaPluginConfig {
                         val paramTypes = fnType.parameters.map { kotlinTypeFor(fqnOf(it.type)) }
                         val ktType = "(" + paramTypes.joinToString(", ") + ") -> Unit"
                         RdmaPluginParameter(p.name, RdmaParamKind.CALLBACK, ktType, paramTypes.size)
+                    }
+                    listType != null -> {
+                        val elemFn = listType.element.type as? RdmaType.FunctionType
+                        if (elemFn != null) {
+                            // List of callbacks: JS passes an array of block handles (ids),
+                            // not serialized functions.
+                            val paramTypes = elemFn.parameters.map { kotlinTypeFor(fqnOf(it.type)) }
+                            val ktType = if (paramTypes.isEmpty()) {
+                                "List<() -> Unit>"
+                            } else {
+                                "List<(" + paramTypes.joinToString(", ") + ") -> Unit>"
+                            }
+                            RdmaPluginParameter(p.name, RdmaParamKind.LIST_HANDLE, ktType, paramTypes.size)
+                        } else {
+                            RdmaPluginParameter(
+                                p.name,
+                                RdmaParamKind.LIST_VALUE,
+                                "List<${kotlinTypeFor(fqnOf(listType.element.type))}>",
+                                null,
+                            )
+                        }
                     }
                     else ->
                         RdmaPluginParameter(p.name, RdmaParamKind.VALUE, kotlinTypeFor(fqnOf(p.type.type)))
