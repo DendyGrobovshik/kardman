@@ -38,7 +38,7 @@ your own project, see [How to use](how_to_use.md).
 
 Gradle and Kotlin are not manual prerequisites: the wrapper and
 `gradle/libs.versions.toml` pin them. The framework is built with a **custom Kotlin
-compiler** (`2.4.10-rdma`), so [Initial setup](#initial-setup) must publish it to
+compiler** (`2.3.21-rdma`), so [Initial setup](#initial-setup) must publish it to
 `mavenLocal` before anything else builds.
 
 ## Initial setup
@@ -51,7 +51,7 @@ It runs four steps, each in its own script under [`scripts/setup/`](../../script
 and each idempotent (caches are reused on re-runs):
 
 1. **Kotlin compiler** — [`kotlin.sh`](../../scripts/setup/kotlin.sh). Builds the compiler
-   fork (branch `full_stable_js_export_table-2.4.10`, the one adding `-Xir-export-all`)
+   fork (branch `full_stable_js_export_table-2.3.21`, the one adding `-Xir-export-all`)
    and publishes it to `mavenLocal`. It is not on Maven Central, so a fresh machine has
    to build it; heavy the first time, cached afterwards.
 2. **Hermes for Android** — [`hermes.sh`](../../scripts/setup/hermes.sh). Clones Hermes at

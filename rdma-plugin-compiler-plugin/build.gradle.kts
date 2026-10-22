@@ -26,6 +26,7 @@ kotlin {
         optIn.add("org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi")
         optIn.add("org.jetbrains.kotlin.fir.symbols.SymbolInternals")
         optIn.add("org.jetbrains.kotlin.fir.declarations.DirectDeclarationsAccess")
+        freeCompilerArgs.add("-Xcontext-parameters")
     }
 }
 

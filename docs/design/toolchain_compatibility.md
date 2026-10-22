@@ -48,8 +48,8 @@ Append-only journal, one entry per generation:
   "generations": [
     {
       "g": "<sha256>",
-      "alias": "2.4.10 / 1.11.1 / 0.76.9",
-      "kotlin": { "version": "2.4.10-rdma", "branch": "full_stable_js_export_table-2.4.10", "commit": "…" },
+      "alias": "2.3.21 / 1.11.1 / 0.76.9",
+      "kotlin": { "version": "2.3.21-rdma", "branch": "full_stable_js_export_table-2.3.21", "commit": "…" },
       "composeRuntime": "1.11.1",
       "hermes": { "version": "0.76.9", "commit": "a1154cb…", "bytecodeVersion": 99 },
       "time": "…",

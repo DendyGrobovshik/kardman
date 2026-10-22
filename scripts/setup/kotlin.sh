@@ -14,7 +14,7 @@ set -euo pipefail
 # Override any of the following via environment variables:
 #   KOTLIN_DIR             Checkout (default: <repo>/third_party/kotlin)
 #   KOTLIN_URL             Git URL to clone from (default: the fork on GitHub)
-#   KOTLIN_BRANCH          Branch to clone (default: full_stable_js_export_table-2.4.10)
+#   KOTLIN_BRANCH          Branch to clone (default: full_stable_js_export_table-2.3.21)
 #   KOTLIN_VERSION         deployVersion (default: read from gradle/libs.versions.toml)
 #   KOTLIN_NATIVE_VERSION  versions.kotlin-native (default: KOTLIN_VERSION without -rdma)
 #   BUILD_NUMBER           build.number (default: 1)
@@ -26,7 +26,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 KOTLIN_DIR="${KOTLIN_DIR:-$ROOT_DIR/third_party/kotlin}"
 KOTLIN_URL="${KOTLIN_URL:-https://github.com/DendyGrobovshik/kotlin.git}"
-KOTLIN_BRANCH="${KOTLIN_BRANCH:-full_stable_js_export_table-2.4.10}"
+KOTLIN_BRANCH="${KOTLIN_BRANCH:-full_stable_js_export_table-2.3.21}"
 KOTLIN_VERSION="${KOTLIN_VERSION:-$(sed -n 's/^kotlin = "\(.*\)"/\1/p' "$ROOT_DIR/gradle/libs.versions.toml" | head -1)}"
 KOTLIN_NATIVE_VERSION="${KOTLIN_NATIVE_VERSION:-${KOTLIN_VERSION%-rdma}}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
