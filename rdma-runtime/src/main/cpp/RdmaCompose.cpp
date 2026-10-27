@@ -36,6 +36,8 @@ namespace rdma {
 ComposeJniCache g_composeCache;
 
 static std::shared_ptr<jsi::Function> g_content;
+static std::string g_contentPluginId;
+std::unordered_map<int64_t, std::string> g_blockPluginId;
 std::shared_ptr<jsi::Object> g_empty;
 // Monotonic counter bumped every time a new content is registered. The host
 // polls it to detect "content changed" and recompose the UI (dynamic plugins).
@@ -129,6 +131,15 @@ static bool initComposeJniCache(JNIEnv* env) {
     g_composeCache.jsValueHolderCtor = env->GetMethodID(g_composeCache.jsValueHolderClass, "<init>", "(J)V");
     g_composeCache.jsValueHolderGetId = env->GetMethodID(g_composeCache.jsValueHolderClass, "getId", "()J");
 
+    g_composeCache.rdmaExceptionClass = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/RdmaException");
+    g_composeCache.rdmaExceptionCtor = env->GetMethodID(
+        g_composeCache.rdmaExceptionClass, "<init>",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lio/github/dendygrobovshik/kardman/runtime/RdmaException;)V");
+    g_composeCache.bundleLoadExceptionClass = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/BundleLoadException");
+    g_composeCache.bundleLoadExceptionCtor = env->GetMethodID(
+        g_composeCache.bundleLoadExceptionClass, "<init>",
+        "(Ljava/lang/String;Lio/github/dendygrobovshik/kardman/runtime/RdmaException;)V");
+
     for (int i = 0; i <= 3; i++) {
         char name[128];
         snprintf(name, sizeof(name), "io/github/dendygrobovshik/kardman/runtime/RdmaFunction%d", i);
@@ -146,6 +157,8 @@ static bool initComposeJniCache(JNIEnv* env) {
            g_composeCache.jsValueHolderCtor && g_composeCache.jsValueHolderGetId &&
            g_composeCache.effectsKt && g_composeCache.sideEffect &&
            g_composeCache.disposableEffect &&
+           g_composeCache.rdmaExceptionCtor &&
+           g_composeCache.bundleLoadExceptionCtor &&
            g_composeCache.rdmaFunctionCtor[0] && g_composeCache.rdmaFunctionCtor[1] &&
            g_composeCache.rdmaFunctionCtor[2] && g_composeCache.rdmaFunctionCtor[3];
 }
@@ -305,6 +318,140 @@ RdmaResult classifyBoxedValue(JNIEnv* env, jobject o) {
     return r;
 }
 
+jthrowable makeRdmaException(JNIEnv* env, const RdmaExceptionInfo& info) {
+    if (!env || !g_composeCache.rdmaExceptionClass || !g_composeCache.rdmaExceptionCtor) {
+        return nullptr;
+    }
+    jthrowable cause = nullptr;
+    if (info.cause) {
+        cause = makeRdmaException(env, *info.cause);
+    }
+    jstring type = env->NewStringUTF(info.originalExceptionType.c_str());
+    jstring msg = env->NewStringUTF(info.message.c_str());
+    jstring stack = env->NewStringUTF(info.stack.c_str());
+    jthrowable ex = (jthrowable)env->NewObject(
+        g_composeCache.rdmaExceptionClass, g_composeCache.rdmaExceptionCtor,
+        type, msg, stack, cause);
+    if (type) env->DeleteLocalRef(type);
+    if (msg) env->DeleteLocalRef(msg);
+    if (stack) env->DeleteLocalRef(stack);
+    if (cause) env->DeleteLocalRef(cause);
+    return ex;
+}
+
+jthrowable makeBundleLoadException(JNIEnv* env, const RdmaExceptionInfo& info) {
+    if (!env || !g_composeCache.bundleLoadExceptionClass || !g_composeCache.bundleLoadExceptionCtor) {
+        return nullptr;
+    }
+    jthrowable cause = makeRdmaException(env, info);
+    jstring msg = env->NewStringUTF(info.message.c_str());
+    jthrowable ex = (jthrowable)env->NewObject(
+        g_composeCache.bundleLoadExceptionClass, g_composeCache.bundleLoadExceptionCtor,
+        msg, cause);
+    if (msg) env->DeleteLocalRef(msg);
+    if (cause) env->DeleteLocalRef(cause);
+    return ex;
+}
+
+jobject g_uncaughtHandlerRef = nullptr;
+jmethodID g_uncaughtHandlerInvoke = nullptr;
+
+void androidUncaughtHandler(const RdmaExceptionInfo& info, const std::string& pluginId) {
+    JNIEnv* env = getEnv(g_composeCache.jvm);
+    if (!env) return;
+    jthrowable ex = makeRdmaException(env, info);
+    if (!ex) return;
+    if (g_uncaughtHandlerRef && g_uncaughtHandlerInvoke) {
+        jstring jpid = env->NewStringUTF(pluginId.c_str());
+        jobject ret = env->CallObjectMethod(g_uncaughtHandlerRef, g_uncaughtHandlerInvoke, jpid, ex);
+        if (jpid) env->DeleteLocalRef(jpid);
+        if (ret) env->DeleteLocalRef(ret);
+    }
+    env->DeleteLocalRef(ex);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static std::string jstringToStd(JNIEnv* env, jstring s) {
+    if (!s) return "";
+    const char* c = env->GetStringUTFChars(s, nullptr);
+    std::string out = c ? c : "";
+    if (c) env->ReleaseStringUTFChars(s, c);
+    return out;
+}
+
+RdmaExceptionInfo fromJniThrowable(JNIEnv* env, jthrowable t) {
+    RdmaExceptionInfo info;
+    if (!env || !t) return info;
+
+    jclass throwableClass = env->FindClass("java/lang/Throwable");
+    jclass classClass = env->FindClass("java/lang/Class");
+
+    jclass objClass = env->GetObjectClass(t);
+    jmethodID getName = env->GetMethodID(classClass, "getName", "()Ljava/lang/String;");
+    jstring jname = (jstring)env->CallObjectMethod(objClass, getName);
+    info.originalExceptionType = jstringToStd(env, jname);
+
+    jmethodID getMessage = env->GetMethodID(throwableClass, "getMessage", "()Ljava/lang/String;");
+    jstring jmsg = (jstring)env->CallObjectMethod(t, getMessage);
+    info.message = jstringToStd(env, jmsg);
+
+    jmethodID getStackTrace = env->GetMethodID(throwableClass, "getStackTrace", "()[Ljava/lang/StackTraceElement;");
+    jobjectArray arr = (jobjectArray)env->CallObjectMethod(t, getStackTrace);
+    if (arr) {
+        jclass steClass = env->FindClass("java/lang/StackTraceElement");
+        jmethodID toString = env->GetMethodID(steClass, "toString", "()Ljava/lang/String;");
+        jsize n = env->GetArrayLength(arr);
+        std::string stack;
+        for (jsize i = 0; i < n; i++) {
+            jobject el = env->GetObjectArrayElement(arr, i);
+            jstring s = (jstring)env->CallObjectMethod(el, toString);
+            stack += jstringToStd(env, s);
+            stack += "\n";
+            if (s) env->DeleteLocalRef(s);
+            if (el) env->DeleteLocalRef(el);
+        }
+        info.stack = stack;
+        env->DeleteLocalRef(steClass);
+        env->DeleteLocalRef(arr);
+    }
+
+    jmethodID getCause = env->GetMethodID(throwableClass, "getCause", "()Ljava/lang/Throwable;");
+    jthrowable cause = (jthrowable)env->CallObjectMethod(t, getCause);
+    if (cause && cause != t) {
+        info.cause = std::make_shared<RdmaExceptionInfo>(fromJniThrowable(env, cause));
+    }
+    if (cause) env->DeleteLocalRef(cause);
+
+    if (jname) env->DeleteLocalRef(jname);
+    if (jmsg) env->DeleteLocalRef(jmsg);
+    env->DeleteLocalRef(objClass);
+    env->DeleteLocalRef(throwableClass);
+    env->DeleteLocalRef(classClass);
+    return info;
+}
+
+void checkAndThrowJs(JNIEnv* env, jsi::Runtime& rt) {
+    if (!env || !env->ExceptionCheck()) return;
+    jthrowable t = env->ExceptionOccurred();
+    env->ExceptionClear();
+    if (!t) return;
+    RdmaExceptionInfo info = fromJniThrowable(env, t);
+    env->DeleteLocalRef(t);
+    throwJsException(rt, info);
+}
+
+// Captures a pending JNI exception into an Error result, for UI-thread compose ops
+// that return their result through RdmaResult (Native -> JS, §5).
+bool captureJniError(JNIEnv* e, RdmaResult& out) {
+    if (!e || !e->ExceptionCheck()) return false;
+    jthrowable t = e->ExceptionOccurred();
+    e->ExceptionClear();
+    RdmaExceptionInfo info = t ? fromJniThrowable(e, t) : RdmaExceptionInfo{};
+    if (t) e->DeleteLocalRef(t);
+    out = RdmaResult::fromError(std::move(info));
+    return true;
+}
+
 // ----------------------------------------------------------------- proxies
 
 class StateProxyHost : public jsi::HostObject {
@@ -332,6 +479,8 @@ public:
                             JNIEnv* e = getEnv(g_composeCache.jvm);
                             if (!e) return RdmaResult::undefined();
                             jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
+                            RdmaResult err;
+                            if (captureJniError(e, err)) { if (v) e->DeleteLocalRef(v); return err; }
                             RdmaResult r2 = classifyBoxedValue(e, v);
                             if (v) e->DeleteLocalRef(v);
                             return r2;
@@ -341,6 +490,7 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
                     jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
+                    checkAndThrowJs(e, r);
                     jsi::Value out = unboxJni(e, r, v);
                     if (v) e->DeleteLocalRef(v);
                     return out;
@@ -357,6 +507,7 @@ public:
                     if (boxed) {
                         e->CallVoidMethod(state, g_composeCache.stateSetValue, boxed);
                         e->DeleteLocalRef(boxed);
+                        checkAndThrowJs(e, r);
                     }
                     return jsi::Value::undefined();
                 });
@@ -465,6 +616,9 @@ jsi::Value rdmaResultToJsi(jsi::Runtime& rt, RdmaResult& result) {
             result.ref = nullptr; // ownership transferred to the proxy
             return makeScopeUpdateScopeProxy(rt, ref);
         }
+        case RdmaResultKind::Error: {
+            throwJsException(rt, result.error);
+        }
     }
     return jsi::Value::undefined();
 }
@@ -487,8 +641,10 @@ void invokeRegisteredContent(jsi::Runtime& rt, jobject composerGlobal) {
     jsi::Object proxy = makeComposerProxy(rt, composerGlobal);
     try {
         g_content->call(rt, proxy, 0);
-    } catch (const jsi::JSError& e) {
-        LOGW("JSError in content: %s\n%s", e.what(), e.getStack().c_str());
+    } catch (...) {
+        g_inComposition = prevInComposition;
+        setCurrentComposer(prevComposer);
+        throw;
     }
     g_inComposition = prevInComposition;
     setCurrentComposer(prevComposer);
@@ -504,8 +660,10 @@ void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composerGlobal, ji
     jsi::Object proxy = makeComposerProxy(rt, composerGlobal);
     try {
         it->second->call(rt, proxy, changed);
-    } catch (const jsi::JSError& e) {
-        LOGW("JSError in scope block: %s\n%s", e.what(), e.getStack().c_str());
+    } catch (...) {
+        g_inComposition = prevInComposition;
+        setCurrentComposer(prevComposer);
+        throw;
     }
     g_inComposition = prevInComposition;
     setCurrentComposer(prevComposer);
@@ -521,8 +679,10 @@ void invokeScopeBlock1(jsi::Runtime& rt, long blockId, jobject composerGlobal, j
     jsi::Object proxy = makeComposerProxy(rt, composerGlobal);
     try {
         it->second->call(rt, jsi::Value((double)p1), proxy, changed);
-    } catch (const jsi::JSError& e) {
-        LOGW("JSError in scope block: %s\n%s", e.what(), e.getStack().c_str());
+    } catch (...) {
+        g_inComposition = prevInComposition;
+        setCurrentComposer(prevComposer);
+        throw;
     }
     g_inComposition = prevInComposition;
     setCurrentComposer(prevComposer);
@@ -549,10 +709,11 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
     jsi::Object rdma(rt);
 
     auto registerFn = jsi::Function::createFromHostFunction(
-        rt, jsi::PropNameID::forAscii(rt, "registerContent"), 1,
+        rt, jsi::PropNameID::forAscii(rt, "registerContent"), 2,
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
             if (count > 0 && args[0].isObject() && args[0].asObject(r).isFunction(r)) {
                 g_content = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
+                g_contentPluginId = (count > 1 && args[1].isString()) ? args[1].getString(r).utf8(r) : "";
                 g_contentVersion.fetch_add(1, std::memory_order_release);
                 LOGI("Content registered");
             }
@@ -586,8 +747,18 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
                 JNIEnv* e = getEnv(g_composeCache.jvm);
                 if (!e) return RdmaResult::undefined();
                 jobject policy = e->CallStaticObjectMethod(g_composeCache.snapshotStateKt, g_composeCache.structuralEqualityPolicy);
+                RdmaResult err;
+                if (captureJniError(e, err)) {
+                    if (policy) e->DeleteLocalRef(policy);
+                    if (boxedG) e->DeleteGlobalRef(boxedG);
+                    return err;
+                }
                 jobject state = e->CallStaticObjectMethod(g_composeCache.snapshotStateKt, g_composeCache.mutableStateOf, boxedG, policy);
                 e->DeleteLocalRef(policy);
+                if (captureJniError(e, err)) {
+                    if (boxedG) e->DeleteGlobalRef(boxedG);
+                    return err;
+                }
                 if (boxedG) e->DeleteGlobalRef(boxedG);
                 if (!state) return RdmaResult::undefined();
                 jobject global = e->NewGlobalRef(state);
@@ -599,7 +770,7 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
     rdma.setProperty(rt, "mutableStateOf", std::move(mutableStateOfFn));
 
     auto registerBlockFn = jsi::Function::createFromHostFunction(
-        rt, jsi::PropNameID::forAscii(rt, "registerBlock"), 1,
+        rt, jsi::PropNameID::forAscii(rt, "registerBlock"), 2,
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
             if (count < 1 || !args[0].isObject() || !args[0].asObject(r).isFunction(r)) {
                 return jsi::Value::undefined();
@@ -607,6 +778,9 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
             auto fn = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
             int64_t id = g_nextScopeBlockId++;
             g_scopeBlocks[id] = fn;
+            if (count > 1 && args[1].isString()) {
+                g_blockPluginId[id] = args[1].getString(r).utf8(r);
+            }
             return jsi::Value((double)id);
         });
     rdma.setProperty(rt, "registerBlock", std::move(registerBlockFn));
@@ -617,12 +791,15 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
             if (count < 1 || !args[0].isNumber()) return jsi::Value::undefined();
             jlong blockId = (jlong)args[0].getNumber();
             jobject composer = g_currentComposer;
-            rdmaCallUi([blockId, composer]() -> RdmaResult {
+            RdmaResult result = rdmaCallUi([blockId, composer]() -> RdmaResult {
                 JNIEnv* e = getEnv(g_composeCache.jvm);
                 if (!e) return RdmaResult::undefined();
                 e->CallStaticVoidMethod(g_composeCache.effectsKt, g_composeCache.sideEffect, blockId, composer, 0);
+                RdmaResult err;
+                if (captureJniError(e, err)) return err;
                 return RdmaResult::undefined();
             });
+            if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
             return jsi::Value::undefined();
         });
     rdma.setProperty(rt, "sideEffect", std::move(sideEffectFn));
@@ -671,12 +848,18 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
                 jboolean used = e->CallStaticBooleanMethod(
                     g_composeCache.effectsKt, g_composeCache.disposableEffect,
                     jkeysGlobal, (jlong)id, composer, 0);
+                RdmaResult err;
+                if (captureJniError(e, err)) {
+                    if (jkeysGlobal) e->DeleteGlobalRef(jkeysGlobal);
+                    return err;
+                }
                 if (jkeysGlobal) e->DeleteGlobalRef(jkeysGlobal);
                 return RdmaResult::boolean((bool)used);
             });
 
             // If the kernel reused the previous observer (keys unchanged), this
             // freshly registered block is unused and can be released immediately.
+            if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
             if (!result.b) {
                 g_scopeBlocks.erase(id);
             }
@@ -711,7 +894,12 @@ static void runCallback(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal
         }
     }
     const jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
-    it->second->call(rt, callArgs, jsArgs.size());
+    try {
+        it->second->call(rt, callArgs, jsArgs.size());
+    } catch (const jsi::JSError& e) {
+        auto pid = g_blockPluginId.find(blockId);
+        rdmaUncaughtException(fromJSError(rt, e), pid != g_blockPluginId.end() ? pid->second : "");
+    }
 }
 
 static void runLambda(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal) {
@@ -733,13 +921,27 @@ static void runLambda(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal) 
     const jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
     // Return value intentionally ignored: service lambdas are Unit-returning and
     // execute asynchronously.
-    it->second->call(rt, callArgs, jsArgs.size());
+    try {
+        it->second->call(rt, callArgs, jsArgs.size());
+    } catch (const jsi::JSError& e) {
+        auto pid = g_blockPluginId.find(blockId);
+        rdmaUncaughtException(fromJSError(rt, e), pid != g_blockPluginId.end() ? pid->second : "");
+    }
 }
 
 static void deleteGlobalRef(jobject ref) {
     if (!ref) return;
     JNIEnv* env = getEnv(g_composeCache.jvm);
     if (env) env->DeleteGlobalRef(ref);
+}
+
+static void throwIfError(JNIEnv* env, const RdmaExceptionInfo& info) {
+    if (info.empty()) return;
+    jthrowable ex = makeRdmaException(env, info);
+    if (ex) {
+        env->Throw(ex);
+        env->DeleteLocalRef(ex);
+    }
 }
 
 } // namespace rdma
@@ -753,13 +955,14 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeConte
     using namespace facebook::rdma;
     if (!rdmaIsReady()) return;
     jobject composerGlobal = env->NewGlobalRef(composer);
-    rdmaCallJs([composerGlobal] {
+    RdmaExceptionInfo err = rdmaCallJs([composerGlobal] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (rt) {
             invokeRegisteredContent(*rt, composerGlobal);
         }
         deleteGlobalRef(composerGlobal);
     });
+    throwIfError(env, err);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -767,13 +970,14 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeScope
     JNIEnv* env, jclass, jlong blockId, jobject composer, jint changed) {
     using namespace facebook::rdma;
     jobject composerGlobal = env->NewGlobalRef(composer);
-    rdmaCallJs([blockId, composerGlobal, changed] {
+    RdmaExceptionInfo err = rdmaCallJs([blockId, composerGlobal, changed] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (rt) {
             invokeScopeBlock(*rt, blockId, composerGlobal, changed);
         }
         deleteGlobalRef(composerGlobal);
     });
+    throwIfError(env, err);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -781,13 +985,14 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeScope
     JNIEnv* env, jclass, jlong blockId, jobject composer, jint changed, jint p1) {
     using namespace facebook::rdma;
     jobject composerGlobal = env->NewGlobalRef(composer);
-    rdmaCallJs([blockId, composerGlobal, changed, p1] {
+    RdmaExceptionInfo err = rdmaCallJs([blockId, composerGlobal, changed, p1] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (rt) {
             invokeScopeBlock1(*rt, blockId, composerGlobal, changed, p1);
         }
         deleteGlobalRef(composerGlobal);
     });
+    throwIfError(env, err);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -826,7 +1031,7 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeEffec
     JNIEnv* env, jclass, jlong blockId) {
     using namespace facebook::rdma;
     int64_t resultId = 0;
-    rdmaCallJs([blockId, &resultId] {
+    RdmaExceptionInfo err = rdmaCallJs([blockId, &resultId] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (!rt) return;
         auto it = g_scopeBlocks.find(blockId);
@@ -842,6 +1047,7 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeEffec
             g_jsValues[resultId] = obj;
         }
     });
+    throwIfError(env, err);
     return resultId;
 }
 
@@ -849,7 +1055,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeDispose(
     JNIEnv* env, jclass, jlong resultId) {
     using namespace facebook::rdma;
-    rdmaCallJs([resultId] {
+    RdmaExceptionInfo err = rdmaCallJs([resultId] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (!rt) return;
         auto it = g_jsValues.find(resultId);
@@ -861,6 +1067,7 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeDispo
         }
         g_jsValues.erase(it);
     });
+    throwIfError(env, err);
 }
 
 extern "C" JNIEXPORT void JNICALL

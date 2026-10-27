@@ -19,6 +19,7 @@
 #include <memory>
 
 #include "RdmaPlatform.h"
+#include "RdmaException.h"
 
 // Creates the Hermes runtime and installs the compose bridge (JSI only). Must be
 // called on the Hermes thread; platform caches are initialized separately on the
@@ -43,3 +44,10 @@ std::shared_ptr<const facebook::jsi::Buffer> mmapFileBuffer(const std::string& p
 
 // Returns the Hermes runtime. Hermes-thread access only.
 facebook::jsi::Runtime* getRdmaRuntime();
+
+// Bundle load errors (see docs/design/exception_propagation.md §7). A compile/load
+// failure is stored by the eval path and surfaced from nativeIsReady().
+void rdmaSetEvalError(const facebook::rdma::RdmaExceptionInfo& info);
+
+// Returns true (and fills `out`) if a stored bundle error exists, then clears it.
+bool rdmaTakeEvalError(facebook::rdma::RdmaExceptionInfo& out);

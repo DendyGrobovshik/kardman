@@ -31,6 +31,10 @@ import kotlinx.cinterop.usePinned
 import kotlinx.coroutines.delay
 import org.example.ios.rdma_userBridgeInstall
 import platform.Foundation.NSBundle
+import platform.Foundation.NSDocumentDirectory
+import platform.Foundation.NSFileManager
+import platform.Foundation.NSSearchPathForDirectoriesInDomains
+import platform.Foundation.NSUserDomainMask
 import platform.UIKit.UIViewController
 import platform.posix.SEEK_END
 import platform.posix.SEEK_SET
@@ -47,23 +51,53 @@ import platform.posix.ftell
  */
 fun MainViewController(): UIViewController {
     rdma_userBridgeInstall()
+
+    // Global uncaught-exception handler (design §6). Installed before
+    // nativeInit so it is visible to the Hermes thread.
+    RdmaBridge.setUncaughtExceptionHandler { pluginId, e ->
+        println("RDMA_TEST: H2_UNCAUGHT:$pluginId:${e.originalExceptionType}:${e.message}")
+    }
+
     RdmaBridge.nativeInit()
     loadBundles()
+    loadDevPolyfills()
     return ComposeUIViewController { Content() }
 }
 
 @Composable
 private fun Content() {
-    var ready by remember { mutableStateOf(RdmaBridge.nativeIsReady()) }
+    var ready by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         while (!ready) {
             delay(16)
-            ready = RdmaBridge.nativeIsReady()
+            ready = checkReady()
         }
     }
     if (ready) {
         RdmaComposeHost.Content()
     }
+}
+
+/** Polls readiness, catching BundleLoadException (A2, design §7). */
+private fun checkReady(): Boolean = runCatching { RdmaBridge.nativeIsReady() }
+    .onFailure { e -> println("RDMA_TEST: A2_CAUGHT:${e.message}") }
+    .getOrDefault(false)
+
+/**
+ * Dev-only polyfill loader. Evaluates any `.hbc` bundles dropped into the app's
+ * `Documents/rdma/` directory (injected via `simctl`) after the built-in bundles, so
+ * they override the native `@RDMA` implementations without rebuilding the app.
+ */
+private fun loadDevPolyfills() {
+    val docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, true)
+        .firstOrNull() as? String ?: return
+    val dir = "$docs/rdma"
+    val files = NSFileManager.defaultManager.contentsOfDirectoryAtPath(dir, error = null)
+        ?: return
+    files.filterIsInstance<String>()
+        .filter { it.endsWith(".hbc") }
+        .sorted()
+        .forEach { RdmaBridge.nativeEvalFile("$dir/$it") }
 }
 
 // Load order comes from the build-generated `rdma-modules.json` manifest (shared

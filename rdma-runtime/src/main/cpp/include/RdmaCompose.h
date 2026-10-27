@@ -24,6 +24,7 @@
 #include "RdmaRendezvous.h"
 #include "RdmaNativeState.h"
 #include "RdmaPlatform.h"
+#include "RdmaException.h"
 
 namespace facebook {
 namespace rdma {
@@ -70,6 +71,16 @@ struct ComposeJniCache {
     jclass jsValueHolderClass = nullptr;
     jmethodID jsValueHolderCtor = nullptr;
     jmethodID jsValueHolderGetId = nullptr;
+
+    // io.github.dendygrobovshik.kardman.runtime.RdmaException — the host-side
+    // exception thrown when a plugin exception crosses the boundary.
+    jclass rdmaExceptionClass = nullptr;
+    jmethodID rdmaExceptionCtor = nullptr;
+
+    // io.github.dendygrobovshik.kardman.runtime.BundleLoadException — thrown from
+    // nativeIsReady when a bundle failed to compile/load.
+    jclass bundleLoadExceptionClass = nullptr;
+    jmethodID bundleLoadExceptionCtor = nullptr;
 
     // io.github.dendygrobovshik.kardman.runtime.RdmaFunction{0..3} (service-lambda
     // wrappers). Cached so the Hermes thread can create them without FindClass
@@ -149,6 +160,30 @@ jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o);
 // Classifies a boxed JVM value into an RdmaResult descriptor. Runs on the UI
 // thread. Handles Integer/Boolean/Double/Long/Float/String/null; else -> Null.
 RdmaResult classifyBoxedValue(JNIEnv* env, jobject o);
+
+// Builds a host RdmaException (a local ref) from the description, recursively
+// wrapping `cause`. Caller must DeleteLocalRef. Returns nullptr on JNI failure.
+jthrowable makeRdmaException(JNIEnv* env, const RdmaExceptionInfo& info);
+
+// Builds a host BundleLoadException wrapping the RdmaException for `info`.
+jthrowable makeBundleLoadException(JNIEnv* env, const RdmaExceptionInfo& info);
+
+// Host-side uncaught-exception handler (set via nativeSetUncaughtExceptionHandler):
+// converts info to an RdmaException and invokes the registered Kotlin lambda.
+extern jobject g_uncaughtHandlerRef;
+extern jmethodID g_uncaughtHandlerInvoke;
+void androidUncaughtHandler(const RdmaExceptionInfo& info, const std::string& pluginId);
+
+// Serializes a host Throwable into the boundary description (Native -> JS, §5).
+RdmaExceptionInfo fromJniThrowable(JNIEnv* env, jthrowable t);
+
+// Throws a JS Error if the JNI env has a pending exception. Call on the Hermes
+// thread immediately after a Call*Method into host code.
+void checkAndThrowJs(JNIEnv* env, jsi::Runtime& rt);
+
+// Captures a pending JNI exception into an Error result (returns false if none).
+// For UI-thread compose ops returning their result through RdmaResult.
+bool captureJniError(JNIEnv* e, RdmaResult& out);
 
 // Creates an io.github.dendygrobovshik.kardman.runtime.RdmaFunction{arity} wrapping
 // the given JS block id. Callable from any attached thread (uses cached jclass).

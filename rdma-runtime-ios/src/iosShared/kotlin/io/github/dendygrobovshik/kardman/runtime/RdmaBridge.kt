@@ -22,8 +22,11 @@ import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_eval_file
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_is_ready
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_content_version
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_start
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_set_uncaught_handler
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_takeEvalError
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
+import kotlinx.cinterop.toKString
 
 /**
  * iOS runtime bootstrap. Mirrors the Android `RdmaBridge` but drives the Hermes
@@ -35,7 +38,13 @@ object RdmaBridge {
         rdma_start(null)
     }
 
-    fun nativeIsReady(): Boolean = rdma_is_ready() != 0
+    fun nativeIsReady(): Boolean {
+        if (rdma_is_ready() == 0) return false
+        rdma_takeEvalError()?.let { ptr ->
+            throw BundleLoadException(ptr.toKString(), null)
+        }
+        return true
+    }
 
     fun nativeContentVersion(): Int = rdma_content_version()
 
@@ -48,5 +57,14 @@ object RdmaBridge {
 
     fun nativeEvalFile(path: String) {
         rdma_eval_file(path)
+    }
+
+    /**
+     * Installs the host-side global uncaught-exception handler (design §6).
+     * Must be called before [nativeInit] so the handler is visible to the Hermes thread.
+     */
+    fun setUncaughtExceptionHandler(handler: (String, RdmaException) -> Unit) {
+        rdmaGlobalUncaughtHandler = handler
+        rdma_set_uncaught_handler()
     }
 }

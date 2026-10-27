@@ -21,6 +21,7 @@
 #include <memory>
 
 #include "RdmaPlatform.h"
+#include "RdmaException.h"
 
 namespace facebook {
 namespace jsi {
@@ -42,6 +43,7 @@ enum class RdmaResultKind {
     ScopeRef,   // host handle to a ScopeUpdateScope (ownership transferred)
     Empty,      // Compose `Companion.Empty`
     JsValueId,  // id into g_jsValues
+    Error,      // the UI op threw a host exception (carried in `error`)
 };
 
 struct RdmaResult {
@@ -51,6 +53,7 @@ struct RdmaResult {
     std::string str;
     void* ref = nullptr; // host handle (jobject on Android, StableRef on Apple); ownership transferred to the JS thread
     int64_t id = 0;
+    RdmaExceptionInfo error; // for Error kind
 
     static RdmaResult undefined() { return RdmaResult{}; }
     static RdmaResult null() { RdmaResult r; r.kind = RdmaResultKind::Null; return r; }
@@ -61,7 +64,7 @@ struct RdmaResult {
     static RdmaResult scopeRef(void* v) { RdmaResult r; r.kind = RdmaResultKind::ScopeRef; r.ref = v; return r; }
     static RdmaResult empty() { RdmaResult r; r.kind = RdmaResultKind::Empty; return r; }
     static RdmaResult jsValueId(int64_t v) { RdmaResult r; r.kind = RdmaResultKind::JsValueId; r.id = v; return r; }
-};
+    static RdmaResult fromError(RdmaExceptionInfo e) { RdmaResult r; r.kind = RdmaResultKind::Error; r.error = std::move(e); return r; }};
 
 // A unit of work executed on the UI thread (a compose op). Returns an RdmaResult.
 using UiTask = std::function<RdmaResult()>;
@@ -74,8 +77,9 @@ using JsTask = std::function<void()>;
 RdmaResult rdmaCallUi(UiTask task);
 
 // Blocking (reentrant) call into the JS thread, made from the UI thread. While
-// waiting, the caller services the JS->UI queue (reentrant compose ops).
-void rdmaCallJs(JsTask task);
+// waiting, the caller services the JS->UI queue (reentrant compose ops). Returns
+// a non-empty description if the JS task threw (see docs/design/exception_propagation.md).
+RdmaExceptionInfo rdmaCallJs(JsTask task);
 
 // Non-blocking post of a low-priority (async) task to the JS thread. Used for
 // callbacks and service-lambda invocations that must not stall composition.
@@ -108,6 +112,13 @@ void rdmaEvalFile(const std::string& path);
 
 // True once the runtime is ready and all enqueued evals have finished.
 bool rdmaIsReady();
+
+// Uncaught-exception delivery (see docs/design/exception_propagation.md §6).
+// `handler` receives the serialized exception and the owning pluginId; while no
+// handler is set the exception is only logged (emergency fallback).
+using UncaughtExceptionHandler = void (*)(const RdmaExceptionInfo& info, const std::string& pluginId);
+void rdmaSetUncaughtExceptionHandler(UncaughtExceptionHandler handler);
+void rdmaUncaughtException(const RdmaExceptionInfo& info, const std::string& pluginId);
 
 // Thread ids captured for debug asserts (see RdmaCompose.cpp / RdmaRuntime.cpp).
 extern std::atomic<int64_t> g_uiTid;

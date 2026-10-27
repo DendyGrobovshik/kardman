@@ -24,6 +24,7 @@
 
 #include "RdmaRendezvous.h"
 #include "RdmaCompose.h"
+#include "RdmaRuntime.h"
 
 #define LOG_TAG "RdmaJni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -49,7 +50,34 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeInit(JNIEnv* env
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeIsReady(JNIEnv* env, jclass) {
-    return facebook::rdma::rdmaIsReady() ? JNI_TRUE : JNI_FALSE;
+    if (!facebook::rdma::rdmaIsReady()) return JNI_FALSE;
+    facebook::rdma::RdmaExceptionInfo err;
+    if (rdmaTakeEvalError(err)) {
+        jthrowable ex = facebook::rdma::makeBundleLoadException(env, err);
+        if (ex) {
+            env->Throw(ex);
+            env->DeleteLocalRef(ex);
+        }
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeSetUncaughtExceptionHandler(
+    JNIEnv* env, jclass, jobject handler) {
+    using namespace facebook::rdma;
+    if (g_uncaughtHandlerRef) env->DeleteGlobalRef(g_uncaughtHandlerRef);
+    g_uncaughtHandlerRef = handler ? env->NewGlobalRef(handler) : nullptr;
+    if (g_uncaughtHandlerRef) {
+        jclass cls = env->GetObjectClass(g_uncaughtHandlerRef);
+        g_uncaughtHandlerInvoke = env->GetMethodID(cls, "invoke", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+        env->DeleteLocalRef(cls);
+        rdmaSetUncaughtExceptionHandler(androidUncaughtHandler);
+    } else {
+        g_uncaughtHandlerInvoke = nullptr;
+        rdmaSetUncaughtExceptionHandler(nullptr);
+    }
 }
 
 extern "C" JNIEXPORT jint JNICALL

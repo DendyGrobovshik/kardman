@@ -37,7 +37,7 @@ class RdmaWidgetBridgeTest {
         assertContains(src, "fun rdmaSearchBar(value: String, onValueChange: (String) -> Unit, onClear: () -> Unit)")
         assertContains(
             src,
-            "js(\"RDMA\").composeSearchBar(value, js(\"RDMA\").registerBlock(onValueChange), js(\"RDMA\").registerBlock(onClear))",
+            "js(\"RDMA\").composeSearchBar(value, js(\"RDMA\").registerBlock(onValueChange, \"\"), js(\"RDMA\").registerBlock(onClear, \"\"))",
         )
     }
 
@@ -53,7 +53,7 @@ class RdmaWidgetBridgeTest {
         )
         val src = RdmaPluginTransformState.buildWidgetBridge(listOf(fn))
         assertContains(src, "fun rdmaCard(content: @Composable () -> Unit)")
-        assertContains(src, "js(\"RDMA\").composeCard(js(\"RDMA\").registerBlock(content))")
+        assertContains(src, "js(\"RDMA\").composeCard(js(\"RDMA\").registerBlock(content, \"\"))")
     }
 
     @Test
@@ -71,7 +71,7 @@ class RdmaWidgetBridgeTest {
         )
         val src = RdmaPluginTransformState.buildWidgetBridge(listOf(fn))
         assertContains(src, "fun rdmaNavigationPanel(title: String, actionLabels: List<String>, actions: List<() -> Unit>, content: @Composable () -> Unit)")
-        assertContains(src, "actions.map { js(\"RDMA\").registerBlock(it) }")
-        assertContains(src, "js(\"RDMA\").composeNavigationPanel(title, actionLabels, actions.map { js(\"RDMA\").registerBlock(it) }, js(\"RDMA\").registerBlock(content))")
+        assertContains(src, "actions.map { js(\"RDMA\").registerBlock(it, \"\") }")
+        assertContains(src, "js(\"RDMA\").composeNavigationPanel(title, actionLabels, actions.map { js(\"RDMA\").registerBlock(it, \"\") }, js(\"RDMA\").registerBlock(content, \"\"))")
     }
 }

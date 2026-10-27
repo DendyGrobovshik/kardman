@@ -24,3 +24,21 @@ import io.github.dendygrobovshik.kardman.RDMA
  */
 @RDMA
 fun itestPlaceholder(): String = "placeholder"
+
+/**
+ * Throws a host exception (used by the exception-propagation e2e to verify
+ * Native -> JS delivery: the plugin catches a JS `Error` with `__rdmaCause`).
+ */
+@RDMA
+fun itestThrow(message: String): String {
+    throw IllegalStateException(message)
+}
+
+/**
+ * Fire-and-forget lambda invocation (design §5.1: callback/lambda has no host
+ * frame). A throwing block is delivered through the uncaught-exception path.
+ */
+@RDMA
+fun itestFireAndForget(block: () -> Unit) {
+    block()
+}

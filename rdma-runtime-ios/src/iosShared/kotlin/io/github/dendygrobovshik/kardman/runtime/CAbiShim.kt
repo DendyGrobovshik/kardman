@@ -29,6 +29,7 @@ import androidx.compose.runtime.ScopeUpdateScope
 import androidx.compose.runtime.cache
 import androidx.compose.runtime.mutableStateOf
 import kotlin.native.EagerInitialization
+import kotlin.native.concurrent.ThreadLocal
 import kotlinx.cinterop.Arena
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.CPointed
@@ -62,6 +63,62 @@ private inline fun <reified T : Any> COpaquePointer.obj(): T = asStableRef<Any>(
 
 fun rdma_disposeStableRef(handle: COpaquePointer) {
     handle.asStableRef<Any>().dispose()
+}
+
+// -------------------------------------------------- exception capture (thread-local)
+
+@ThreadLocal
+private var rdmaError: String? = null
+
+/** Returns (and clears) the serialized Kotlin exception from this thread, if any. */
+fun rdma_takeError(): CPointer<ByteVar>? {
+    val e = rdmaError ?: return null
+    rdmaError = null
+    return rdmaStringToCStr(e)
+}
+
+private fun Throwable.rdmaSerialize(): String = buildString {
+    append((this@rdmaSerialize::class.simpleName ?: "Throwable"))
+    append(": ")
+    append(message ?: "")
+    append('\n')
+    append(stackTraceToString())
+}
+
+// Runs [block], recording any Kotlin exception into the thread-local error buffer
+// and returning [default]. C++ reads the buffer via rdma_takeError after the call.
+// Public so generated per-module shims (RdmaCAbi.kt) can wrap host calls too.
+fun <T> rdmaCaptureError(default: T, block: () -> T): T =
+    try {
+        block()
+    } catch (e: Throwable) {
+        rdmaError = e.rdmaSerialize()
+        default
+    }
+
+// ----------------------------------------------- global uncaught handler
+
+// Host-installed global handler (design §6). Set on the main thread before
+// rdma_start(); read on the Hermes thread. The happens-before is established by the
+// thread creation, so a plain var is safe (new memory model).
+internal var rdmaGlobalUncaughtHandler: ((String, RdmaException) -> Unit)? = null
+
+// Dispatcher registered in the C++ function registry and called by the C++ global
+// handler (cAbiUncaughtHandler) with the serialized exception fields.
+fun rdma_dispatchUncaught(
+    pluginId: CPointer<ByteVar>?,
+    type: CPointer<ByteVar>?,
+    message: CPointer<ByteVar>?,
+    stack: CPointer<ByteVar>?,
+) {
+    val handler = rdmaGlobalUncaughtHandler ?: return
+    val ex = RdmaException(
+        originalExceptionType = type?.toKString() ?: "Error",
+        message = message?.toKString() ?: "",
+        remoteStack = stack?.toKString() ?: "",
+        cause = null,
+    )
+    handler(pluginId?.toKString() ?: "", ex)
 }
 
 // ------------------------------------------------------------- value boxing
@@ -227,45 +284,51 @@ fun rdma_composer_updateRememberedValue(value: COpaquePointer?) {
 // --------------------------------------------------------------------- state
 
 fun rdma_mutableStateOf(initialValue: COpaquePointer?): COpaquePointer =
-    mutableStateOf(initialValue?.obj<Any>()).handle()
+    rdmaCaptureError(initialValue ?: rdma_boxObject()) { mutableStateOf(initialValue?.obj<Any>()).handle() }
 
 fun rdma_stateGetValue(stateHandle: COpaquePointer): COpaquePointer? =
-    stateHandle.obj<MutableState<*>>().value?.handle()
+    rdmaCaptureError(null) { stateHandle.obj<MutableState<*>>().value?.handle() }
 
 fun rdma_stateSetValue(stateHandle: COpaquePointer, value: COpaquePointer?) {
     @Suppress("UNCHECKED_CAST")
-    val state = stateHandle.obj<MutableState<Any?>>()
-    state.value = value?.obj<Any>()
+    rdmaCaptureError(Unit) {
+        val state = stateHandle.obj<MutableState<Any?>>()
+        state.value = value?.obj<Any>()
+    }
 }
 
 // --------------------------------------------------------------------- scope
 
 fun rdma_scopeUpdateScope(scopeHandle: COpaquePointer, blockId: Long) {
-    scopeHandle.obj<ScopeUpdateScope>().updateScope(ComposerScopeBlock(blockId))
+    rdmaCaptureError(Unit) { scopeHandle.obj<ScopeUpdateScope>().updateScope(ComposerScopeBlock(blockId)) }
 }
 
 // ------------------------------------------------------------------- effects
 
 fun rdma_sideEffect(blockId: Long) {
-    rdmaGetCurrentComposer()?.recordSideEffect {
-        RdmaComposeHost.nativeInvokeCallback(blockId, emptyArray<Any?>())
+    rdmaCaptureError(Unit) {
+        rdmaGetCurrentComposer()?.recordSideEffect {
+            RdmaComposeHost.nativeInvokeCallback(blockId, emptyArray<Any?>())
+        }
     }
 }
 
-fun rdma_disposableEffect(keysHandle: COpaquePointer, blockId: Long): Boolean {
-    val keys = keysHandle.obj<Array<Any?>>()
-    val composer = rdmaGetCurrentComposer() ?: return false
-    var invalid = false
-    for (key in keys) invalid = invalid || composer.changed(key)
-    val observer = composer.cache(invalid) { RdmaDisposableEffectObserver(blockId) }
-    return observer.effectBlockId == blockId
-}
+fun rdma_disposableEffect(keysHandle: COpaquePointer, blockId: Long): Boolean =
+    rdmaCaptureError(false) {
+        val keys = keysHandle.obj<Array<Any?>>()
+        val composer = rdmaGetCurrentComposer() ?: return@rdmaCaptureError false
+        var invalid = false
+        for (key in keys) invalid = invalid || composer.changed(key)
+        val observer = composer.cache(invalid) { RdmaDisposableEffectObserver(blockId) }
+        observer.effectBlockId == blockId
+    }
 
 // --------------------------------------------------------------- registration
 
 @EagerInitialization
 private val _register = run {
     rdmaRegisterFunction("rdma_disposeStableRef", staticCFunction(::rdma_disposeStableRef))
+    rdmaRegisterFunction("rdma_takeError", staticCFunction(::rdma_takeError))
     rdmaRegisterFunction("rdma_boxInt", staticCFunction(::rdma_boxInt))
     rdmaRegisterFunction("rdma_boxLong", staticCFunction(::rdma_boxLong))
     rdmaRegisterFunction("rdma_boxDouble", staticCFunction(::rdma_boxDouble))
@@ -308,5 +371,6 @@ private val _register = run {
     rdmaRegisterFunction("rdma_scopeUpdateScope", staticCFunction(::rdma_scopeUpdateScope))
     rdmaRegisterFunction("rdma_sideEffect", staticCFunction(::rdma_sideEffect))
     rdmaRegisterFunction("rdma_disposableEffect", staticCFunction(::rdma_disposableEffect))
+    rdmaRegisterFunction("rdma_dispatchUncaught", staticCFunction(::rdma_dispatchUncaught))
     Unit
 }

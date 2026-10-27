@@ -32,10 +32,12 @@ import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeLambda
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeScopeBlock
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeScopeBlock1
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_registerFunction
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_takeNativeError
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_vtableDispatch
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.StableRef
 import kotlinx.cinterop.asStableRef
+import kotlinx.cinterop.toKString
 
 /**
  * iOS (Kotlin/Native) host for the compose bridge. Mirrors the Android
@@ -50,6 +52,7 @@ object RdmaComposeHost {
         currentComposerHolder = currentComposer
         try {
             rdma_nativeInvokeContent()
+            throwIfNativeError()
         } finally {
             currentComposerHolder = prev
         }
@@ -60,6 +63,7 @@ object RdmaComposeHost {
         currentComposerHolder = composer
         try {
             rdma_nativeInvokeScopeBlock(blockId, changed)
+            throwIfNativeError()
         } finally {
             currentComposerHolder = prev
         }
@@ -70,6 +74,7 @@ object RdmaComposeHost {
         currentComposerHolder = composer
         try {
             rdma_nativeInvokeScopeBlock1(blockId, changed, p1)
+            throwIfNativeError()
         } finally {
             currentComposerHolder = prev
         }
@@ -121,6 +126,12 @@ private var currentComposerHolder: Composer? = null
 
 /** Returns the currently-composing Composer (or null outside a composition). */
 fun rdmaGetCurrentComposer(): Composer? = currentComposerHolder
+
+private fun throwIfNativeError() {
+    rdma_takeNativeError()?.let { ptr ->
+        throw RdmaException("Error", ptr.toKString(), "", null)
+    }
+}
 
 /**
  * Registers a C-compatible function pointer under [name] in the C++ registry so

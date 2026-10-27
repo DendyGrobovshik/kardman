@@ -67,6 +67,7 @@ class CAbiKotlinGenerator(
 
 package $kernelPackage
 
+import io.github.dendygrobovshik.kardman.runtime.rdmaCaptureError
 import io.github.dendygrobovshik.kardman.runtime.rdmaRegisterFunction
 import io.github.dendygrobovshik.kardman.runtime.rdmaStringToCStr
 import kotlin.native.EagerInitialization
@@ -111,6 +112,17 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         else -> if (m.nullable) "COpaquePointer?" else "COpaquePointer"
     }
 
+    // Return types for handle-returning members are always nullable: the error path
+    // passes `null` as the rdmaCaptureError default, and the C++ side rethrows via
+    // checkKotlinError before dereferencing the (null) handle.
+    private fun kotlinReturnType(m: MemberType): String = when {
+        m.isList -> "COpaquePointer?"
+        m.type.startsWith("kotlin.Function") -> "Long"
+        m.type == "kotlin.String" -> "CPointer<ByteVar>?"
+        CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> CAbi.forMemberType(m.type).kotlinType
+        else -> "COpaquePointer?"
+    }
+
     private fun fromC(expr: String, m: MemberType): String {
         if (m.isList) {
             val elem = m.listElementType ?: "kotlin.Any"
@@ -130,6 +142,16 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> expr
         m.type.startsWith("kotlin.Function") -> expr
         else -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
+    }
+
+    private fun defaultForC(m: MemberType): String = when {
+        m.isList || m.type == "kotlin.String" -> "null"
+        m.type == "kotlin.Int" -> "0"
+        m.type == "kotlin.Long" -> "0L"
+        m.type == "kotlin.Boolean" -> "false"
+        m.type == "kotlin.Double" -> "0.0"
+        m.type == "kotlin.Float" -> "0.0f"
+        else -> "null"
     }
 
     // --------------------------------------------------------------- classes
@@ -158,12 +180,12 @@ fun $name($params): COpaquePointer {
         val args = method.parameters.joinToString(", ") { fromC(it.name, it.toMemberType()) }
         val call = "handle.obj<${info.qualifiedName}>().${method.name}($args)"
         val body = if (CAbi.isVoid(method.returnType)) {
-            "    $call\n"
+            "    rdmaCaptureError(Unit) {\n        $call\n    }\n"
         } else {
-            "    return ${toC(call, retM)}\n"
+            "    return rdmaCaptureError(${defaultForC(retM)}) { ${toC(call, retM)} }\n"
         }
         out.write("""
-fun $name($params): ${kotlinType(retM)} {
+fun $name($params): ${kotlinReturnType(retM)} {
 $body}
 """)
         registered += name
@@ -174,8 +196,8 @@ $body}
         val call = "handle.obj<${info.qualifiedName}>().${prop.name}"
         val getterName = cName(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })
         out.write("""
-fun $getterName(handle: COpaquePointer): ${kotlinType(m)} {
-    return ${toC(call, m)}
+fun $getterName(handle: COpaquePointer): ${kotlinReturnType(m)} {
+    return rdmaCaptureError(${defaultForC(m)}) { ${toC(call, m)} }
 }
 """)
         registered += getterName
@@ -183,7 +205,7 @@ fun $getterName(handle: COpaquePointer): ${kotlinType(m)} {
             val setterName = cName(info.className + "_set" + prop.name.replaceFirstChar { it.uppercase() })
             out.write("""
 fun $setterName(handle: COpaquePointer, value: ${kotlinType(m)}) {
-    handle.obj<${info.qualifiedName}>().${prop.name} = ${fromC("value", m)}
+    rdmaCaptureError(Unit) { handle.obj<${info.qualifiedName}>().${prop.name} = ${fromC("value", m)} }
 }
 """)
             registered += setterName
@@ -195,8 +217,8 @@ fun $setterName(handle: COpaquePointer, value: ${kotlinType(m)}) {
         val call = "${info.qualifiedName}.${static.name}"
         val name = cName(info.className + "_get" + static.name.replaceFirstChar { it.uppercase() })
         out.write("""
-fun $name(): ${kotlinType(m)} {
-    return ${toC(call, m)}
+fun $name(): ${kotlinReturnType(m)} {
+    return rdmaCaptureError(${defaultForC(m)}) { ${toC(call, m)} }
 }
 """)
         registered += name
@@ -225,9 +247,9 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
     private fun functionReturnKotlinType(t: RdmaTypeRef): String = when (val ty = t.type) {
         is RdmaType.UnitType -> "Unit"
         is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "CPointer<ByteVar>?" else CAbi.forMemberType(ty.fqn).kotlinType
-        is RdmaType.Ref -> "COpaquePointer"
-        is RdmaType.ListType -> "COpaquePointer"
-        is RdmaType.FunctionType -> "COpaquePointer"
+        is RdmaType.Ref -> "COpaquePointer?"
+        is RdmaType.ListType -> "COpaquePointer?"
+        is RdmaType.FunctionType -> "COpaquePointer?"
     }
 
     private fun functionParamFromC(p: io.github.dendygrobovshik.kardman.types.RdmaParameterInfo): String = when (val ty = p.type.type) {
@@ -252,6 +274,20 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         is RdmaType.ListType -> "List<${listElemKotlin(e)}>"
         is RdmaType.FunctionType -> "kotlin.Function${e.parameters.size}"
         is RdmaType.UnitType -> "Unit"
+    }
+
+    private fun functionDefault(t: RdmaTypeRef): String = when (val ty = t.type) {
+        is RdmaType.UnitType -> "Unit"
+        is RdmaType.Primitive -> when (ty.fqn) {
+            "kotlin.String" -> "null"
+            "kotlin.Int" -> "0"
+            "kotlin.Long" -> "0L"
+            "kotlin.Boolean" -> "false"
+            "kotlin.Double" -> "0.0"
+            "kotlin.Float" -> "0.0f"
+            else -> "null"
+        }
+        else -> "null"
     }
 
     private fun functionParamKotlinFnType(t: RdmaType.FunctionType): String = buildString {
@@ -287,9 +323,9 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         val retK = functionReturnKotlinType(fn.returnType)
         val invokeCall = "${fn.qualifiedName}" + (if (args.isEmpty()) "()" else "($args)")
         val body = if (fn.returnType.type is RdmaType.UnitType) {
-            "$lambdaDecls    $invokeCall\n"
+            "$lambdaDecls    rdmaCaptureError(Unit) { $invokeCall }\n"
         } else {
-            "$lambdaDecls    return ${functionReturnToC(fn.returnType, invokeCall)}\n"
+            "$lambdaDecls    return rdmaCaptureError(${functionDefault(fn.returnType)}) { ${functionReturnToC(fn.returnType, invokeCall)} }\n"
         }
         out.write("""
 fun $name($params): $retK {

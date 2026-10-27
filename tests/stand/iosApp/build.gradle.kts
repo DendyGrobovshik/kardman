@@ -32,6 +32,7 @@ kotlin {
             implementation(project(":rdma-runtime-ios"))
             implementation(project(":tests:stand:kernel:internal"))
             implementation(project(":tests:stand:kernel:user:alice"))
+            implementation(project(":tests:stand:kernel:user:itest"))
             implementation(libs.compose.runtime)
             implementation(libs.compose.ui)
             implementation(libs.compose.foundation)

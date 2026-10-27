@@ -170,6 +170,7 @@ $nsClose} // namespace rdma
         out.write("""#include "${info.className}Proxy.h"
 #include "RdmaCAbi$fileSuffix.h"
 #include "RdmaBridge$fileSuffix.h"
+#include "RdmaComposeCAbi.h"
 #include "RdmaLog.h"
 """)
         // Include the other value-type proxies so cross-referencing fields/params
@@ -282,9 +283,9 @@ $body}
             val call = "${cFn(info.className + "_" + method.name)}($callArgs)"
 
             if (isVoid) {
-                out.write("    $call;\n    return jsi::Value::undefined();\n")
+                out.write("    $call;\n    checkKotlinError(r);\n    return jsi::Value::undefined();\n")
             } else {
-                out.write("    auto jret = $call;\n")
+                out.write("    auto jret = $call;\n    checkKotlinError(r);\n")
                 val returnExpr = when {
                     method.isList -> "    return createListHandle(r, jret, \"${method.listElementType ?: ""}\");\n"
                     method.returnType == "kotlin.String" -> "    return jsi::String::createFromUtf8(r, jret);\n"
@@ -640,17 +641,21 @@ $nsClose} // namespace rdma
         val callArgs = argNames.joinToString(", ")
         val call = "${cFn(fn.name)}($callArgs)"
         when (val ty = fn.returnType.type) {
-            is RdmaType.UnitType -> sb.append("    $call;\n    return jsi::Value::undefined();\n")
+            is RdmaType.UnitType -> sb.append("    $call;\n    checkKotlinError(r);\n    return jsi::Value::undefined();\n")
             is RdmaType.Primitive -> {
-                sb.append("    auto jret = $call;\n")
+                sb.append("    auto jret = $call;\n    checkKotlinError(r);\n")
                 sb.append("    return ${primitiveReturn(ty.fqn, "jret")}\n")
             }
             is RdmaType.Ref -> {
                 val rdma = rdmaClassByName(ty.fqn, allClasses)
-                if (rdma != null) sb.append("    return create${rdma.className}Wrapper(r, $call);\n")
-                else sb.append("    return wrapUserObject(r, $call);\n")
+                sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
+                if (rdma != null) sb.append("    return create${rdma.className}Wrapper(r, jret);\n")
+                else sb.append("    return wrapUserObject(r, jret);\n")
             }
-            is RdmaType.ListType -> sb.append("    return createListHandle(r, $call, \"${typeName(ty.element)}\");\n")
+            is RdmaType.ListType -> {
+                sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
+                sb.append("    return createListHandle(r, jret, \"${typeName(ty.element)}\");\n")
+            }
             is RdmaType.FunctionType -> sb.append("    return wrapUserObject(r, $call);\n")
         }
         sb.append("}\n\n")
@@ -689,16 +694,16 @@ $nsClose} // namespace rdma
     private fun staticImpl(info: RdmaClassInfo, static: StaticInfo, allClasses: List<RdmaClassInfo>): String {
         val call = "${cFn(info.className + "_get" + static.name.replaceFirstChar { it.uppercase() })}()"
         val body = when {
-            static.type == "kotlin.String" -> "    return jsi::String::createFromUtf8(r, $call);\n"
-            static.type == "kotlin.Int" -> "    return jsi::Value((double)$call);\n"
-            static.type == "kotlin.Boolean" -> "    return jsi::Value($call);\n"
-            static.type == "kotlin.Long" -> "    return jsi::Value((double)$call);\n"
+            static.type == "kotlin.String" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::String::createFromUtf8(r, jret);\n"
+            static.type == "kotlin.Int" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value((double)jret);\n"
+            static.type == "kotlin.Boolean" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value(jret);\n"
+            static.type == "kotlin.Long" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value((double)jret);\n"
             isObjectRef(static.type) -> {
                 val rdma = rdmaClassByName(static.type, allClasses)
-                if (rdma != null) "    return create${rdma.className}Wrapper(r, $call);\n"
-                else "    return wrapUserObject(r, $call);\n"
+                if (rdma != null) "    void* jret = $call;\n    checkKotlinError(r);\n    return create${rdma.className}Wrapper(r, jret);\n"
+                else "    void* jret = $call;\n    checkKotlinError(r);\n    return wrapUserObject(r, jret);\n"
             }
-            else -> "    return jsi::Value($call);\n"
+            else -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value(jret);\n"
         }
         return """
 static jsi::Value rdma_static_${info.className}_${static.name}(jsi::Runtime& r) {

@@ -28,4 +28,10 @@ object RdmaBridge {
     external fun nativeEvalBytes(bytes: ByteArray)
     external fun nativeIsReady(): Boolean
     external fun nativeContentVersion(): Int
+    external fun nativeSetUncaughtExceptionHandler(handler: (String, RdmaException) -> Unit)
+
+    /** Installs the host-side global uncaught-exception handler (see design §6). */
+    fun setUncaughtExceptionHandler(handler: (String, RdmaException) -> Unit) {
+        nativeSetUncaughtExceptionHandler(handler)
+    }
 }

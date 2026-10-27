@@ -309,13 +309,16 @@ $nsClose} // namespace rdma
                 if (!e) return jsi::Value::undefined();
 $extractions
                 jobject composer = g_currentComposer;
-                rdmaCallUi([jvm, composer$captureList]() -> RdmaResult {
+                RdmaResult result = rdmaCallUi([jvm, composer$captureList]() -> RdmaResult {
                     JNIEnv* e = getEnv(jvm);
                     if (!e) return RdmaResult::undefined();
                     e->CallStaticVoidMethod(g_widgetCache.entriesClass, g_widgetCache.$jsName, $callArgs, composer, $changedArgs);
+                    RdmaResult err;
+                    if (captureJniError(e, err)) return err;
 $cleanups
                     return RdmaResult::undefined();
                 });
+                if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                 return jsi::Value::undefined();
             });
         rdma.setProperty(rt, "$jsName", std::move(fn));

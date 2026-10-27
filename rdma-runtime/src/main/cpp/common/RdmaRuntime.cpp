@@ -17,6 +17,7 @@
 #include <hermes/hermes.h>
 #include <string>
 #include <memory>
+#include <mutex>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -87,6 +88,22 @@ std::shared_ptr<const facebook::jsi::Buffer> mmapFileBuffer(const std::string& p
 
 facebook::jsi::Runtime* getRdmaRuntime() {
     return g_runtime.get();
+}
+
+static facebook::rdma::RdmaExceptionInfo g_evalError;
+static std::mutex g_evalErrorMutex;
+
+void rdmaSetEvalError(const facebook::rdma::RdmaExceptionInfo& info) {
+    std::lock_guard<std::mutex> lk(g_evalErrorMutex);
+    g_evalError = info;
+}
+
+bool rdmaTakeEvalError(facebook::rdma::RdmaExceptionInfo& out) {
+    std::lock_guard<std::mutex> lk(g_evalErrorMutex);
+    if (g_evalError.empty()) return false;
+    out = std::move(g_evalError);
+    g_evalError = facebook::rdma::RdmaExceptionInfo{};
+    return true;
 }
 
 void initRdmaRuntime(facebook::rdma::HostContext ctx) {
@@ -184,6 +201,13 @@ void initRdmaRuntime(facebook::rdma::HostContext ctx) {
         rt.global().setProperty(rt, "clearTimeout", std::move(clearTimeoutFn));
     }
 
+    // Disable dynamic code evaluation in the plugin scope (security).
+    {
+        auto& rt = *g_runtime;
+        rt.global().setProperty(rt, "eval", facebook::jsi::Value::undefined());
+        rt.global().setProperty(rt, "Function", facebook::jsi::Value::undefined());
+    }
+
     LOGI("RDMA runtime initialized with bridge");
 }
 
@@ -201,8 +225,14 @@ void evalJavaScript(const std::shared_ptr<const facebook::jsi::Buffer>& buffer, 
         auto prepared = g_runtime->prepareJavaScript(buffer, sourceURL);
         g_runtime->evaluatePreparedJavaScript(prepared);
     } catch (const facebook::jsi::JSError& e) {
-        LOGW("JSError: %s\n%s", e.what(), e.getStack().c_str());
+        facebook::rdma::RdmaExceptionInfo info = facebook::rdma::fromJSError(*g_runtime, e);
+        LOGW("Bundle load error: %s\n%s", info.message.c_str(), info.stack.c_str());
+        rdmaSetEvalError(info);
     } catch (const std::exception& e) {
-        LOGW("Exception: %s", e.what());
+        facebook::rdma::RdmaExceptionInfo info;
+        info.originalExceptionType = "std::exception";
+        info.message = e.what();
+        LOGW("Bundle load exception: %s", e.what());
+        rdmaSetEvalError(info);
     }
 }

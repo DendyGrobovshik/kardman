@@ -196,6 +196,13 @@ class CppGeneratorTest {
         assertContains(cpp, "createPersonWrapper")
     }
 
+    @Test
+    fun `method calls capture host exceptions`() {
+        val generated = generate(createPerson())
+        val cpp = generated["PersonProxy.cpp"] ?: error("PersonProxy.cpp not generated")
+        assertContains(cpp, "checkAndThrowJs(env, r)", message = "method JNI calls should capture host exceptions")
+    }
+
     private fun createPerson() = RdmaClassInfo(
         packageName = "com.example.kernel", className = "Person",
         qualifiedName = "com.example.kernel.Person",

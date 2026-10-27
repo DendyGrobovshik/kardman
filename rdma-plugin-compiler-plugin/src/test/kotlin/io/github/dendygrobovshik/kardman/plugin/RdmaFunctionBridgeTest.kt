@@ -34,7 +34,7 @@ class RdmaFunctionBridgeTest {
         )
         val src = RdmaPluginTransformState.buildFunctionBridge(listOf(fn))
         assertContains(src, "fun rdmaForEach(list: dynamic, body: (dynamic) -> dynamic): dynamic")
-        assertContains(src, "js(\"RDMA\").forEach(list, js(\"RDMA\").registerBlock(body))")
+        assertContains(src, "js(\"RDMA\").forEach(list, js(\"RDMA\").registerBlock(body, \"\"))")
     }
 
     @Test

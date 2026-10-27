@@ -145,11 +145,14 @@ jsi::Object makeComposerProxy(jsi::Runtime& rt) {
                 rt, jsi::PropNameID::forAscii(rt, "${m.jsName}"), ${m.arity},
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
 ${paramExtract(m)}
-                    rdmaCallUi([${innerParams(m)}]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([${innerParams(m)}]() -> RdmaResult {
                         ${cFn(m)}(${innerParams(m)});
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 ${paramCleanup(m)}
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
 """
@@ -161,6 +164,8 @@ ${paramCleanup(m)}
 ${paramExtract(m)}
                     RdmaResult result = rdmaCallUi([${innerParams(m)}]() -> RdmaResult {
                         bool res = ${cFn(m)}(${innerParams(m)});
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 ${paramCleanup(m)}
                         return RdmaResult::boolean(res);
                     });
@@ -173,11 +178,14 @@ ${paramCleanup(m)}
                 rt, jsi::PropNameID::forAscii(rt, "${m.jsName}"), ${m.arity},
                 [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
 ${paramExtract(m)}
-                    rdmaCallUi([${innerParams(m)}]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([${innerParams(m)}]() -> RdmaResult {
                         ${cFn(m)}(${innerParams(m)});
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 ${paramCleanup(m)}
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Object::createFromHostObject(r, self);
                 });
 """
@@ -189,6 +197,8 @@ ${paramCleanup(m)}
 ${paramExtract(m)}
                     RdmaResult result = rdmaCallUi([${innerParams(m)}]() -> RdmaResult {
                         void* scope = ${cFn(m)}(${innerParams(m)});
+                        RdmaResult err;
+                        if (captureCAbiError(err)) { if (scope) rdma_disposeStableRef(scope); return err; }
 ${paramCleanup(m)}
                         if (!scope) return RdmaResult::null();
                         return RdmaResult::scopeRef(scope);
@@ -208,6 +218,8 @@ ${paramCleanup(m)}
                     }
                     RdmaResult result = rdmaCallUi([key]() -> RdmaResult {
                         bool res = rdma_composer_changed(key);
+                        RdmaResult err;
+                        if (captureCAbiError(err)) { if (key) rdma_disposeStableRef(key); return err; }
                         if (key) rdma_disposeStableRef(key);
                         return RdmaResult::boolean(res);
                     });
@@ -221,6 +233,8 @@ ${paramCleanup(m)}
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                     RdmaResult result = rdmaCallUi([]() -> RdmaResult {
                         void* v = rdma_composer_rememberedValue();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) { if (v) rdma_disposeStableRef(v); return err; }
                         return valueHandleToResult(v);
                     });
                     return rdmaResultToJsiCAbi(r, result);
@@ -247,11 +261,14 @@ ${paramCleanup(m)}
                         stored = boxJsiValue(r, args[0]);
                         disposeStored = true;
                     }
-                    rdmaCallUi([stored, disposeStored]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([stored, disposeStored]() -> RdmaResult {
                         rdma_composer_updateRememberedValue(stored);
+                        RdmaResult err;
+                        if (captureCAbiError(err)) { if (disposeStored && stored) rdma_disposeStableRef(stored); return err; }
                         if (disposeStored && stored) rdma_disposeStableRef(stored);
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
 """

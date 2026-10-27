@@ -58,6 +58,20 @@ int32_t rdma_is_ready(void);
 void rdma_eval_bytes(const void* code, int32_t len);
 void rdma_eval_file(const char* path);
 int32_t rdma_content_version(void);
+
+// Installs the C-ABI global uncaught-exception handler (design §6).
+// Called from RdmaBridge.setUncaughtExceptionHandler; forwards to the Kotlin
+// dispatcher registered as "rdma_dispatchUncaught".
+void rdma_set_uncaught_handler(void);
+
+// Thread-local JS exception captured by the C++ backend during a blocking
+// rdma_nativeInvoke* call (JS -> Native). Kotlin reads it after the call and
+// throws RdmaException. Returns a NUL-terminated serialization, or null.
+const char* rdma_takeNativeError(void);
+
+// Stored bundle compile/load error (see docs/design/exception_propagation.md §7).
+// Kotlin reads it from nativeIsReady() and throws BundleLoadException.
+const char* rdma_takeEvalError(void);
 } // extern "C"
 
 // --- Kotlin-provided functions (registered via rdma_registerFunction). ---
@@ -81,6 +95,11 @@ inline float rdma_valueAsFloat(void* h) { return ((float (*)(void*))rdma_lookupF
 inline bool rdma_valueAsBoolean(void* h) { return ((bool (*)(void*))rdma_lookupFunction("rdma_valueAsBoolean"))(h); }
 inline const char* rdma_valueAsString(void* h) { return ((const char* (*)(void*))rdma_lookupFunction("rdma_valueAsString"))(h); }
 inline int64_t rdma_valueAsJsValueId(void* h) { return ((int64_t (*)(void*))rdma_lookupFunction("rdma_valueAsJsValueId"))(h); }
+
+// Thread-local Kotlin exception (set by the shim's try/catch wrappers). Returns a
+// NUL-terminated serialization of the last Kotlin exception on this thread, or
+// null. C++ reads it after every Kotlin call and rethrows as a JS Error.
+inline const char* rdma_takeError() { return ((const char* (*)())rdma_lookupFunction("rdma_takeError"))(); }
 
 // Array access (lambda/callback args cross as an Array<Any?> handle).
 inline int32_t rdma_arraySize(void* arrayHandle) { return ((int32_t (*)(void*))rdma_lookupFunction("rdma_arraySize"))(arrayHandle); }
@@ -154,6 +173,14 @@ jsi::Value rdmaResultToJsiCAbi(jsi::Runtime& rt, RdmaResult& result);
 
 // Returns the state handle backing a state proxy (or null if `v` is not one).
 void* stateProxyHandle(jsi::Runtime& rt, const jsi::Value& v);
+
+// Captures a Kotlin exception (recorded by the shim's thread-local buffer via
+// rdma_takeError) into an Error result; returns false if none (Native -> JS, §5).
+bool captureCAbiError(RdmaResult& out);
+
+// Rethrows a Kotlin exception as a JS Error. Call on the Hermes thread after any
+// Kotlin shim call (used by generated proxies/widgets).
+void checkKotlinError(jsi::Runtime& rt);
 
 // Backing block/JS-value registries (shared with the generated composer proxy).
 extern std::shared_ptr<jsi::Object> g_empty;

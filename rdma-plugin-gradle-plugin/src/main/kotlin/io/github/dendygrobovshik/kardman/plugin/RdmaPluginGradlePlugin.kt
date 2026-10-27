@@ -122,7 +122,7 @@ private fun Project.floorMap(kernelContainer: String, visiblePaths: List<String>
     return merged
 }
 
-private fun runtimeBridgeSource(pluginPackage: String) = """package $pluginPackage
+private fun runtimeBridgeSource(pluginPackage: String, pluginId: String) = """package $pluginPackage
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composer
@@ -136,10 +136,10 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 external object RDMA {
-    fun registerContent(content: dynamic)
+    fun registerContent(content: dynamic, pluginId: String)
     fun setComposerEmpty(empty: Any)
     fun mutableStateOf(value: dynamic): dynamic
-    fun registerBlock(block: dynamic): dynamic
+    fun registerBlock(block: dynamic, pluginId: String): dynamic
     fun sideEffect(blockId: dynamic)
     fun disposableEffect(keys: dynamic, effectFn: dynamic)
 }
@@ -157,7 +157,7 @@ fun rdmaMutableIntStateOf(value: Int): MutableState<Int> =
     RDMA.mutableStateOf(value).unsafeCast<MutableState<Int>>()
 
 fun rdmaSideEffect(block: () -> Unit) {
-    RDMA.sideEffect(RDMA.registerBlock(block))
+    RDMA.sideEffect(RDMA.registerBlock(block, "$pluginId"))
 }
 
 // Guest-side stub for the `DisposableEffect` DSL. The effect body runs entirely
@@ -214,7 +214,7 @@ fun rdmaRememberCoroutineScope(): CoroutineScope {
 
 fun rdmaRunApp(content: @Composable () -> Unit) {
     RDMA.setComposerEmpty(Composer.Companion.Empty)
-    RDMA.registerContent(content)
+    RDMA.registerContent(content, "$pluginId")
 }
 """
 
@@ -226,7 +226,7 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
         // `RdmaWidgetBridge.kt`.
         val dir = File(target.buildDir, "generated/rdma")
         dir.mkdirs()
-        File(dir, "RdmaRuntimeBridge.kt").writeText(runtimeBridgeSource(target.pluginPackage()))
+        File(dir, "RdmaRuntimeBridge.kt").writeText(runtimeBridgeSource(target.pluginPackage(), target.pluginId()))
     }
 
     override fun isApplicable(kotlinCompilation: KotlinCompilation<*>): Boolean =

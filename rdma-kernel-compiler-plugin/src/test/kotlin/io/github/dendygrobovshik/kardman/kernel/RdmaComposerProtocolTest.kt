@@ -87,6 +87,14 @@ class RdmaComposerProtocolTest {
         assertFalse("recordUsed" in cachedNames)
     }
 
+    @Test
+    fun `composer proxy captures host exceptions`() {
+        val cpp = generate(RdmaComposerProtocol.baseProtocol)["RdmaComposerProxy.cpp"] ?: error("not generated")
+        assertContains(cpp, "captureJniError", message = "composer proxy should capture JNI errors")
+        assertContains(cpp, "RdmaResultKind::Error", message = "composer proxy should surface Error results")
+        assertContains(cpp, "rdmaResultToJsi", message = "composer proxy should rethrow via rdmaResultToJsi")
+    }
+
     private fun generate(methods: List<ComposerMethod>): Map<String, String> {
         val files = mutableMapOf<String, ByteArrayOutputStream>()
         RdmaComposerProxyGenerator { fileName, _ ->

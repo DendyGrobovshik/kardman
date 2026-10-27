@@ -130,6 +130,9 @@ object RdmaPluginTransformState {
 
     fun composeFnName(simpleName: String): String = "compose" + simpleName
 
+    // pluginId escaped for embedding as a JS string literal in the generated bridge.
+    private val pluginIdJs: String get() = pluginId.replace("\\", "\\\\").replace("\"", "\\\"")
+
     fun staticBridgeNameFor(className: String, staticName: String): String =
         "rdma" + className + staticName.replaceFirstChar { it.uppercase() }
 
@@ -161,8 +164,12 @@ object RdmaPluginTransformState {
         if (outputDir.isBlank()) return
         val outDir = File(outputDir)
         // Remove stale rewritten sources so deleting a plugin file does not leave
-        // a dangling `*_rdma.kt` that still references removed kernel symbols.
-        outDir.listFiles { f -> f.isFile && f.name.endsWith("_rdma.kt") }?.forEach { it.delete() }
+        // a dangling `*_rdma.kt` that still references removed kernel symbols. Also
+        // remove the old per-plugin `RdmaException.kt` bridge, which is no longer
+        // generated (uncaught exceptions now use a single global host handler).
+        outDir.listFiles { f ->
+            f.isFile && (f.name.endsWith("_rdma.kt") || f.name == "RdmaException.kt")
+        }?.forEach { it.delete() }
         // Emit every plugin source file: edited ones get the rewrites applied, and
         // untouched files (plain data classes / helpers with no @RDMA usage) are
         // copied verbatim so they remain available to the JS compilation.
@@ -271,8 +278,8 @@ object RdmaPluginTransformState {
             val args = fn.parameters.map { p ->
                 when (p.kind) {
                     RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it) }"
-                    else -> "js(\"RDMA\").registerBlock(${p.name})"
+                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
+                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
                 }
             }.joinToString(", ")
             sb.appendLine("fun $bridgeName($params): dynamic = js(\"RDMA\").${fn.name}($args)")
@@ -294,8 +301,8 @@ object RdmaPluginTransformState {
             val args = fn.parameters.joinToString(", ") { p ->
                 when (p.kind) {
                     RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it) }"
-                    else -> "js(\"RDMA\").registerBlock(${p.name})"
+                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
+                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
                 }
             }
             val composeName = composeFnName(fn.name)

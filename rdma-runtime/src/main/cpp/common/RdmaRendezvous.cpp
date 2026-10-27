@@ -20,6 +20,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <thread>
+#include <unordered_map>
 #include <pthread.h>
 #include <unistd.h>
 
@@ -50,6 +51,9 @@ struct UiRequest {
 struct JsRequest {
     JsTask task;
     bool done = false;
+    bool blocking = false;
+    bool hasError = false;
+    RdmaExceptionInfo error;
 };
 
 // Single mutex + condition variable guarding both queues. Both threads use the
@@ -81,6 +85,9 @@ std::atomic<int> g_uiInRendezvous{0};
 HostContext g_host = nullptr;
 std::thread g_jsThread;
 
+// Uncaught-exception delivery (docs/design/exception_propagation.md §6).
+std::atomic<UncaughtExceptionHandler> g_uncaughtHandler{nullptr};
+
 bool popJsRequestLocked(std::shared_ptr<JsRequest>& out) {
     if (!g_uiToJsHigh.empty()) {
         out = g_uiToJsHigh.front();
@@ -109,7 +116,30 @@ bool popJsRequestHighLocked(std::shared_ptr<JsRequest>& out) {
     return false;
 }
 
-void executeJsTask(const JsTask& task) {
+static void runAndCapture(JsRequest& req) {
+    try {
+        req.task();
+    } catch (const jsi::JSError& e) {
+        jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            req.error = fromJSError(*rt, e);
+        } else {
+            req.error.originalExceptionType = "Error";
+            req.error.message = e.what();
+        }
+        req.hasError = true;
+    } catch (const std::exception& e) {
+        req.error.originalExceptionType = "std::exception";
+        req.error.message = e.what();
+        req.hasError = true;
+    } catch (...) {
+        req.error.originalExceptionType = "unknown";
+        req.error.message = "unknown C++ exception";
+        req.hasError = true;
+    }
+}
+
+void executeJsTask(JsRequest& req) {
 #ifndef NDEBUG
     assert(g_jsTid.load(std::memory_order_relaxed) != 0 &&
            rdmaGetTid() == g_jsTid.load(std::memory_order_relaxed));
@@ -120,14 +150,13 @@ void executeJsTask(const JsTask& task) {
 #if defined(__ANDROID__)
     JNIEnv* env = nullptr;
     JavaVM* jvm = static_cast<JavaVM*>(g_host);
-    if (jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_OK &&
-        env->PushLocalFrame(512) == 0) {
-        task();
-        env->PopLocalFrame(nullptr);
-        return;
-    }
+    const bool hasFrame = jvm && jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_OK &&
+                          env->PushLocalFrame(512) == 0;
+    runAndCapture(req);
+    if (hasFrame && env) env->PopLocalFrame(nullptr);
+#else
+    runAndCapture(req);
 #endif
-    task();
 }
 
 void executeUiTask(UiRequest& req) {
@@ -165,10 +194,18 @@ RdmaResult rdmaCallUi(UiTask task) {
         std::shared_ptr<JsRequest> jsReq;
         if (popJsRequestHighLocked(jsReq)) {
             lk.unlock();
-            executeJsTask(jsReq->task);
+            executeJsTask(*jsReq);
+            bool reentrantError = jsReq->hasError;
+            RdmaExceptionInfo errInfo = std::move(jsReq->error);
             lk.lock();
             jsReq->done = true;
             g_cv.notify_all();
+            if (reentrantError) {
+                lk.unlock();
+                jsi::Runtime* rt = getRdmaRuntime();
+                if (rt) throwJsException(*rt, errInfo);
+                return RdmaResult::undefined();
+            }
         } else {
             g_cv.wait(lk);
         }
@@ -176,9 +213,10 @@ RdmaResult rdmaCallUi(UiTask task) {
     return std::move(req->result);
 }
 
-void rdmaCallJs(JsTask task) {
+RdmaExceptionInfo rdmaCallJs(JsTask task) {
     auto req = std::make_shared<JsRequest>();
     req->task = std::move(task);
+    req->blocking = true;
 
     // Increment before enqueueing so a JS task cannot observe the counter as
     // zero while the UI thread is about to service it (closes the push/notify
@@ -205,6 +243,7 @@ void rdmaCallJs(JsTask task) {
         }
     }
     g_uiInRendezvous.fetch_sub(1, std::memory_order_release);
+    return std::move(req->error);
 }
 
 void rdmaPostJs(JsTask task) {
@@ -267,6 +306,24 @@ bool rdmaIsReady() {
            g_evalPending.load(std::memory_order_relaxed) == 0;
 }
 
+void rdmaSetUncaughtExceptionHandler(UncaughtExceptionHandler handler) {
+    g_uncaughtHandler.store(handler, std::memory_order_release);
+}
+
+void rdmaUncaughtException(const RdmaExceptionInfo& info, const std::string& pluginId) {
+    // Global handler.
+    UncaughtExceptionHandler h = g_uncaughtHandler.load(std::memory_order_acquire);
+    if (h) {
+        h(info, pluginId);
+        return;
+    }
+    // No handler registered — log the full chained stack as an emergency
+    // fallback (log only, never crash). There is no default handler and no
+    // lastError store: the host must install a global handler to observe these.
+    LOGW("Uncaught plugin exception [%s] (%s): %s\n%s",
+         pluginId.c_str(), info.originalExceptionType.c_str(), info.message.c_str(), info.stack.c_str());
+}
+
 static void setThreadName(const char* name) {
 #if defined(__ANDROID__)
     pthread_setname_np(pthread_self(), name);
@@ -302,7 +359,10 @@ static void jsThreadMain() {
             }
             popJsRequestLocked(req);
         }
-        executeJsTask(req->task);
+        executeJsTask(*req);
+        if (req->hasError && !req->blocking) {
+            rdmaUncaughtException(req->error, "");
+        }
         {
             std::lock_guard<std::mutex> lk(g_mutex);
             req->done = true;

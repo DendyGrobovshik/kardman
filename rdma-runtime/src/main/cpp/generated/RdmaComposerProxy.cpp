@@ -48,14 +48,17 @@ public:
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
 
-                    rdmaCallUi([composer = self->composer_, p0]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([composer = self->composer_, p0]() -> RdmaResult {
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         jobject result = e->CallObjectMethod(composer, g_composerProxyCache.startRestartGroup, p0);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) { if (result) e->DeleteLocalRef(result); return err; }
                         if (result) e->DeleteLocalRef(result);
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Object::createFromHostObject(r, self);
                 });
         }
@@ -71,6 +74,8 @@ public:
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::null();
                         jobject scope = e->CallObjectMethod(composer, g_composerProxyCache.endRestartGroup);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) { if (scope) e->DeleteLocalRef(scope); return err; }
 
                         if (!scope) return RdmaResult::null();
                         jobject global = e->NewGlobalRef(scope);
@@ -89,13 +94,16 @@ public:
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
 
-                    rdmaCallUi([composer = self->composer_, p0]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([composer = self->composer_, p0]() -> RdmaResult {
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         e->CallVoidMethod(composer, g_composerProxyCache.startReplaceGroup, p0);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -107,13 +115,16 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         e->CallVoidMethod(composer, g_composerProxyCache.endReplaceGroup);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -129,14 +140,17 @@ public:
                     jobject p1g = p1 ? e->NewGlobalRef(p1) : nullptr;
                     if (p1) e->DeleteLocalRef(p1);
 
-                    rdmaCallUi([composer = self->composer_, p0, p1g]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([composer = self->composer_, p0, p1g]() -> RdmaResult {
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         e->CallVoidMethod(composer, g_composerProxyCache.startMovableGroup, p0, p1g);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
                     if (p1g) e->DeleteGlobalRef(p1g);
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -148,13 +162,16 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         e->CallVoidMethod(composer, g_composerProxyCache.endMovableGroup);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -170,14 +187,17 @@ public:
                     jobject p1g = p1 ? e->NewGlobalRef(p1) : nullptr;
                     if (p1) e->DeleteLocalRef(p1);
 
-                    rdmaCallUi([composer = self->composer_, p0, p1g]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([composer = self->composer_, p0, p1g]() -> RdmaResult {
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         e->CallVoidMethod(composer, g_composerProxyCache.startReusableGroup, p0, p1g);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
                     if (p1g) e->DeleteGlobalRef(p1g);
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -189,13 +209,16 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         e->CallVoidMethod(composer, g_composerProxyCache.endReusableGroup);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -207,13 +230,16 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         e->CallVoidMethod(composer, g_composerProxyCache.skipCurrentGroup);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -225,13 +251,16 @@ public:
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
-                    rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         e->CallVoidMethod(composer, g_composerProxyCache.skipToGroupEnd);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -246,9 +275,17 @@ public:
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         jobject v = e->CallObjectMethod(composer, g_composerProxyCache.rememberedValue);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) { if (v) e->DeleteLocalRef(v); return err; }
 
                         jobject companion = e->GetStaticObjectField(g_composeCache.composerClass, g_composeCache.composerCompanionField);
                         jobject empty = e->CallObjectMethod(companion, g_composeCache.getEmpty);
+                        if (captureJniError(e, err)) {
+                            if (empty) e->DeleteLocalRef(empty);
+                            if (companion) e->DeleteLocalRef(companion);
+                            if (v) e->DeleteLocalRef(v);
+                            return err;
+                        }
                         e->DeleteLocalRef(companion);
                         bool isEmpty = e->IsSameObject(v, empty);
                         e->DeleteLocalRef(empty);
@@ -307,6 +344,8 @@ public:
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::undefined();
                         e->CallVoidMethod(composer, g_composerProxyCache.updateRememberedValue, stored);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) { if (deleteStored && stored) e->DeleteGlobalRef(stored); return err; }
                         if (deleteStored && stored) e->DeleteGlobalRef(stored);
                         return RdmaResult::undefined();
                     });
@@ -336,6 +375,8 @@ public:
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::boolean(true);
                         jboolean res = e->CallBooleanMethod(composer, g_composerProxyCache.changed, argG);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) { if (argG) e->DeleteGlobalRef(argG); return err; }
                         if (argG) e->DeleteGlobalRef(argG);
                         return RdmaResult::boolean((bool)res);
                     });
@@ -356,6 +397,8 @@ public:
                         JNIEnv* e = getEnv(g_composeCache.jvm);
                         if (!e) return RdmaResult::boolean(false);
                         jboolean res = e->CallBooleanMethod(composer, g_composerProxyCache.shouldExecute, p0, p1);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
 
                         return RdmaResult::boolean((bool)res);
                     });

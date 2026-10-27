@@ -430,6 +430,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
 
             if (isVoid) {
                 out.write("    env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});\n")
+                out.write("    checkAndThrowJs(env, r);\n")
                 for (param in method.parameters) {
                     if (param.type == "kotlin.String") {
                         out.write("    env->DeleteLocalRef(j_${param.name});\n")
@@ -448,6 +449,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     } else ""
                 }
                 out.write("    $callExpr\n")
+                out.write("    checkAndThrowJs(env, r);\n")
                 if (method.nullableReturn) {
                     out.write("    if (jret == nullptr) return jsi::Value::null();\n")
                 }
@@ -1004,26 +1006,30 @@ $body}
         return when (val t = ret.type) {
             is RdmaType.UnitType ->
                 "    env->CallStaticVoidMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                    "    checkAndThrowJs(env, r);\n" +
                     "$deleteJStrings    return jsi::Value::undefined();\n"
             is RdmaType.Primitive -> when (t.fqn) {
                 "kotlin.String" ->
                     "    auto jret = (jstring)env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                        "    checkAndThrowJs(env, r);\n" +
                         (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
                         "    auto cstr = env->GetStringUTFChars(jret, nullptr); auto ret = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jret, cstr); env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
-                "kotlin.Int" -> "    auto result = env->CallStaticIntMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n$deleteJStrings    return jsi::Value((double)result);\n"
-                "kotlin.Boolean" -> "    auto result = env->CallStaticBooleanMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n$deleteJStrings    return jsi::Value(result);\n"
-                "kotlin.Double", "kotlin.Float" -> "    auto result = env->CallStaticDoubleMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n$deleteJStrings    return jsi::Value(result);\n"
-                "kotlin.Long" -> "    auto result = env->CallStaticLongMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n$deleteJStrings    return jsi::Value((double)result);\n"
+                "kotlin.Int" -> "    auto result = env->CallStaticIntMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value((double)result);\n"
+                "kotlin.Boolean" -> "    auto result = env->CallStaticBooleanMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value(result);\n"
+                "kotlin.Double", "kotlin.Float" -> "    auto result = env->CallStaticDoubleMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value(result);\n"
+                "kotlin.Long" -> "    auto result = env->CallStaticLongMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value((double)result);\n"
                 else -> "    return jsi::Value::undefined();\n"
             }
             is RdmaType.Ref -> {
                 val cls = allClasses.find { it.qualifiedName == t.fqn }?.className
                 if (cls == null) {
                     "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                        "    checkAndThrowJs(env, r);\n" +
                         (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
                         "    auto ret = wrapAny(r, jvm, jret);\n    env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
                 } else {
                     "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                        "    checkAndThrowJs(env, r);\n" +
                         (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
                         "    jobject globalRet = env->NewGlobalRef(jret);\n    env->DeleteLocalRef(jret);\n$deleteJStrings    return create${cls}Wrapper(r, jvm, globalRet);\n"
                 }
@@ -1031,6 +1037,7 @@ $body}
             is RdmaType.ListType -> {
                 val elem = typeName(t.element)
                 "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                    "    checkAndThrowJs(env, r);\n" +
                     "    if (jret != nullptr) {\n        jobject globalRet = env->NewGlobalRef(jret);\n        env->DeleteLocalRef(jret);\n        return createListHandle(r, jvm, globalRet, \"$elem\");\n    }\n$deleteJStrings    return jsi::Value::null();\n"
             }
             is RdmaType.FunctionType -> "    return jsi::Value::undefined();\n"

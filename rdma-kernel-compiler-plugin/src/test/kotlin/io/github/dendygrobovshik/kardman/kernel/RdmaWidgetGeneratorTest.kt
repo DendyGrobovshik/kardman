@@ -99,6 +99,15 @@ class RdmaWidgetGeneratorTest {
     }
 
     @Test
+    fun `widget bridge captures host exceptions`() {
+        val (cpp, _) = generate(listOf(textWidget()))
+        val bridge = cpp["RdmaWidgetBridge.cpp"] ?: error("not generated")
+        assertContains(bridge, "captureJniError", message = "widget bridge should capture JNI errors")
+        assertContains(bridge, "RdmaResultKind::Error", message = "widget bridge should surface Error results")
+        assertContains(bridge, "rdmaResultToJsi", message = "widget bridge should rethrow via rdmaResultToJsi")
+    }
+
+    @Test
     fun `list params marshal values and block handles`() {
         val widget = RdmaFunctionInfo(
             name = "NavigationPanel",

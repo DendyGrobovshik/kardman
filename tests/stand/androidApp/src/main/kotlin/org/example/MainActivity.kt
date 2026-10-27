@@ -70,6 +70,12 @@ class MainActivity : ComponentActivity() {
         // Async init: JNI caches on this thread, then Hermes thread + runtime.
         RdmaBridge.nativeInit(assets)
 
+        // Global uncaught-exception handler (design §6). Receives every plugin
+        // exception together with the owning pluginId.
+        RdmaBridge.setUncaughtExceptionHandler { pluginId, e ->
+            Log.i("RDMA_TEST", "H2_UNCAUGHT:$pluginId:${e.originalExceptionType}:${e.message}")
+        }
+
         for (module in readModuleManifest()) {
             RdmaBridge.nativeEvalAsset("kotlin/$module.hbc")
         }
@@ -79,12 +85,15 @@ class MainActivity : ComponentActivity() {
         registerReceiver(resyncReceiver, IntentFilter(RESYNC_ACTION), Context.RECEIVER_EXPORTED)
 
         setContent {
-            var ready by remember { mutableStateOf(RdmaBridge.nativeIsReady()) }
+            // Start unready so the LaunchedEffect below logs "Runtime ready" before the
+            // first content composition (a throwing content would otherwise crash the app
+            // before the ready marker appears).
+            var ready by remember { mutableStateOf(false) }
             var contentVersion by remember { mutableStateOf(RdmaBridge.nativeContentVersion()) }
             LaunchedEffect(Unit) {
                 var readyLogged = false
                 while (true) {
-                    val r = RdmaBridge.nativeIsReady()
+                    val r = checkReady()
                     if (r != ready) ready = r
                     if (r && !readyLogged) {
                         readyLogged = true
@@ -139,6 +148,14 @@ class MainActivity : ComponentActivity() {
             List(arr.length()) { arr.getString(it) }
         }
     }
+
+    /**
+     * Polls runtime readiness, catching BundleLoadException (A2, design §7): a
+     * corrupt bundle is surfaced from nativeIsReady() exactly once and logged here.
+     */
+    private fun checkReady(): Boolean = runCatching { RdmaBridge.nativeIsReady() }
+        .onFailure { e -> Log.i("RDMA_TEST", "A2_CAUGHT:${e.message}") }
+        .getOrDefault(false)
 
     /**
      * Re-sync against the store (§8.2). Runs off the UI thread; polls the runtime until ready,

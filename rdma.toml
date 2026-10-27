@@ -17,6 +17,7 @@ rootPackage = "com.example.plugin"
 project = ":tests:stand:plugin"
 
 [toolchain]
+oldestActiveGeneration = "g1"
 
 [hermes]
 path = "third_party/bin/hermesc"

@@ -321,10 +321,13 @@ $nsClose} // namespace rdma
             rt, jsi::PropNameID::forAscii(rt, "$jsName"), $arity,
             [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
 $extractions
-                rdmaCallUi([$captures]() -> RdmaResult {
+                RdmaResult result = rdmaCallUi([$captures]() -> RdmaResult {
                     $cName($callArgs);
+                    RdmaResult err;
+                    if (captureCAbiError(err)) return err;
                     return RdmaResult::undefined();
                 });
+                if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                 return jsi::Value::undefined();
             });
         rdma.setProperty(rt, "$jsName", std::move(fn));

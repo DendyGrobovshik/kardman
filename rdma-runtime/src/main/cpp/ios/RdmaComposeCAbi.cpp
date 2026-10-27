@@ -60,6 +60,8 @@ static std::unordered_map<int64_t, std::shared_ptr<jsi::Function>> g_scopeBlocks
 static int64_t g_nextScopeBlockId = 1;
 std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
 int64_t g_nextJsValueId = 1;
+// Block id -> owning pluginId (recorded by registerBlock, design §6).
+std::unordered_map<int64_t, std::string> g_blockPluginId;
 
 static thread_local bool g_inComposition = false;
 
@@ -196,6 +198,29 @@ jsi::Value stateValueToJsi(jsi::Runtime& rt, void* valueHandle) {
     return wrapAnyCAbi(rt, nullptr, valueHandle);
 }
 
+// Rethrows a Kotlin exception (recorded by the shim's thread-local buffer) as a
+// JS Error. Call after every Kotlin shim call (Native -> JS, §5).
+void checkKotlinError(jsi::Runtime& rt) {
+    const char* err = rdma_takeError();
+    if (!err) return;
+    RdmaExceptionInfo info;
+    info.originalExceptionType = "kotlin.Throwable";
+    info.message = err;
+    throwJsException(rt, info);
+}
+
+// Captures a Kotlin exception into an Error result (for UI-thread ops returning
+// their result through RdmaResult). Returns false if none.
+bool captureCAbiError(RdmaResult& out) {
+    const char* err = rdma_takeError();
+    if (!err) return false;
+    RdmaExceptionInfo info;
+    info.originalExceptionType = "kotlin.Throwable";
+    info.message = err;
+    out = RdmaResult::fromError(std::move(info));
+    return true;
+}
+
 jsi::Value rdmaResultToJsiCAbi(jsi::Runtime& rt, RdmaResult& result) {
     switch (result.kind) {
         case RdmaResultKind::Undefined: return jsi::Value::undefined();
@@ -221,6 +246,9 @@ jsi::Value rdmaResultToJsiCAbi(jsi::Runtime& rt, RdmaResult& result) {
             result.ref = nullptr;
             if (!ref) return jsi::Value::null();
             return makeScopeUpdateScopeProxyCAbi(rt, ref);
+        }
+        case RdmaResultKind::Error: {
+            throwJsException(rt, result.error);
         }
     }
     return jsi::Value::undefined();
@@ -249,6 +277,7 @@ public:
                         return rdmaResultToJsiCAbi(r, res);
                     }
                     void* v = rdma_stateGetValue(state);
+                    checkKotlinError(r);
                     return stateValueToJsi(r, v);
                 });
         }
@@ -397,8 +426,9 @@ void invokeRegisteredContent(jsi::Runtime& rt) {
     jsi::Object proxy = makeComposerProxy(rt);
     try {
         g_content->call(rt, proxy, 0);
-    } catch (const jsi::JSError& e) {
-        LOGW("JSError in content: %s\n%s", e.what(), e.getStack().c_str());
+    } catch (...) {
+        g_inComposition = prevInComposition;
+        throw;
     }
     g_inComposition = prevInComposition;
 }
@@ -411,8 +441,9 @@ void invokeScopeBlock(jsi::Runtime& rt, int64_t blockId, int32_t changed) {
     jsi::Object proxy = makeComposerProxy(rt);
     try {
         it->second->call(rt, proxy, changed);
-    } catch (const jsi::JSError& e) {
-        LOGW("JSError in scope block: %s\n%s", e.what(), e.getStack().c_str());
+    } catch (...) {
+        g_inComposition = prevInComposition;
+        throw;
     }
     g_inComposition = prevInComposition;
 }
@@ -425,8 +456,9 @@ void invokeScopeBlock1(jsi::Runtime& rt, int64_t blockId, int32_t changed, int32
     jsi::Object proxy = makeComposerProxy(rt);
     try {
         it->second->call(rt, jsi::Value((double)p1), proxy, changed);
-    } catch (const jsi::JSError& e) {
-        LOGW("JSError in scope block: %s\n%s", e.what(), e.getStack().c_str());
+    } catch (...) {
+        g_inComposition = prevInComposition;
+        throw;
     }
     g_inComposition = prevInComposition;
 }
@@ -450,7 +482,44 @@ static void runCallbackOrLambda(jsi::Runtime& rt, int64_t blockId, void* argsHan
         rdma_disposeStableRef(argsHandle);
     }
     const jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
-    it->second->call(rt, callArgs, jsArgs.size());
+    try {
+        it->second->call(rt, callArgs, jsArgs.size());
+    } catch (const jsi::JSError& e) {
+        auto pid = g_blockPluginId.find(blockId);
+        rdmaUncaughtException(fromJSError(rt, e), pid != g_blockPluginId.end() ? pid->second : "");
+    }
+}
+
+// ------------------------------------------- global uncaught handler (H2)
+
+// Thread-local buffers backing the C strings passed to the Kotlin dispatcher; they
+// remain valid for the duration of the synchronous rdma_dispatchUncaught call.
+thread_local std::string g_tlsUncaughtPid;
+thread_local std::string g_tlsUncaughtType;
+thread_local std::string g_tlsUncaughtMsg;
+thread_local std::string g_tlsUncaughtStack;
+
+// Global (design §6) handler installed by the host via
+// rdma_set_uncaught_handler. Serializes the exception and forwards it to the Kotlin
+// dispatcher rdma_dispatchUncaught(pluginId, type, message, stack).
+void cAbiUncaughtHandler(const RdmaExceptionInfo& info, const std::string& pluginId) {
+    using Dispatcher = void (*)(const char*, const char*, const char*, const char*);
+    void* fn = rdma_lookupFunction("rdma_dispatchUncaught");
+    if (!fn) {
+        LOGW("Uncaught plugin exception [%s] (%s): %s (no iOS dispatcher)",
+             pluginId.c_str(), info.originalExceptionType.c_str(), info.message.c_str());
+        return;
+    }
+    g_tlsUncaughtPid = pluginId;
+    g_tlsUncaughtType = info.originalExceptionType;
+    g_tlsUncaughtMsg = info.message;
+    g_tlsUncaughtStack = info.stack;
+    ((Dispatcher)fn)(g_tlsUncaughtPid.c_str(), g_tlsUncaughtType.c_str(),
+                     g_tlsUncaughtMsg.c_str(), g_tlsUncaughtStack.c_str());
+}
+
+void rdmaInstallUncaughtHandlerCAbi() {
+    rdmaSetUncaughtExceptionHandler(cAbiUncaughtHandler);
 }
 
 // ------------------------------------------------------------ init (JSI only)
@@ -496,7 +565,7 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
     rdma.setProperty(rt, "mutableStateOf", std::move(mutableStateOfFn));
 
     auto registerBlockFn = jsi::Function::createFromHostFunction(
-        rt, jsi::PropNameID::forAscii(rt, "registerBlock"), 1,
+        rt, jsi::PropNameID::forAscii(rt, "registerBlock"), 2,
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
             if (count < 1 || !args[0].isObject() || !args[0].asObject(r).isFunction(r)) {
                 return jsi::Value::undefined();
@@ -504,6 +573,9 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
             auto fn = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
             int64_t id = g_nextScopeBlockId++;
             g_scopeBlocks[id] = fn;
+            if (count > 1 && args[1].isString()) {
+                g_blockPluginId[id] = args[1].getString(r).utf8(r);
+            }
             return jsi::Value((double)id);
         });
     rdma.setProperty(rt, "registerBlock", std::move(registerBlockFn));
@@ -570,30 +642,46 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
 
 // ------------------------------------------------------- C ABI entry points
 
+namespace {
+thread_local std::string g_tlsCaughtError;
+thread_local std::string g_tlsCaughtErrorBuf;
+
+void storeCaughtError(const facebook::rdma::RdmaExceptionInfo& info) {
+    g_tlsCaughtError = info.message.empty() ? info.originalExceptionType : info.message;
+    if (!info.stack.empty()) {
+        g_tlsCaughtError += "\n";
+        g_tlsCaughtError += info.stack;
+    }
+}
+} // namespace
+
 extern "C" {
 
 void rdma_nativeInvokeContent() {
     using namespace facebook::rdma;
-    rdmaCallJs([] {
+    RdmaExceptionInfo err = rdmaCallJs([] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (rt) invokeRegisteredContent(*rt);
     });
+    if (!err.empty()) storeCaughtError(err);
 }
 
 void rdma_nativeInvokeScopeBlock(int64_t blockId, int32_t changed) {
     using namespace facebook::rdma;
-    rdmaCallJs([blockId, changed] {
+    RdmaExceptionInfo err = rdmaCallJs([blockId, changed] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (rt) invokeScopeBlock(*rt, blockId, changed);
     });
+    if (!err.empty()) storeCaughtError(err);
 }
 
 void rdma_nativeInvokeScopeBlock1(int64_t blockId, int32_t changed, int32_t p1) {
     using namespace facebook::rdma;
-    rdmaCallJs([blockId, changed, p1] {
+    RdmaExceptionInfo err = rdmaCallJs([blockId, changed, p1] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (rt) invokeScopeBlock1(*rt, blockId, changed, p1);
     });
+    if (!err.empty()) storeCaughtError(err);
 }
 
 void rdma_nativeInvokeCallback(int64_t blockId, void* argsHandle) {
@@ -617,7 +705,7 @@ void rdma_nativeInvokeLambda(int64_t blockId, void* argsHandle) {
 int64_t rdma_nativeInvokeEffectBody(int64_t blockId) {
     using namespace facebook::rdma;
     int64_t resultId = 0;
-    rdmaCallJs([blockId, &resultId] {
+    RdmaExceptionInfo err = rdmaCallJs([blockId, &resultId] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (!rt) return;
         auto it = g_scopeBlocks.find(blockId);
@@ -631,12 +719,13 @@ int64_t rdma_nativeInvokeEffectBody(int64_t blockId) {
             g_jsValues[resultId] = obj;
         }
     });
+    if (!err.empty()) storeCaughtError(err);
     return resultId;
 }
 
 void rdma_nativeInvokeDispose(int64_t resultId) {
     using namespace facebook::rdma;
-    rdmaCallJs([resultId] {
+    RdmaExceptionInfo err = rdmaCallJs([resultId] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (!rt) return;
         auto it = g_jsValues.find(resultId);
@@ -648,6 +737,7 @@ void rdma_nativeInvokeDispose(int64_t resultId) {
         }
         g_jsValues.erase(it);
     });
+    if (!err.empty()) storeCaughtError(err);
 }
 
 void rdma_nativeInvokeFreeBlock(int64_t blockId) {
@@ -661,6 +751,10 @@ void rdma_nativeInvokeFreeBlock(int64_t blockId) {
 
 void rdma_start(void* ctx) {
     facebook::rdma::rdmaStart(ctx);
+}
+
+void rdma_set_uncaught_handler(void) {
+    facebook::rdma::rdmaInstallUncaughtHandlerCAbi();
 }
 
 int32_t rdma_is_ready(void) {
@@ -679,6 +773,25 @@ void rdma_eval_file(const char* path) {
 
 int32_t rdma_content_version(void) {
     return facebook::rdma::g_contentVersion.load(std::memory_order_acquire);
+}
+
+const char* rdma_takeNativeError(void) {
+    if (g_tlsCaughtError.empty()) return nullptr;
+    g_tlsCaughtErrorBuf = g_tlsCaughtError;
+    g_tlsCaughtError.clear();
+    return g_tlsCaughtErrorBuf.c_str();
+}
+
+const char* rdma_takeEvalError(void) {
+    static thread_local std::string buf;
+    facebook::rdma::RdmaExceptionInfo info;
+    if (!rdmaTakeEvalError(info)) return nullptr;
+    buf = info.message.empty() ? info.originalExceptionType : info.message;
+    if (!info.stack.empty()) {
+        buf += "\n";
+        buf += info.stack;
+    }
+    return buf.c_str();
 }
 
 void* rdma_vtableDispatch(int64_t vtablePtr, int32_t vtableId) {
