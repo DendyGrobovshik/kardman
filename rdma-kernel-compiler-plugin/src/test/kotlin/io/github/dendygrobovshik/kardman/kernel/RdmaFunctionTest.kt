@@ -16,6 +16,7 @@
 package io.github.dendygrobovshik.kardman.kernel
 
 import io.github.dendygrobovshik.kardman.types.ConstructorInfo
+import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.PropertyInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
@@ -84,6 +85,41 @@ class RdmaTypeValidatorTest {
             returnType = RdmaTypeRef(RdmaType.UnitType),
         )
         assertTrue(RdmaTypeValidator.validateFunction(fn) { it == "com.example.kernel.Person" }.isEmpty())
+    }
+
+    @Test
+    fun `class members with RDMA and nested lists are valid`() {
+        val cls = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Box",
+            qualifiedName = "com.example.kernel.Box",
+            constructors = listOf(ConstructorInfo(listOf(
+                ParameterInfo("items", "kotlin.collections.List", isList = true, listElementType = "list:kotlin.Int"),
+            ))),
+            methods = listOf(MethodInfo(
+                name = "tags",
+                returnType = "kotlin.collections.List",
+                parameters = emptyList(),
+                isList = true,
+                listElementType = "com.example.kernel.Person",
+            )),
+            properties = listOf(PropertyInfo("names", "kotlin.collections.List", false, isList = true, listElementType = "kotlin.String")),
+        )
+        val errors = RdmaTypeValidator.validateClass(cls) { it == "com.example.kernel.Person" }
+        assertTrue(errors.isEmpty(), errors.joinToString("\n"))
+    }
+
+    @Test
+    fun `class member with non-RDMA type is rejected`() {
+        val cls = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Box",
+            qualifiedName = "com.example.kernel.Box",
+            constructors = listOf(ConstructorInfo(listOf(ParameterInfo("x", "com.example.Unknown")))),
+            methods = emptyList(),
+            properties = emptyList(),
+        )
+        val errors = RdmaTypeValidator.validateClass(cls) { it == "com.example.kernel.Person" }
+        assertTrue(errors.isNotEmpty())
+        assertContains(errors[0], "com.example.Unknown")
     }
 }
 
@@ -162,6 +198,23 @@ class RdmaFunctionCodegenTest {
         val bridge = generated["RdmaBridge.cpp"] ?: error("missing bridge")
         assertContains(bridge, "createPersonWrapper")
         assertContains(bridge, "NewGlobalRef")
+    }
+
+    @Test
+    fun `nested list param and return use recursive element type`() {
+        val nested = RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.Primitive("kotlin.Int"))))))
+        val fn = RdmaFunctionInfo(
+            name = "echoNested",
+            qualifiedName = "com.example.kernel.echoNested",
+            facadeClass = "com.example.kernel.WidgetsKt",
+            composable = false,
+            parameters = listOf(RdmaParameterInfo("items", nested)),
+            returnType = nested,
+        )
+        val generated = generate(listOf(person()), listOf(fn))
+        val bridge = generated["RdmaBridge.cpp"] ?: error("missing bridge")
+        assertContains(bridge, """materializeArray(env, r, jvm, listObj_items, "list:kotlin.Int")""")
+        assertContains(bridge, """createListHandle(r, jvm, globalRet, "list:kotlin.Int")""")
     }
 
     @Test

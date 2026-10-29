@@ -201,6 +201,56 @@ fun rdma_listGet(listHandle: COpaquePointer, index: Int): COpaquePointer? {
     return elem?.handle()
 }
 
+fun rdma_listSet(listHandle: COpaquePointer, index: Int, valueHandle: COpaquePointer?) {
+    @Suppress("UNCHECKED_CAST")
+    (listHandle.obj<Any>() as MutableList<Any?>)[index] = valueHandle?.obj<Any>()
+}
+
+fun rdma_listAdd(listHandle: COpaquePointer, valueHandle: COpaquePointer?) {
+    @Suppress("UNCHECKED_CAST")
+    (listHandle.obj<Any>() as MutableList<Any?>).add(valueHandle?.obj<Any>())
+}
+
+fun rdma_listRemoveAt(listHandle: COpaquePointer, index: Int) {
+    @Suppress("UNCHECKED_CAST")
+    (listHandle.obj<Any>() as MutableList<Any?>).removeAt(index)
+}
+
+fun rdma_listClear(listHandle: COpaquePointer) {
+    @Suppress("UNCHECKED_CAST")
+    (listHandle.obj<Any>() as MutableList<Any?>).clear()
+}
+
+fun rdma_listAddAt(listHandle: COpaquePointer, index: Int, valueHandle: COpaquePointer?) {
+    @Suppress("UNCHECKED_CAST")
+    (listHandle.obj<Any>() as MutableList<Any?>).add(index, valueHandle?.obj<Any>())
+}
+
+fun rdma_listRemoveValue(listHandle: COpaquePointer, valueHandle: COpaquePointer?): Boolean {
+    @Suppress("UNCHECKED_CAST")
+    return (listHandle.obj<Any>() as MutableList<Any?>).remove(valueHandle?.obj<Any>())
+}
+
+fun rdma_listRemoveRange(listHandle: COpaquePointer, from: Int, to: Int) {
+    @Suppress("UNCHECKED_CAST")
+    val list = (listHandle.obj<Any>() as MutableList<Any?>)
+    for (i in (to - 1) downTo from) list.removeAt(i)
+}
+
+fun rdma_listContains(listHandle: COpaquePointer, valueHandle: COpaquePointer?): Boolean =
+    listHandle.obj<List<Any?>>().contains(valueHandle?.obj<Any>())
+
+fun rdma_listIndexOf(listHandle: COpaquePointer, valueHandle: COpaquePointer?): Int =
+    listHandle.obj<List<Any?>>().indexOf(valueHandle?.obj<Any>())
+
+fun rdma_listLastIndexOf(listHandle: COpaquePointer, valueHandle: COpaquePointer?): Int =
+    listHandle.obj<List<Any?>>().lastIndexOf(valueHandle?.obj<Any>())
+
+fun rdma_listIsEmpty(listHandle: COpaquePointer): Boolean =
+    listHandle.obj<List<Any?>>().isEmpty()
+
+fun rdma_emptyList(): COpaquePointer = emptyList<Any?>().handle()
+
 fun rdma_listCreate(handles: CPointer<LongVar>?, count: Int): COpaquePointer {
     val list = ArrayList<Any?>(count)
     var p = handles
@@ -349,6 +399,18 @@ private val _register = run {
     rdmaRegisterFunction("rdma_arrayGet", staticCFunction(::rdma_arrayGet))
     rdmaRegisterFunction("rdma_listSize", staticCFunction(::rdma_listSize))
     rdmaRegisterFunction("rdma_listGet", staticCFunction(::rdma_listGet))
+    rdmaRegisterFunction("rdma_listSet", staticCFunction(::rdma_listSet))
+    rdmaRegisterFunction("rdma_listAdd", staticCFunction(::rdma_listAdd))
+    rdmaRegisterFunction("rdma_listRemoveAt", staticCFunction(::rdma_listRemoveAt))
+    rdmaRegisterFunction("rdma_listClear", staticCFunction(::rdma_listClear))
+    rdmaRegisterFunction("rdma_listAddAt", staticCFunction(::rdma_listAddAt))
+    rdmaRegisterFunction("rdma_listRemoveValue", staticCFunction(::rdma_listRemoveValue))
+    rdmaRegisterFunction("rdma_listRemoveRange", staticCFunction(::rdma_listRemoveRange))
+    rdmaRegisterFunction("rdma_listContains", staticCFunction(::rdma_listContains))
+    rdmaRegisterFunction("rdma_listIndexOf", staticCFunction(::rdma_listIndexOf))
+    rdmaRegisterFunction("rdma_listLastIndexOf", staticCFunction(::rdma_listLastIndexOf))
+    rdmaRegisterFunction("rdma_listIsEmpty", staticCFunction(::rdma_listIsEmpty))
+    rdmaRegisterFunction("rdma_emptyList", staticCFunction(::rdma_emptyList))
     rdmaRegisterFunction("rdma_listCreate", staticCFunction(::rdma_listCreate))
     rdmaRegisterFunction("rdma_arrayCreate", staticCFunction(::rdma_arrayCreate))
     rdmaRegisterFunction("rdma_composer_startRestartGroup", staticCFunction(::rdma_composer_startRestartGroup))

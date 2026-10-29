@@ -15,9 +15,14 @@
  */
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.MethodInfo
+import io.github.dendygrobovshik.kardman.types.ParameterInfo
+import io.github.dendygrobovshik.kardman.types.PropertyInfo
+import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
 import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
 import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
+import io.github.dendygrobovshik.kardman.types.StaticInfo
 import org.jetbrains.kotlin.ir.types.IrSimpleType
 import org.jetbrains.kotlin.ir.types.IrType
 import org.jetbrains.kotlin.ir.types.classFqName
@@ -89,6 +94,72 @@ object RdmaTypeValidator {
             errors += validate(p.type, isRdmaClass).map { "function ${function.qualifiedName}: parameter '${p.name}' $it" }
         }
         errors += validate(function.returnType, isRdmaClass).map { "function ${function.qualifiedName}: $it" }
+        return errors
+    }
+
+    /**
+     * Validates every type in an `@RDMA` class (constructor parameters, properties,
+     * method parameters/returns, statics) recursively. Class members use the string
+     * `ParameterInfo`/`PropertyInfo`/`MethodInfo` shape rather than [RdmaTypeRef], so
+     * the list element descriptor (`list:<elem>`) is walked directly.
+     */
+    fun validateClass(classInfo: RdmaClassInfo, isRdmaClass: (String) -> Boolean): List<String> {
+        val errors = mutableListOf<String>()
+        val primitives = RdmaTypeParser.primitiveFqns
+
+        fun checkLeaf(fqn: String, path: String) {
+            if (fqn !in primitives && !isRdmaClass(fqn)) {
+                errors += "$path: '$fqn' is not a @RDMA type; only @RDMA classes, primitives, functions and lists can cross the runtime boundary"
+            }
+        }
+
+        fun checkDescriptor(descriptor: String, path: String) {
+            if (descriptor.startsWith("list:")) {
+                checkDescriptor(descriptor.removePrefix("list:"), "$path[]")
+            } else {
+                checkLeaf(descriptor, path)
+            }
+        }
+
+        fun checkParameter(p: ParameterInfo, path: String) {
+            if (p.isList) {
+                val elem = p.listElementType
+                if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
+            } else if (p.type != "kotlin.Unit") {
+                checkLeaf(p.type, path)
+            }
+        }
+
+        fun checkProperty(p: PropertyInfo, path: String) {
+            if (p.isList) {
+                val elem = p.listElementType
+                if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
+            } else {
+                checkLeaf(p.type, path)
+            }
+        }
+
+        fun checkMethodReturn(m: MethodInfo, path: String) {
+            if (m.isList) {
+                val elem = m.listElementType
+                if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
+            } else if (m.returnType != "kotlin.Unit") {
+                checkLeaf(m.returnType, path)
+            }
+        }
+
+        val prefix = "class ${classInfo.qualifiedName}"
+        classInfo.constructors.forEachIndexed { i, c ->
+            c.parameters.forEachIndexed { j, p -> checkParameter(p, "$prefix: constructor[$i] parameter '${p.name}'") }
+        }
+        classInfo.properties.forEach { p -> checkProperty(p, "$prefix: property '${p.name}'") }
+        classInfo.methods.forEach { m ->
+            m.parameters.forEachIndexed { i, p -> checkParameter(p, "$prefix: method '${m.name}' parameter '${p.name}'") }
+            checkMethodReturn(m, "$prefix: method '${m.name}' return")
+        }
+        classInfo.statics.forEach { s ->
+            if (s.type != "kotlin.Unit") checkLeaf(s.type, "$prefix: static '${s.name}'")
+        }
         return errors
     }
 }

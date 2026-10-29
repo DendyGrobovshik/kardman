@@ -32,6 +32,42 @@ inline int32_t rdma_listSize(void* listHandle) {
 inline void* rdma_listGet(void* listHandle, int32_t index) {
     return ((void* (*)(void*, int32_t))rdma_lookupFunction("rdma_listGet"))(listHandle, index);
 }
+inline void rdma_listSet(void* listHandle, int32_t index, void* valueHandle) {
+    ((void (*)(void*, int32_t, void*))rdma_lookupFunction("rdma_listSet"))(listHandle, index, valueHandle);
+}
+inline void rdma_listAdd(void* listHandle, void* valueHandle) {
+    ((void (*)(void*, void*))rdma_lookupFunction("rdma_listAdd"))(listHandle, valueHandle);
+}
+inline void rdma_listRemoveAt(void* listHandle, int32_t index) {
+    ((void (*)(void*, int32_t))rdma_lookupFunction("rdma_listRemoveAt"))(listHandle, index);
+}
+inline void rdma_listClear(void* listHandle) {
+    ((void (*)(void*))rdma_lookupFunction("rdma_listClear"))(listHandle);
+}
+inline void rdma_listAddAt(void* listHandle, int32_t index, void* valueHandle) {
+    ((void (*)(void*, int32_t, void*))rdma_lookupFunction("rdma_listAddAt"))(listHandle, index, valueHandle);
+}
+inline bool rdma_listRemoveValue(void* listHandle, void* valueHandle) {
+    return ((bool (*)(void*, void*))rdma_lookupFunction("rdma_listRemoveValue"))(listHandle, valueHandle);
+}
+inline void rdma_listRemoveRange(void* listHandle, int32_t from, int32_t to) {
+    ((void (*)(void*, int32_t, int32_t))rdma_lookupFunction("rdma_listRemoveRange"))(listHandle, from, to);
+}
+inline bool rdma_listContains(void* listHandle, void* valueHandle) {
+    return ((bool (*)(void*, void*))rdma_lookupFunction("rdma_listContains"))(listHandle, valueHandle);
+}
+inline int32_t rdma_listIndexOf(void* listHandle, void* valueHandle) {
+    return ((int32_t (*)(void*, void*))rdma_lookupFunction("rdma_listIndexOf"))(listHandle, valueHandle);
+}
+inline int32_t rdma_listLastIndexOf(void* listHandle, void* valueHandle) {
+    return ((int32_t (*)(void*, void*))rdma_lookupFunction("rdma_listLastIndexOf"))(listHandle, valueHandle);
+}
+inline bool rdma_listIsEmpty(void* listHandle) {
+    return ((bool (*)(void*))rdma_lookupFunction("rdma_listIsEmpty"))(listHandle);
+}
+inline void* rdma_emptyList() {
+    return ((void* (*)())rdma_lookupFunction("rdma_emptyList"))();
+}
 // Creates a Kotlin List<Any?> from an array of handles (for materializing JS
 // arrays into Kotlin Lists). Caller transfers ownership of the returned handle.
 // The Kotlin side reads the handle array as `CPointer<LongVar>`; `void* const*`
@@ -83,6 +119,10 @@ private:
 // reuse their native handles. Returns nullptr for null/undefined. Implemented in
 // RdmaComposeCAbi.cpp.
 void* jsiToHandle(jsi::Runtime& rt, const jsi::Value& v, const std::string& elementType);
+
+// Morphs a plugin-created Kotlin/JS `ArrayList` into a proxy list backed by the
+// C ABI handle. Implemented in RdmaComposeCAbi.cpp.
+void morphListCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& elementType);
 
 } // namespace rdma
 } // namespace facebook

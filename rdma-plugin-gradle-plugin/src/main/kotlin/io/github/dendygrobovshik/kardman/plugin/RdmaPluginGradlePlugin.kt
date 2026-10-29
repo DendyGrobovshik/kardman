@@ -142,6 +142,18 @@ external object RDMA {
     fun registerBlock(block: dynamic, pluginId: String): dynamic
     fun sideEffect(blockId: dynamic)
     fun disposableEffect(keys: dynamic, effectFn: dynamic)
+    var listKind: ((dynamic) -> Int)?
+}
+
+fun rdmaListKind(value: Any?): Int = when {
+    value is ArrayList<*> -> 0
+    value === emptyList<Any?>() -> 1
+    else -> 2
+}
+
+private val rdmaListKindInstalled = run {
+    RDMA.listKind = { value: dynamic -> rdmaListKind(value) }
+    Unit
 }
 
 fun rdmaMutableStateOf(value: Int): MutableState<Int> =

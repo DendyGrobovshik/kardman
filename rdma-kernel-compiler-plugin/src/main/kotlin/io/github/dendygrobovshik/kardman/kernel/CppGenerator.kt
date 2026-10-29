@@ -698,8 +698,6 @@ $nsClose} // namespace rdma
 namespace facebook {
 namespace rdma {
 $nsOpen
-jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType);
-jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object& jsObj, const std::string& elementType);
 """)
         for (fn in functions) {
             cpp.write(functionImpl(fn, infos))
@@ -994,7 +992,7 @@ $body}
     private fun typeName(type: RdmaTypeRef): String = when (val t = type.type) {
         is RdmaType.Primitive -> t.fqn
         is RdmaType.Ref -> t.fqn
-        is RdmaType.ListType -> typeName(t.element)
+        is RdmaType.ListType -> "list:" + typeName(t.element)
         else -> "kotlin.Any"
     }
 

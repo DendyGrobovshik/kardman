@@ -100,9 +100,11 @@ Two of these deserve a note:
   every property read and method call on the handle mutates the *kernel* object.
   There is no object identity across runtimes — each call that crosses back
   produces a fresh handle to the same underlying object.
-- **`List<T>` is a special case.** A list first created in the plugin is
-  materialized into a kernel-side `ArrayList` on its first crossing and kept
-  there from then on, so element mutation happens on the kernel side.
+- **`List<T>` is a special case.** Only `ArrayList` crosses. A list first created
+  in the plugin is materialized into a native `ArrayList` on its first crossing and
+  morphed into a proxy list; from then on all reads and mutations go through the
+  proxy list. `EmptyList` materializes into a native immutable empty list. See
+  [collections.md](../design/collections.md).
 
 ### What the plugin can write
 
@@ -142,7 +144,7 @@ function signature — must be an allowed type. A non-`@RDMA` class on the
 boundary is a compile error. Concretely, the following are **not** supported:
 
 - composite value types without `@RDMA` (data classes, `enum`, `Array`, `Map`);
-- generics other than the `List<T>` special case;
+- generics other than the `List<T>` / `MutableList<T>` special case;
 - secondary/overloaded constructors, named arguments, default parameter values;
 - overloaded methods, extension functions, `suspend`/coroutine functions.
 
@@ -272,14 +274,15 @@ app-update-free updates of both plugin logic and UI.
 **Supported** — `@RDMA` classes (incl. `open` + plugin subclasses), properties
 (`val`/`var`), public methods, companion statics, `@RDMA` top-level functions
 and widgets; types `Int`/`Long`/`Float`/`Double`/`Boolean`/`String` (nullable
-allowed), `@RDMA` references (incl. cross-module), `List<T>`, lambdas, `Unit`
+allowed), `@RDMA` references (incl. cross-module), `List<T>`/`MutableList<T>`
+(`ArrayList`; see [collections.md](design/collections.md)), lambdas, `Unit`
 returns; UI via the base Compose protocol (`remember`/`mutableStateOf`/widgets +
 content lambdas and callbacks) plus the `SideEffect`, `DisposableEffect` and
 `LaunchedEffect` effects
 and `rememberCoroutineScope` (single-threaded, `Dispatchers.Main`/`.immediate`).
 
 **Not yet** — non-`@RDMA` value types (`enum`, `Array`, `Map`, data classes),
-generics beyond `List<T>`; secondary constructors, named/default arguments;
+generics beyond `List<T>`/`MutableList<T>`; secondary constructors, named/default arguments;
 overloaded methods, extension and `suspend` functions; block-body overrides;
 `derivedStateOf`/`snapshotFlow`, animations and anything else outside the
 allowlist; `delay(ms)`/timers; stable identity for object/`@RDMA` effect keys;

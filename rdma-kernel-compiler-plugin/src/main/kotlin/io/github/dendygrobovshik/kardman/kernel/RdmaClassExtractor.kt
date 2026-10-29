@@ -164,6 +164,16 @@ object RdmaClassExtractor {
         if (!isList()) return null
         val simple = this as? IrSimpleType ?: return "kotlin.Any"
         val elemType = simple.arguments.firstOrNull()?.typeOrNull ?: return "kotlin.Any"
-        return elemType.toTypeName()
+        return elemType.toTypeDescriptor()
+    }
+
+    // Recursive element-type descriptor consumed by the C++ runtime to (un)wrap list
+    // elements: a primitive/@RDMA FQN, or `list:<elem>` for a nested list.
+    private fun IrType.toTypeDescriptor(): String {
+        val fqn = toTypeName()
+        if (fqn != "kotlin.collections.List" && fqn != "kotlin.collections.MutableList") return fqn
+        val elem = (this as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
+            ?: return "list:kotlin.Any"
+        return "list:" + elem.toTypeDescriptor()
     }
 }

@@ -386,6 +386,7 @@ $extractions
     private fun elemTypeFqn(t: RdmaTypeRef): String = when (val ty = t.type) {
         is RdmaType.Primitive -> ty.fqn
         is RdmaType.Ref -> ty.fqn
+        is RdmaType.ListType -> "list:" + elemTypeFqn(ty.element)
         else -> "kotlin.Any"
     }
 }

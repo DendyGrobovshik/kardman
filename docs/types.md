@@ -28,7 +28,7 @@ allowed types below.
 | `@RDMA` class | by reference (handle) | object lives only in kernel memory; plugin holds a handle |
 | `@RDMA` companion `val` (static) | by reference (handle) | singleton exposed as `RDMA.<class><Name>()` (e.g. `RDMA.alignmentCenter()`) |
 | Function / lambda | registration + callback | body lives in the plugin; kernel holds an id |
-| `List<T>` | special case | list object lives in kernel memory, at least after first border transfer (initial plugin list may be pure plugin memory located list) |
+| `List<T>` / `MutableList<T>` | special case (`ArrayList`) | native `ArrayList` in kernel memory after first crossing; plugin holds a proxy list |
 | `Unit` | — | return type only |
 
 ## Semantics
@@ -38,8 +38,12 @@ allowed types below.
 - **`@RDMA` class** is a reference type. The object is created and kept in the JVM
   (kernel); the plugin receives a proxy handle. Fields/methods are reached through the
   handle, so a mutation happens on the kernel-side object.
-- **`List`** is a special case. A list first created in the plugin is materialized into a
-  JVM `ArrayList` on its first crossing and is kept in kernel memory from then on.
+- **`List`** is a special case. Only `ArrayList` crosses. A list first created in the plugin
+  is materialized into a native `ArrayList` on its first crossing (a JVM `ArrayList` on
+  Android, a Kotlin `ArrayList` held via `StableRef` on iOS) and morphed into a proxy list.
+  From then on the native list is the source of truth and all JS operations go through the
+  proxy list. `EmptyList` materializes into a native immutable empty list. See
+  [collections.md](design/collections.md).
 - **Function / lambda** — a parameter or return type of a function crossing the boundary
   must itself be an allowed type (`@RDMA` or primitive). The lambda is registered in JS,
   the kernel receives its id and invokes it through JNI; a lambda's return value is
@@ -55,7 +59,7 @@ type. A violation is a compile error.
 ## Not supported (yet)
 
 - Composite value types: data classes without `@RDMA`, `enum`, `Array`, `Map`.
-- Generics, except the `List<T>` special case.
+- Generics, except the `List<T>` / `MutableList<T>` special case.
 - `suspend` / async functions, overloaded functions/constructors, default parameter values.
 
 ## Base Compose protocol (plugin)

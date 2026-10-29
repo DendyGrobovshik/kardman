@@ -26,7 +26,11 @@ struct ListNativeState : public jsi::NativeState {
     JavaVM* jvm_;
     jobject globalListRef_;
     std::string elementType_;
-    
+    // Mangled name of the original `checkIsMutable` method, discovered when a
+    // plugin-created `ArrayList` is morphed. Empty when the proxy wraps a
+    // kernel-created list (the native list is the source of truth for mutability).
+    std::string checkIsMutable_;
+
     ListNativeState(JavaVM* jvm, jobject globalRef, const std::string& elemType)
         : jvm_(jvm), globalListRef_(globalRef), elementType_(elemType) {}
     
@@ -47,13 +51,21 @@ struct ListNativeState : public jsi::NativeState {
     }
 };
 
-// Setup NativeState + get/size HostFunctions + defineProperty getter on existing object
+// Setup NativeState + the full plain `List`/`MutableList` API as HostFunctions +
+// the `size` getter. `elementType` is a recursive descriptor: a primitive or @RDMA
+// FQN, or `list:<elem>` for a nested list.
 void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject globalListRef, const std::string& elementType);
+
+// Discover the storage methods of a Kotlin/JS `ArrayList` on its prototype and
+// replace them on `obj` with wrappers that forward to the native list. Called only
+// for plugin-created lists, after `populateListHandle`.
+void morphArrayList(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, const std::string& elementType);
 
 // Create a fresh ListHandle JSI object wrapping a JVM ArrayList
 jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType);
 
-// Materialize JS Array → JVM ArrayList + mutate JS object into permanent ListHandle
+// Materialize JS Array → JVM ArrayList + mutate JS object into permanent ListHandle.
+// Recursively materializes nested lists when `elementType` is a `list:<elem>` descriptor.
 jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object& jsObj, const std::string& elementType);
 
 } // namespace rdma

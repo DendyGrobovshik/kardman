@@ -218,16 +218,36 @@ $body}
 """)
             if (prop.isMutable) {
                 val setterName = "set${prop.name.replaceFirstChar { it.uppercase() }}"
-                val argExpr = when {
-                    prop.type == "kotlin.String" -> "args[0].getString(r).utf8(r).c_str()"
-                    prop.type == "kotlin.Int" -> "(int32_t)args[0].getNumber()"
-                    prop.type == "kotlin.Boolean" -> "args[0].getBool()"
-                    prop.type == "kotlin.Long" -> "(int64_t)args[0].getNumber()"
-                    else -> "args[0].getNumber()"
+                val setFn = cFn(info.className + "_set" + prop.name.replaceFirstChar { it.uppercase() })
+                val argBlock: String
+                val argExpr: String
+                when {
+                    prop.isList -> {
+                        argBlock = "    void* v = nullptr;\n" +
+                            "    if (!args[0].isNull() && args[0].isObject()) {\n" +
+                            "        auto argObj = args[0].asObject(r);\n" +
+                            "        v = materializeList(r, argObj, \"${prop.listElementType ?: ""}\");\n" +
+                            "    }\n"
+                        argExpr = "v"
+                    }
+                    prop.type == "kotlin.String" -> { argBlock = ""; argExpr = "args[0].getString(r).utf8(r).c_str()" }
+                    prop.type == "kotlin.Int" -> { argBlock = ""; argExpr = "(int32_t)args[0].getNumber()" }
+                    prop.type == "kotlin.Boolean" -> { argBlock = ""; argExpr = "args[0].getBool()" }
+                    prop.type == "kotlin.Long" -> { argBlock = ""; argExpr = "(int64_t)args[0].getNumber()" }
+                    prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> { argBlock = ""; argExpr = "args[0].getNumber()" }
+                    else -> {
+                        argBlock = "    void* v = nullptr;\n" +
+                            "    if (!args[0].isNull() && args[0].isObject()) {\n" +
+                            "        auto argObj = args[0].asObject(r);\n" +
+                            "        auto argState = std::static_pointer_cast<${rdmaClassByName(prop.type, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(argObj.getNativeState(r));\n" +
+                            "        if (argState) v = argState->handle();\n" +
+                            "    }\n"
+                        argExpr = "v"
+                    }
                 }
                 out.write("""static jsi::Value ${info.className}_$setterName(jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) {
     auto state = std::static_pointer_cast<${info.className}NativeState>(thisVal.asObject(r).getNativeState(r));
-    ${cFn(info.className + "_set" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle(), $argExpr);
+$argBlock    $setFn(state->handle(), $argExpr);
     return jsi::Value::undefined();
 }
 
@@ -549,10 +569,34 @@ jsi::Object createListHandle(jsi::Runtime& rt, void* listHandle, const std::stri
 }
 
 void* materializeList(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& elementType) {
+    int kind = -1;
+    {
+        auto rdma = rt.global().getProperty(rt, "RDMA");
+        if (rdma.isObject()) {
+            auto fn = rdma.asObject(rt).getProperty(rt, "listKind");
+            if (fn.isObject() && fn.asObject(rt).isFunction(rt)) {
+                auto res = fn.asObject(rt).asFunction(rt).call(rt, jsObj);
+                if (res.isNumber()) kind = (int)res.getNumber();
+            }
+        }
+    }
+    if (kind == 2) {
+        throw jsi::JSError(rt, "unsupported List implementation crossing the runtime boundary; only ArrayList and EmptyList are supported");
+    }
+    if (kind == 1) return rdma_emptyList();
     // Already a list handle we produced earlier.
     if (jsObj.isHostObject(rt)) {
         auto ns = std::dynamic_pointer_cast<ListCAbiHost>(jsObj.getHostObject(rt));
         if (ns) return ns->listHandle();
+    }
+    // A plugin-created list morphed into a proxy: reuse the native handle stored
+    // in the hidden `__rdma_proxy` property.
+    {
+        auto p = jsObj.getProperty(rt, "__rdma_proxy");
+        if (p.isObject()) {
+            auto h = std::dynamic_pointer_cast<ListCAbiHost>(p.asObject(rt).getHostObject(rt));
+            if (h) return h->listHandle();
+        }
     }
     // Plain JS array.
     if (jsObj.isArray(rt)) {
@@ -581,7 +625,9 @@ void* materializeList(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& e
             for (size_t j = 0; j < m; j++) {
                 handles.push_back(jsiToHandle(rt, backing.getValueAtIndex(rt, j), elementType));
             }
-            return rdma_listCreate(handles.data(), (int32_t)handles.size());
+            void* h = rdma_listCreate(handles.data(), (int32_t)handles.size());
+            morphListCAbi(rt, jsObj, h, elementType);
+            return h;
         }
     }
     return nullptr;
@@ -627,7 +673,8 @@ $nsClose} // namespace rdma
                 is RdmaType.ListType -> {
                     sb.append("    void* arg_${p.name} = nullptr;\n")
                     sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
-                    sb.append("        arg_${p.name} = materializeList(r, args[$idx].asObject(r), \"${typeName(ty.element)}\");\n")
+                    sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+                    sb.append("        arg_${p.name} = materializeList(r, argObj_${p.name}, \"${typeName(ty.element)}\");\n")
                     sb.append("    }\n")
                     argNames.add("arg_${p.name}")
                 }
@@ -673,7 +720,7 @@ $nsClose} // namespace rdma
     private fun typeName(t: RdmaTypeRef): String = when (val ty = t.type) {
         is RdmaType.Primitive -> ty.fqn
         is RdmaType.Ref -> ty.fqn
-        is RdmaType.ListType -> typeName(ty.element)
+        is RdmaType.ListType -> "list:" + typeName(ty.element)
         else -> "kotlin.Any"
     }
 

@@ -362,6 +362,16 @@ jsi::Object makeScopeUpdateScopeProxyCAbi(jsi::Runtime& rt, void* scopeHandle) {
 
 // -------------------------------------------------------------- list host
 
+// Element type is a recursive descriptor: primitives / @RDMA FQN, or a nested
+// `list:<elem>` for a list-of-lists.
+static bool isListElementType(const std::string& elementType) {
+    return elementType.rfind("list:", 0) == 0;
+}
+
+static std::string nestedElementType(const std::string& elementType) {
+    return elementType.substr(5);
+}
+
 ListCAbiHost::ListCAbiHost(void* listHandle, const std::string& elementType)
     : listHandle_(listHandle), elementType_(elementType) {}
 
@@ -377,10 +387,57 @@ jsi::Value ListCAbiHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
     if (n.rfind("get", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "get"), 1,
-            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isNumber()) return jsi::Value::undefined();
                 void* elem = rdma_listGet(handle, (int32_t)args[0].getNumber());
+                if (!elem) return jsi::Value::null();
+                if (isListElementType(elemType)) {
+                    auto host = std::make_shared<ListCAbiHost>(elem, nestedElementType(elemType));
+                    return jsi::Object::createFromHostObject(r, host);
+                }
                 return wrapAnyCAbi(r, nullptr, elem);
+            });
+    }
+    if (n.rfind("set", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "set"), 2,
+            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 2 || !args[0].isNumber()) return jsi::Value::undefined();
+                void* value = jsiToHandle(r, args[1], elemType);
+                rdma_listSet(handle, (int32_t)args[0].getNumber(), value);
+                return jsi::Value::undefined();
+            });
+    }
+    if (n.rfind("add", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "add"), 2,
+            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 1) return jsi::Value::undefined();
+                if (count >= 2 && args[0].isNumber() && !args[1].isUndefined()) {
+                    void* value = jsiToHandle(r, args[1], elemType);
+                    rdma_listAddAt(handle, (int32_t)args[0].getNumber(), value);
+                } else {
+                    void* value = jsiToHandle(r, args[0], elemType);
+                    rdma_listAdd(handle, value);
+                }
+                return jsi::Value::undefined();
+            });
+    }
+    if (n.rfind("removeAt", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "removeAt"), 1,
+            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 1 || !args[0].isNumber()) return jsi::Value::undefined();
+                rdma_listRemoveAt(handle, (int32_t)args[0].getNumber());
+                return jsi::Value::undefined();
+            });
+    }
+    if (n.rfind("clear", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "clear"), 0,
+            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                rdma_listClear(handle);
+                return jsi::Value::undefined();
             });
     }
     if (n.rfind("sizeImpl", 0) == 0) {
@@ -390,11 +447,167 @@ jsi::Value ListCAbiHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
                 return jsi::Value((double)rdma_listSize(handle));
             });
     }
+    if (n.rfind("isEmpty", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "isEmpty"), 0,
+            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                return jsi::Value(rdma_listIsEmpty(handle));
+            });
+    }
+    if (n.rfind("contains", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "contains"), 1,
+            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 1) return jsi::Value(false);
+                void* value = jsiToHandle(r, args[0], elemType);
+                return jsi::Value(rdma_listContains(handle, value));
+            });
+    }
+    if (n.rfind("indexOf", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "indexOf"), 1,
+            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 1) return jsi::Value(-1);
+                void* value = jsiToHandle(r, args[0], elemType);
+                return jsi::Value((double)rdma_listIndexOf(handle, value));
+            });
+    }
+    if (n.rfind("lastIndexOf", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "lastIndexOf"), 1,
+            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 1) return jsi::Value(-1);
+                void* value = jsiToHandle(r, args[0], elemType);
+                return jsi::Value((double)rdma_listLastIndexOf(handle, value));
+            });
+    }
+    if (n.rfind("remove", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "remove"), 1,
+            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 1) return jsi::Value::undefined();
+                void* value = jsiToHandle(r, args[0], elemType);
+                return jsi::Value(rdma_listRemoveValue(handle, value));
+            });
+    }
+    if (n.rfind("removeRange", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "removeRange"), 2,
+            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 2) return jsi::Value::undefined();
+                rdma_listRemoveRange(handle, (int32_t)args[0].getNumber(), (int32_t)args[1].getNumber());
+                return jsi::Value::undefined();
+            });
+    }
     return jsi::Value::undefined();
+}
+
+// Morphs a plugin-created Kotlin/JS `ArrayList` into a proxy list backed by the
+// C ABI handle. Stores the `ListCAbiHost` on the object and installs forwarding
+// wrappers for the plain and mangled storage methods.
+void morphListCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& elementType) {
+    auto proxy = std::make_shared<ListCAbiHost>(handle, elementType);
+    obj.setProperty(rt, "__rdma_proxy", jsi::Object::createFromHostObject(rt, proxy));
+
+    auto installPlain = [&rt, &obj](const char* name, size_t arity) {
+        obj.setProperty(rt, name, jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, name), arity,
+            [name](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                auto proxyObj = thisVal.asObject(r).getProperty(r, "__rdma_proxy");
+                if (!proxyObj.isObject()) return jsi::Value::undefined();
+                auto target = proxyObj.asObject(r).getProperty(r, name);
+                if (!target.isObject() || !target.asObject(r).isFunction(r)) return jsi::Value::undefined();
+                return target.asObject(r).asFunction(r).callWithThis(r, proxyObj.asObject(r), args, count);
+            }));
+    };
+    installPlain("get", 1);
+    installPlain("set", 2);
+    installPlain("add", 2);
+    installPlain("removeAt", 1);
+    installPlain("remove", 1);
+    installPlain("removeRange", 2);
+    installPlain("clear", 0);
+    installPlain("sizeImpl", 0);
+    installPlain("isEmpty", 0);
+    installPlain("contains", 1);
+    installPlain("indexOf", 1);
+    installPlain("lastIndexOf", 1);
+
+    auto forwardMangled = [&rt, &obj](const std::string& mangled, const char* plain) {
+        obj.setProperty(rt, mangled.c_str(), jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, mangled.c_str()), 2,
+            [plain](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                auto target = thisVal.asObject(r).getProperty(r, plain);
+                if (!target.isObject() || !target.asObject(r).isFunction(r)) return jsi::Value::undefined();
+                return target.asObject(r).asFunction(r).callWithThis(r, thisVal.asObject(r), args, count);
+            }));
+    };
+
+    auto objectCtor = rt.global().getPropertyAsObject(rt, "Object");
+    auto getPrototypeOf = objectCtor.getPropertyAsFunction(rt, "getPrototypeOf");
+    jsi::Object proto = getPrototypeOf.call(rt, jsi::Value(rt, obj)).asObject(rt);
+    auto names = proto.getPropertyNames(rt);
+    size_t n = names.size(rt);
+    for (size_t i = 0; i < n; i++) {
+        std::string name = names.getValueAtIndex(rt, i).getString(rt).utf8(rt);
+        if (name.rfind("get_size_", 0) == 0) {
+            forwardMangled(name, "sizeImpl");
+        } else if (name.rfind("get_", 0) == 0) {
+            forwardMangled(name, "get");
+        } else if (name.rfind("set_", 0) == 0) {
+            forwardMangled(name, "set");
+        } else if (name.rfind("add_", 0) == 0) {
+            forwardMangled(name, "add");
+        } else if (name.rfind("removeAt_", 0) == 0) {
+            forwardMangled(name, "removeAt");
+        } else if (name.rfind("removeRange_", 0) == 0) {
+            forwardMangled(name, "removeRange");
+        } else if (name.rfind("clear_", 0) == 0) {
+            forwardMangled(name, "clear");
+        }
+    }
 }
 
 void* jsiToHandle(jsi::Runtime& rt, const jsi::Value& v, const std::string& elementType) {
     if (v.isNull() || v.isUndefined()) return nullptr;
+    if (isListElementType(elementType)) {
+        // Nested list: materialize recursively.
+        if (!v.isObject()) return nullptr;
+        auto obj = v.asObject(rt);
+        if (obj.isHostObject(rt)) {
+            auto host = std::dynamic_pointer_cast<ListCAbiHost>(obj.getHostObject(rt));
+            if (host) return host->listHandle();
+        }
+        const std::string nested = nestedElementType(elementType);
+        if (obj.isArray(rt)) {
+            auto arr = obj.asArray(rt);
+            size_t n = arr.size(rt);
+            std::vector<void*> handles;
+            handles.reserve(n);
+            for (size_t i = 0; i < n; i++) {
+                handles.push_back(jsiToHandle(rt, arr.getValueAtIndex(rt, i), nested));
+            }
+            return rdma_listCreate(handles.data(), (int32_t)handles.size());
+        }
+        // Kotlin/JS List (ArrayList): wraps a backing JS array in an own field.
+        auto names = obj.getPropertyNames(rt);
+        size_t n = names.size(rt);
+        for (size_t i = 0; i < n; i++) {
+            auto name = names.getValueAtIndex(rt, i).getString(rt).utf8(rt);
+            auto val = obj.getProperty(rt, name.c_str());
+            if (val.isObject() && val.asObject(rt).isArray(rt)) {
+                auto backing = val.asObject(rt).asArray(rt);
+                size_t m = backing.size(rt);
+                std::vector<void*> handles;
+                handles.reserve(m);
+                for (size_t j = 0; j < m; j++) {
+                    handles.push_back(jsiToHandle(rt, backing.getValueAtIndex(rt, j), nested));
+                }
+                return rdma_listCreate(handles.data(), (int32_t)handles.size());
+            }
+        }
+        return nullptr;
+    }
     if (v.isNumber()) {
         if (elementType == "kotlin.Long") return rdma_boxLong((int64_t)v.getNumber());
         if (elementType == "kotlin.Double" || elementType == "kotlin.Float") return rdma_boxDouble(v.getNumber());

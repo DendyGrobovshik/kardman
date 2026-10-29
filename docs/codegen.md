@@ -66,9 +66,11 @@ To stay decoupled, the codegen is **type-erased**:
 
 Structural type classification (primitive / `List` / `Function*` / "everything else
 is a handle") is what decides the marshal path — the codegen never needs the
-referenced module's FQN set. The only cross-module lookup is in the **validator**,
-which resolves the referenced FQN via `pluginContext.referenceClass(...)` and checks
-for the `@RDMA` annotation to reject non-bridgeable types.
+referenced module's FQN set. `List`/`MutableList` values are materialized into a
+native `ArrayList` and morphed into a proxy list on first crossing; see
+[collections.md](design/collections.md). The only cross-module lookup is in the
+**validator**, which resolves the referenced FQN via `pluginContext.referenceClass(...)`
+and checks for the `@RDMA` annotation to reject non-bridgeable types.
 
 #### Why this is zero-overhead
 

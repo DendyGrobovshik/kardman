@@ -174,6 +174,15 @@ The two-priority JS queue (`high` for compose/init over `low` for callbacks) is
 what keeps composition responsive while async work drains; see
 [architecture.md](architecture.md#threading-model-dedicated-hermes-thread).
 
+## Collections
+
+`List`/`MutableList` values cross as `ArrayList` handles. On Android the handle is a
+JNI global ref to a `java.util.ArrayList`; on iOS it is a `StableRef` to a Kotlin
+`ArrayList`. A plugin-created list is materialized on its first crossing and morphed
+into a proxy list whose storage methods call the native list; kernel-returned lists
+are wrapped in a proxy list on return. See
+[collections.md](design/collections.md).
+
 ## Lifecycle
 
 `StableRef` handles (iOS) and `jobject` global refs (Android) are both released

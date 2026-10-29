@@ -133,6 +133,29 @@ cat tests/stand/kernel/internal/build/generated/rdma/rdma_manifest.json
 cat tests/stand/plugin/alice/counter/build/generated/rdma/Main_rdma.kt
 ```
 
+### End-to-end (functional) tests
+
+The functional tests exercise the real runtime (Hermes + C++ bridge) across the
+`@RDMA` boundary. They assert on exact `println` markers emitted by the test
+fixtures and are driven against a booted Android emulator and an available iOS
+simulator:
+
+```bash
+# Everything: unit tests + Android e2e + iOS e2e
+./scripts/e2e.sh
+
+# Individual suites
+tests/rdma-integration-tests/e2e/list-behavior.sh       # List mutation/nesting/cross-runtime (Android)
+tests/rdma-integration-tests/e2e/ios-list-behavior.sh   # List mutation/nesting/cross-runtime (iOS)
+tests/rdma-integration-tests/e2e/exception-propagation.sh   # cross-runtime exceptions (Android)
+tests/rdma-integration-tests/e2e/plugin-lifecycle.sh    # plugin store lifecycle (Android, needs the dev server)
+```
+
+Requirements: an Android emulator (`adb devices`) and an iOS simulator (the iOS
+script boots one automatically; override with `IOS_SIM_NAME=…`). The scripts
+static-release the kernel, publish the framework to `mavenLocal`, build the app,
+and assert the fixture markers — so each is self-contained and idempotent.
+
 ### Runtime testing
 
 Install the APK on an emulator or device and check logcat:

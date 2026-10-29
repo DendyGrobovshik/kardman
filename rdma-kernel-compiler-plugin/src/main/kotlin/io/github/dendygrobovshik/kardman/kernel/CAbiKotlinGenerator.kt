@@ -125,7 +125,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
 
     private fun fromC(expr: String, m: MemberType): String {
         if (m.isList) {
-            val elem = m.listElementType ?: "kotlin.Any"
+            val elem = descriptorKotlinType(m.listElementType ?: "kotlin.Any")
             return if (m.nullable) "$expr?.obj<List<$elem>>()" else "$expr.obj<List<$elem>>()"
         }
         return when {
@@ -135,6 +135,12 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
             else -> if (m.nullable) "$expr?.obj<${m.type}>()" else "$expr.obj<${m.type}>()"
         }
     }
+
+    // Renders a recursive element descriptor (`list:list:kotlin.Int`) back into a
+    // Kotlin type (`List<List<Int>>`).
+    private fun descriptorKotlinType(descriptor: String): String =
+        if (descriptor.startsWith("list:")) "List<${descriptorKotlinType(descriptor.removePrefix("list:"))}>"
+        else descriptor
 
     private fun toC(expr: String, m: MemberType): String = when {
         m.isList -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"

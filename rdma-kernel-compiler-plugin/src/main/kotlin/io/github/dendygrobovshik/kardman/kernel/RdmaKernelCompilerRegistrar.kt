@@ -112,7 +112,8 @@ class RdmaKernelGenerationExtension(
             fqn in rdmaClassFqns ||
                 pluginContext.referenceClass(ClassId.topLevel(FqName(fqn)))?.owner?.hasAnnotation(RDMA_ANNOTATION) == true
         }
-        val errors = functions.flatMap { RdmaTypeValidator.validateFunction(it, isRdmaClass) }
+        val errors = functions.flatMap { RdmaTypeValidator.validateFunction(it, isRdmaClass) } +
+            classInfos.flatMap { RdmaTypeValidator.validateClass(it, isRdmaClass) }
         if (errors.isNotEmpty()) {
             error("Invalid @RDMA types crossing the runtime boundary:\n" + errors.joinToString("\n"))
         }

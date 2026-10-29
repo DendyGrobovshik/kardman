@@ -89,6 +89,7 @@ class RdmaWidgetGenerator(
     private fun valueFqn(t: RdmaType): String = when (t) {
         is RdmaType.Primitive -> t.fqn
         is RdmaType.Ref -> t.fqn
+        is RdmaType.ListType -> "list:" + valueFqn(t.element.type)
         else -> "kotlin.Any"
     }
 
@@ -116,6 +117,12 @@ class RdmaWidgetGenerator(
         "kotlin.Unit" -> "Unit"
         else -> "Any?"
     }
+
+    // Renders a recursive element descriptor (`list:list:kotlin.Int`) back into a
+    // Kotlin type (`List<List<Int>>`).
+    private fun listKotlinType(elemFqn: String): String =
+        if (elemFqn.startsWith("list:")) "List<${listKotlinType(elemFqn.removePrefix("list:"))}>"
+        else kotlinType(elemFqn)
 
     private fun jniType(jvmType: String): String = when (jvmType) {
         "kotlin.String" -> "Ljava/lang/String;"
@@ -170,7 +177,7 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
                 is Param.Value -> "${p.idName}: ${kotlinType(p.jvmType)}"
                 is Param.Ref -> "${p.idName}: ${simpleName(p.fqn)}${if (p.nullable) "?" else ""}"
                 is Param.Content, is Param.Callback -> "${p.idName}: Long"
-                is Param.ListVal -> "${p.idName}: List<${kotlinType(p.elemFqn)}>"
+                is Param.ListVal -> "${p.idName}: List<${listKotlinType(p.elemFqn)}>"
                 is Param.ListHandle -> "${p.idName}: List<Long>"
             }
         }

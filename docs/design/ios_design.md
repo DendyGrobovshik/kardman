@@ -156,7 +156,8 @@ On Android the host app implements services by registering a
 Kotlin/Native exports the `KernelServiceProvider` interface as a generated
 Objective-C protocol; the Swift app conforms to it and registers via
 `KernelServices.register(...)`. Parameter conversion (`String`/`Boolean`/`Int`/
-`List`/lambdas ↔ Objective-C types and blocks) is automatic.
+`ArrayList`/lambdas ↔ Objective-C types and blocks) is automatic. `List` values
+cross as `ArrayList` proxy lists; see [collections.md](collections.md).
 
 A callback round-trips as: plugin block id → `RdmaFunction1` (Kotlin) →
 Objective-C block → Swift, and back through `nativeInvokeCallback`. Direct
