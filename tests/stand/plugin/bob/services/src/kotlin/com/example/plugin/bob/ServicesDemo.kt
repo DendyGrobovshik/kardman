@@ -18,9 +18,13 @@ package com.example.plugin.bob
 import com.example.kernel.internal.services.appendToList
 import com.example.kernel.internal.services.echoIntList
 import com.example.kernel.internal.services.echoIntListList
+import com.example.kernel.internal.services.echoIntListMap
+import com.example.kernel.internal.services.echoStringMap
 import com.example.kernel.internal.services.httpGet
+import com.example.kernel.internal.services.mapValue
 import com.example.kernel.internal.services.mutateInPlace
 import com.example.kernel.internal.services.platformInfo
+import com.example.kernel.internal.services.putMapValue
 import com.example.kernel.internal.services.sumList
 
 fun runServicesDemo() {
@@ -38,6 +42,10 @@ fun runServicesDemo() {
     runListMutationDemo()
     runListNestingDemo()
     runListCrossRuntimeDemo()
+    runListIterationDemo()
+    runMapMutationDemo()
+    runMapNestingDemo()
+    runMapCrossRuntimeDemo()
 }
 
 fun runListMutationDemo() {
@@ -73,4 +81,46 @@ fun runListCrossRuntimeDemo() {
     val list3 = mutableListOf(7)
     mutateInPlace(list3)
     println("LIST_XRT_K2J: size=${list3.size} last=${list3.get(list3.size - 1)}")
+}
+
+fun runListIterationDemo() {
+    val list = mutableListOf(1, 2, 3)
+    echoIntList(list)
+    list.add(4)
+    val doubled = list.map { it * 2 }
+    println("LIST_ITER: sum=${doubled.sum()} joined=${list.joinToString(",")}")
+    println("LIST_STR: ${list.toString()}")
+    println("LIST_KSTR: ${echoIntList(listOf(5, 6)).toString()}")
+}
+
+fun runMapMutationDemo() {
+    val map = mutableMapOf("a" to "1", "b" to "2")
+    echoStringMap(map)
+    map["c"] = "3"
+    map.remove("a")
+    println("MAP_MUT: size=${map.size} b=${map["b"]}")
+}
+
+fun runMapNestingDemo() {
+    val map = mapOf(1 to listOf(1, 2), 2 to listOf(3, 4))
+    val echoed = echoIntListMap(map)
+    val first = echoed.get(1)!!
+    println("MAP_NEST: size=${echoed.size} inner0size=${first.size} inner00=${first.get(0)}")
+}
+
+fun runMapCrossRuntimeDemo() {
+    val map = mutableMapOf("a" to "1")
+    echoStringMap(map)
+    map["b"] = "2"
+    val v = mapValue(map, "b")
+    println("MAP_XRT_READ: v=$v")
+
+    val map2 = mutableMapOf("x" to "10")
+    echoStringMap(map2)
+    putMapValue(map2, "y", "20")
+    println("MAP_XRT_WRITE: size=${map2.size} y=${map2["y"]}")
+
+    val map3 = mutableMapOf("k" to "v")
+    putMapValue(map3, "k2", "v2")
+    println("MAP_XRT_K2J: size=${map3.size} k2=${map3["k2"]}")
 }

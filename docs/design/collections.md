@@ -13,21 +13,23 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 -->
-# Collections: List Bridge
+# Collections: List and Map Bridge
 
-This document defines how `List` and `MutableList` values cross the kernel/plugin
-boundary.
+This document defines how `List`/`MutableList` and `Map`/`MutableMap` values cross
+the kernel/plugin boundary.
 
-Map and suspend are out of scope for this version.
+`suspend` is out of scope for this version.
 
 ## Terms
 
 - **Native list** — the `ArrayList` owned by the kernel.
+- **Native map** — the `LinkedHashMap`/`HashMap` owned by the kernel.
 - **Proxy list** — a JS `ArrayList` whose storage methods call the native list.
-- **Crossing** — the first transfer of a list across the runtime boundary.
-- **Materialize** — copy a JS list into a native `ArrayList`.
-- **Morph** — replace a JS object's storage methods with calls to a native list.
-- **Storage methods** — the `ArrayList` methods that read or write the backing array.
+- **Proxy map** — a JS `LinkedHashMap`/`HashMap` whose storage methods call the native map.
+- **Crossing** — the first transfer of a collection across the runtime boundary.
+- **Materialize** — copy a JS collection into a native collection.
+- **Morph** — replace a JS object's storage methods with calls to a native collection.
+- **Storage methods** — the collection methods that read or write the backing storage.
 
 ## Model
 
@@ -160,7 +162,65 @@ morphing.
 - Crossing a `SubList` view.
 - Direct access to Java/Kotlin collection internals.
 - Proxy identity or proxy caching.
-- Map and suspend.
+- suspend.
+
+# Map Bridge
+
+`Map`/`MutableMap` values cross the boundary with the same materialize-then-morph
+model as `List`. Keys must be a primitive, `String`, or an `@RDMA` reference; values
+may be any allowed type, including nested `List`/`Map`/`@RDMA`.
+
+## Model
+
+A map is JS-owned until its first crossing. At the first crossing the value is
+classified, materialized into a native map (`LinkedHashMap`), and the same JS object
+is morphed into a proxy map. From then on the native map is the source of truth.
+
+A map created in the kernel is wrapped in a new proxy map when returned.
+
+Crossing points are the same as for `List`: function/constructor arguments, mutable
+property setters, and elements of another `List`/`Map`/`@RDMA` object. Nested maps
+and lists are classified, materialized, and morphed recursively.
+
+## Supported implementations
+
+- `LinkedHashMap` (produced by `mapOf`, `linkedMapOf`, `mutableMapOf`) — kind 0.
+- `HashMap` (produced by `hashMapOf`) — kind 1.
+- `emptyMap` — kind 2; materializes into a native immutable empty map; the JS
+  singleton is not morphed.
+
+Any other `Map`/`MutableMap` implementation is rejected with `RdmaException`.
+
+## Classification and materialization
+
+Classification is done by the generated Kotlin/JS `RDMA.mapKind` classifier, and
+entry extraction by `RDMA.mapToEntries` (a JS array of `[key, value]` pairs). This
+keeps the C++ runtime independent of the Kotlin/JS `HashMap`/`LinkedHashMap`
+internal layout, which is version-specific.
+
+Materialization builds a native `LinkedHashMap` (JVM `LinkedHashMap` on Android, a
+Kotlin `LinkedHashMap` held via `StableRef` on iOS), converting each key and value
+according to its type descriptor.
+
+## Proxy map
+
+A proxy map's storage methods are replaced with wrappers around the native map.
+The surface includes `get`, `set`/`put`, `remove`, `clear`, `containsKey`, `size`,
+`isEmpty`, `putAll`, `forEach`, and the `keys`/`values`/`entries` live views.
+
+`keys`, `values`, and `entries` are live views: reads and iteration reflect the
+current native map, and mutations through `keys`/`values` mutate the native map.
+
+## Verification
+
+Covered cases:
+
+- `get`/`set`/`remove`/`clear`/`containsKey`/`size`/`isEmpty`;
+- `keys`/`values`/`entries` iteration and mutation;
+- `Map<String, String>` (header maps), `Map<Int, List<@RDMA>>` (nested values);
+- mutation in one runtime visible in the other;
+- `emptyMap`, `LinkedHashMap`, `HashMap`, and fail-fast on unsupported implementations;
+- Android and iOS end-to-end tests.
 
 ## Verification
 

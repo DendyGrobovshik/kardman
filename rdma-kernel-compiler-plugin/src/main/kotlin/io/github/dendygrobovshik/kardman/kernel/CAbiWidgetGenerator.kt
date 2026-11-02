@@ -111,6 +111,7 @@ class CAbiWidgetGenerator(
         is RdmaType.Primitive -> kotlinType(ty.fqn)
         is RdmaType.Ref -> ty.fqn
         is RdmaType.ListType -> "List<${refKotlinType(ty.element)}>"
+        is RdmaType.MapType -> "Map<${refKotlinType(ty.key)}, ${refKotlinType(ty.value)}>"
         is RdmaType.FunctionType -> "kotlin.Function${ty.parameters.size}"
         is RdmaType.UnitType -> "Unit"
     }

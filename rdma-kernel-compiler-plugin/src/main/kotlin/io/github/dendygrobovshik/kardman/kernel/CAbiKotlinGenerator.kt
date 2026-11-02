@@ -48,11 +48,14 @@ class CAbiKotlinGenerator(
 ) {
     private val fileSuffix: String = if (moduleId.isEmpty()) "" else "_$moduleId"
 
-    // A class-member type carries its kind explicitly (List + element type).
+    // A class-member type carries its kind explicitly (List/Map + element/key/value types).
     private data class MemberType(
         val type: String,
         val isList: Boolean = false,
         val listElementType: String? = null,
+        val isMap: Boolean = false,
+        val mapKeyType: String? = null,
+        val mapValueType: String? = null,
         val nullable: Boolean = false,
     )
 
@@ -106,6 +109,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
 
     private fun kotlinType(m: MemberType): String = when {
         m.isList -> if (m.nullable) "COpaquePointer?" else "COpaquePointer"
+        m.isMap -> if (m.nullable) "COpaquePointer?" else "COpaquePointer"
         m.type.startsWith("kotlin.Function") -> "Long"
         m.type == "kotlin.String" -> "CPointer<ByteVar>?"
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> CAbi.forMemberType(m.type).kotlinType
@@ -117,6 +121,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
     // checkKotlinError before dereferencing the (null) handle.
     private fun kotlinReturnType(m: MemberType): String = when {
         m.isList -> "COpaquePointer?"
+        m.isMap -> "COpaquePointer?"
         m.type.startsWith("kotlin.Function") -> "Long"
         m.type == "kotlin.String" -> "CPointer<ByteVar>?"
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> CAbi.forMemberType(m.type).kotlinType
@@ -128,6 +133,11 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
             val elem = descriptorKotlinType(m.listElementType ?: "kotlin.Any")
             return if (m.nullable) "$expr?.obj<List<$elem>>()" else "$expr.obj<List<$elem>>()"
         }
+        if (m.isMap) {
+            val key = descriptorKotlinType(m.mapKeyType ?: "kotlin.Any")
+            val value = descriptorKotlinType(m.mapValueType ?: "kotlin.Any")
+            return if (m.nullable) "$expr?.obj<Map<$key, $value>>()" else "$expr.obj<Map<$key, $value>>()"
+        }
         return when {
             m.type == "kotlin.String" -> "$expr?.toKString() ?: \"\""
             CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> expr
@@ -136,14 +146,40 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         }
     }
 
-    // Renders a recursive element descriptor (`list:list:kotlin.Int`) back into a
-    // Kotlin type (`List<List<Int>>`).
+    // Renders a recursive element descriptor (`list:list:kotlin.Int`,
+    // `map:kotlin.String:list:kotlin.Int`) back into a Kotlin type
+    // (`List<List<Int>>`, `Map<String, List<Int>>`).
     private fun descriptorKotlinType(descriptor: String): String =
-        if (descriptor.startsWith("list:")) "List<${descriptorKotlinType(descriptor.removePrefix("list:"))}>"
-        else descriptor
+        when {
+            descriptor.startsWith("list:") ->
+                "List<${descriptorKotlinType(descriptor.removePrefix("list:"))}>"
+            descriptor.startsWith("map:") -> {
+                val (key, value) = splitMapDescriptor(descriptor.removePrefix("map:"))
+                "Map<${descriptorKotlinType(key)}, ${descriptorKotlinType(value)}>"
+            }
+            else -> descriptor
+        }
+
+    // Splits the front descriptor off [s]; returns (front, remainder). Mirrors the
+    // validator's splitDescriptor: a descriptor is a leaf FQN, `list:<elem>`, or
+    // `map:<key>:<value>`.
+    private fun splitMapDescriptor(s: String): Pair<String, String> {
+        if (s.startsWith("list:")) {
+            val (elem, rest) = splitMapDescriptor(s.removePrefix("list:"))
+            return "list:$elem" to rest
+        }
+        if (s.startsWith("map:")) {
+            val (key, rest1) = splitMapDescriptor(s.removePrefix("map:"))
+            val (value, rest2) = splitMapDescriptor(rest1)
+            return "map:$key:$value" to rest2
+        }
+        val idx = s.indexOf(':')
+        return if (idx < 0) s to "" else s.substring(0, idx) to s.substring(idx + 1)
+    }
 
     private fun toC(expr: String, m: MemberType): String = when {
         m.isList -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
+        m.isMap -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
         m.type == "kotlin.String" -> "rdmaStringToCStr($expr ?: \"\")"
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> expr
         m.type.startsWith("kotlin.Function") -> expr
@@ -151,7 +187,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
     }
 
     private fun defaultForC(m: MemberType): String = when {
-        m.isList || m.type == "kotlin.String" -> "null"
+        m.isList || m.isMap || m.type == "kotlin.String" -> "null"
         m.type == "kotlin.Int" -> "0"
         m.type == "kotlin.Long" -> "0L"
         m.type == "kotlin.Boolean" -> "false"
@@ -177,7 +213,7 @@ fun $name($params): COpaquePointer {
     }
 
     private fun writeMethod(out: BufferedWriter, info: RdmaClassInfo, method: MethodInfo, registered: MutableList<String>) {
-        val retM = MemberType(method.returnType, method.isList, method.listElementType, method.nullableReturn)
+        val retM = MemberType(method.returnType, method.isList, method.listElementType, method.isMap, method.mapKeyType, method.mapValueType, method.nullableReturn)
         val name = cName(info.className + "_" + method.name)
         val params = buildList {
             add("handle: COpaquePointer")
@@ -198,7 +234,7 @@ $body}
     }
 
     private fun writeProperty(out: BufferedWriter, info: RdmaClassInfo, prop: PropertyInfo, registered: MutableList<String>) {
-        val m = MemberType(prop.type, prop.isList, prop.listElementType, prop.nullable)
+        val m = MemberType(prop.type, prop.isList, prop.listElementType, prop.isMap, prop.mapKeyType, prop.mapValueType, prop.nullable)
         val call = "handle.obj<${info.qualifiedName}>().${prop.name}"
         val getterName = cName(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })
         out.write("""
@@ -247,6 +283,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "CPointer<ByteVar>?" else CAbi.forMemberType(ty.fqn).kotlinType
         is RdmaType.Ref -> "COpaquePointer"
         is RdmaType.ListType -> "COpaquePointer"
+        is RdmaType.MapType -> "COpaquePointer"
         is RdmaType.FunctionType -> "Long"
     }
 
@@ -255,6 +292,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "CPointer<ByteVar>?" else CAbi.forMemberType(ty.fqn).kotlinType
         is RdmaType.Ref -> "COpaquePointer?"
         is RdmaType.ListType -> "COpaquePointer?"
+        is RdmaType.MapType -> "COpaquePointer?"
         is RdmaType.FunctionType -> "COpaquePointer?"
     }
 
@@ -263,6 +301,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "${p.name}?.toKString() ?: \"\"" else p.name
         is RdmaType.Ref -> if (p.type.nullable) "${p.name}?.obj<${ty.fqn}>()" else "${p.name}.obj<${ty.fqn}>()"
         is RdmaType.ListType -> if (p.type.nullable) "${p.name}?.obj<List<${listElemKotlin(ty)}>>()" else "${p.name}.obj<List<${listElemKotlin(ty)}>>()"
+        is RdmaType.MapType -> if (p.type.nullable) "${p.name}?.obj<Map<${rdmaTypeKotlin(ty.key.type)}, ${rdmaTypeKotlin(ty.value.type)}>>()" else "${p.name}.obj<Map<${rdmaTypeKotlin(ty.key.type)}, ${rdmaTypeKotlin(ty.value.type)}>>()"
         is RdmaType.FunctionType -> "${p.name}_fn"
     }
 
@@ -271,16 +310,20 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "rdmaStringToCStr($expr ?: \"\")" else expr
         is RdmaType.Ref -> "$expr.handle()"
         is RdmaType.ListType -> "$expr.handle()"
+        is RdmaType.MapType -> "$expr.handle()"
         is RdmaType.FunctionType -> "$expr.handle()"
     }
 
-    private fun listElemKotlin(t: RdmaType.ListType): String = when (val e = t.element.type) {
-        is RdmaType.Primitive -> CAbi.forMemberType(e.fqn).kotlinType
-        is RdmaType.Ref -> e.fqn
-        is RdmaType.ListType -> "List<${listElemKotlin(e)}>"
-        is RdmaType.FunctionType -> "kotlin.Function${e.parameters.size}"
+    private fun rdmaTypeKotlin(t: RdmaType): String = when (t) {
+        is RdmaType.Primitive -> CAbi.forMemberType(t.fqn).kotlinType
+        is RdmaType.Ref -> t.fqn
+        is RdmaType.ListType -> "List<${rdmaTypeKotlin(t.element.type)}>"
+        is RdmaType.MapType -> "Map<${rdmaTypeKotlin(t.key.type)}, ${rdmaTypeKotlin(t.value.type)}>"
+        is RdmaType.FunctionType -> "kotlin.Function${t.parameters.size}"
         is RdmaType.UnitType -> "Unit"
     }
+
+    private fun listElemKotlin(t: RdmaType.ListType): String = rdmaTypeKotlin(t.element.type)
 
     private fun functionDefault(t: RdmaTypeRef): String = when (val ty = t.type) {
         is RdmaType.UnitType -> "Unit"
@@ -298,15 +341,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
 
     private fun functionParamKotlinFnType(t: RdmaType.FunctionType): String = buildString {
         append("(")
-        append(t.parameters.joinToString(", ") { p ->
-            when (val ty = p.type) {
-                is RdmaType.Primitive -> CAbi.forMemberType(ty.fqn).kotlinType
-                is RdmaType.Ref -> ty.fqn
-                is RdmaType.ListType -> "List<${listElemKotlin(ty)}>"
-                is RdmaType.FunctionType -> "kotlin.Function${ty.parameters.size}"
-                is RdmaType.UnitType -> "Unit"
-            }
-        })
+        append(t.parameters.joinToString(", ") { p -> rdmaTypeKotlin(p.type) })
         append(") -> Unit")
     }
 
@@ -372,5 +407,5 @@ $calls
     }
 
     private fun ParameterInfo.toMemberType() =
-        MemberType(type, isList, listElementType, nullable)
+        MemberType(type, isList, listElementType, isMap, mapKeyType, mapValueType, nullable)
 }

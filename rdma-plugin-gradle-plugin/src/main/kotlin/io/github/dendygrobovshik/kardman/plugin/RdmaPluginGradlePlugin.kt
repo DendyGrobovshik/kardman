@@ -143,6 +143,8 @@ external object RDMA {
     fun sideEffect(blockId: dynamic)
     fun disposableEffect(keys: dynamic, effectFn: dynamic)
     var listKind: ((dynamic) -> Int)?
+    var mapKind: ((dynamic) -> Int)?
+    var mapToEntries: ((dynamic) -> dynamic)?
 }
 
 fun rdmaListKind(value: Any?): Int = when {
@@ -151,8 +153,32 @@ fun rdmaListKind(value: Any?): Int = when {
     else -> 2
 }
 
-private val rdmaListKindInstalled = run {
+fun rdmaMapKind(value: Any?): Int = when {
+    value is LinkedHashMap<*, *> -> 0
+    value is HashMap<*, *> -> 1
+    value === emptyMap<Any?, Any?>() -> 2
+    else -> 3
+}
+
+fun rdmaMapToEntries(value: Any?): dynamic {
+    val out = js("[]")
+    (value as Map<Any?, Any?>).entries.forEach { e ->
+        val entry = js("[]")
+        entry.push(e.key)
+        entry.push(e.value)
+        out.push(entry)
+    }
+    return out
+}
+
+// Installs the collection classifiers on the RDMA bridge. Top-level `val`
+// initializers run in the module init block (before `main`), but Kotlin/JS DCE
+// removes an unreferenced private val; keep it public and reference it from
+// `rdmaRunApp` so the classifiers are always installed at bundle load.
+val rdmaListKindInstalled = run {
     RDMA.listKind = { value: dynamic -> rdmaListKind(value) }
+    RDMA.mapKind = { value: dynamic -> rdmaMapKind(value) }
+    RDMA.mapToEntries = { value: dynamic -> rdmaMapToEntries(value) }
     Unit
 }
 
@@ -225,6 +251,7 @@ fun rdmaRememberCoroutineScope(): CoroutineScope {
 }
 
 fun rdmaRunApp(content: @Composable () -> Unit) {
+    rdmaListKindInstalled
     RDMA.setComposerEmpty(Composer.Companion.Empty)
     RDMA.registerContent(content, "$pluginId")
 }

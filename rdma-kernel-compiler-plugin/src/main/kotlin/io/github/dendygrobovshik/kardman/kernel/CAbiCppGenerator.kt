@@ -63,6 +63,7 @@ class CAbiCppGenerator(
         is RdmaType.Primitive -> CAbi.forMemberType(ty.fqn).cppType
         is RdmaType.Ref -> "void*"
         is RdmaType.ListType -> "void*"
+        is RdmaType.MapType -> "void*"
         is RdmaType.FunctionType -> "int64_t"
     }
 
@@ -71,6 +72,7 @@ class CAbiCppGenerator(
         is RdmaType.Primitive -> CAbi.forMemberType(ty.fqn).cppType
         is RdmaType.Ref -> "void*"
         is RdmaType.ListType -> "void*"
+        is RdmaType.MapType -> "void*"
         is RdmaType.FunctionType -> "void*"
     }
 
@@ -204,6 +206,12 @@ ${info.className}NativeState::~${info.className}NativeState() {
                     "    void* h = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n" +
                         "    return createListHandle(r, h, \"$elem\");\n"
                 }
+                prop.isMap -> {
+                    val key = prop.mapKeyType ?: "kotlin.Any"
+                    val value = prop.mapValueType ?: "kotlin.Any"
+                    "    void* h = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n" +
+                        "    return createMapHandle(r, h, \"$key\", \"$value\");\n"
+                }
                 prop.type == "kotlin.String" -> "    const char* s = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n    return jsi::String::createFromUtf8(r, s);\n"
                 prop.type == "kotlin.Int" -> "    return jsi::Value((double)${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
                 prop.type == "kotlin.Boolean" -> "    return jsi::Value(${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
@@ -227,6 +235,14 @@ $body}
                             "    if (!args[0].isNull() && args[0].isObject()) {\n" +
                             "        auto argObj = args[0].asObject(r);\n" +
                             "        v = materializeList(r, argObj, \"${prop.listElementType ?: ""}\");\n" +
+                            "    }\n"
+                        argExpr = "v"
+                    }
+                    prop.isMap -> {
+                        argBlock = "    void* v = nullptr;\n" +
+                            "    if (!args[0].isNull() && args[0].isObject()) {\n" +
+                            "        auto argObj = args[0].asObject(r);\n" +
+                            "        v = materializeMap(r, argObj, \"${prop.mapKeyType ?: ""}\", \"${prop.mapValueType ?: ""}\");\n" +
                             "    }\n"
                         argExpr = "v"
                     }
@@ -282,6 +298,8 @@ $argBlock    $setFn(state->handle(), $argExpr);
                     out.write("        auto argObj = args[$idx].asObject(r);\n")
                     if (param.isList) {
                         out.write("        arg_${param.name} = materializeList(r, argObj, \"${param.listElementType ?: ""}\");\n")
+                    } else if (param.isMap) {
+                        out.write("        arg_${param.name} = materializeMap(r, argObj, \"${param.mapKeyType ?: ""}\", \"${param.mapValueType ?: ""}\");\n")
                     } else {
                         out.write("        auto argState = std::static_pointer_cast<${rdmaClassByName(param.type, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(argObj.getNativeState(r));\n")
                         out.write("        if (argState) arg_${param.name} = argState->handle();\n")
@@ -308,6 +326,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                 out.write("    auto jret = $call;\n    checkKotlinError(r);\n")
                 val returnExpr = when {
                     method.isList -> "    return createListHandle(r, jret, \"${method.listElementType ?: ""}\");\n"
+                    method.isMap -> "    return createMapHandle(r, jret, \"${method.mapKeyType ?: ""}\", \"${method.mapValueType ?: ""}\");\n"
                     method.returnType == "kotlin.String" -> "    return jsi::String::createFromUtf8(r, jret);\n"
                     method.returnType == "kotlin.Int" -> "    return jsi::Value((double)jret);\n"
                     method.returnType == "kotlin.Boolean" -> "    return jsi::Value(jret);\n"
@@ -381,6 +400,8 @@ $argBlock    $setFn(state->handle(), $argExpr);
                     out.write("        auto argObj = args[$idx].asObject(rt);\n")
                     if (param.isList) {
                         out.write("        arg_${param.name} = materializeList(rt, argObj, \"${param.listElementType ?: ""}\");\n")
+                    } else if (param.isMap) {
+                        out.write("        arg_${param.name} = materializeMap(rt, argObj, \"${param.mapKeyType ?: ""}\", \"${param.mapValueType ?: ""}\");\n")
                     } else {
                         out.write("        auto argState = std::static_pointer_cast<${rdmaClassByName(param.type, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(argObj.getNativeState(rt));\n")
                         out.write("        if (argState) arg_${param.name} = argState->handle();\n")
@@ -453,6 +474,8 @@ jsi::Value wrapUserObject(jsi::Runtime& rt, void* handle);
 jsi::Value createWithOverrides(jsi::Runtime& rt, const std::string& className, const jsi::Array& ctorArgs, const jsi::Object& overrides);
 jsi::Object createListHandle(jsi::Runtime& rt, void* listHandle, const std::string& elementType);
 void* materializeList(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& elementType);
+jsi::Object createMapHandle(jsi::Runtime& rt, void* mapHandle, const std::string& keyType, const std::string& valueType);
+void* materializeMap(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& keyType, const std::string& valueType);
 
 $nsClose} // namespace rdma
 } // namespace facebook
@@ -633,6 +656,46 @@ void* materializeList(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& e
     return nullptr;
 }
 
+jsi::Object createMapHandle(jsi::Runtime& rt, void* mapHandle, const std::string& keyType, const std::string& valueType) {
+    auto host = std::make_shared<MapCAbiHost>(mapHandle, keyType, valueType);
+    return jsi::Object::createFromHostObject(rt, host);
+}
+
+void* materializeMap(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& keyType, const std::string& valueType) {
+    int kind = -1;
+    {
+        auto rdma = rt.global().getProperty(rt, "RDMA");
+        if (rdma.isObject()) {
+            auto fn = rdma.asObject(rt).getProperty(rt, "mapKind");
+            if (fn.isObject() && fn.asObject(rt).isFunction(rt)) {
+                auto res = fn.asObject(rt).asFunction(rt).call(rt, jsObj);
+                if (res.isNumber()) kind = (int)res.getNumber();
+            }
+        }
+    }
+    if (kind == 3) {
+        throw jsi::JSError(rt, "unsupported Map implementation crossing the runtime boundary; only LinkedHashMap, HashMap and EmptyMap are supported");
+    }
+    if (kind == 2) return rdma_emptyMap();
+    // Already a map handle we produced earlier.
+    if (jsObj.isHostObject(rt)) {
+        auto ns = std::dynamic_pointer_cast<MapCAbiHost>(jsObj.getHostObject(rt));
+        if (ns) return ns->mapHandle();
+    }
+    // A plugin-created map morphed into a proxy: reuse the native handle stored
+    // in the hidden `__rdma_proxy` property.
+    {
+        auto p = jsObj.getProperty(rt, "__rdma_proxy");
+        if (p.isObject()) {
+            auto h = std::dynamic_pointer_cast<MapCAbiHost>(p.asObject(rt).getHostObject(rt));
+            if (h) return h->mapHandle();
+        }
+    }
+    void* h = buildMapHandleFromJs(rt, jsObj, keyType, valueType);
+    if (h) morphMapCAbi(rt, jsObj, h, keyType, valueType);
+    return h;
+}
+
 $nsClose} // namespace rdma
 } // namespace facebook
 """)
@@ -678,6 +741,14 @@ $nsClose} // namespace rdma
                     sb.append("    }\n")
                     argNames.add("arg_${p.name}")
                 }
+                is RdmaType.MapType -> {
+                    sb.append("    void* arg_${p.name} = nullptr;\n")
+                    sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                    sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+                    sb.append("        arg_${p.name} = materializeMap(r, argObj_${p.name}, \"${typeName(ty.key)}\", \"${typeName(ty.value)}\");\n")
+                    sb.append("    }\n")
+                    argNames.add("arg_${p.name}")
+                }
                 is RdmaType.FunctionType -> {
                     sb.append("    int64_t cpp_${p.name} = (int64_t)args[$idx].getNumber();\n")
                     argNames.add("cpp_${p.name}")
@@ -703,6 +774,10 @@ $nsClose} // namespace rdma
                 sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
                 sb.append("    return createListHandle(r, jret, \"${typeName(ty.element)}\");\n")
             }
+            is RdmaType.MapType -> {
+                sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
+                sb.append("    return createMapHandle(r, jret, \"${typeName(ty.key)}\", \"${typeName(ty.value)}\");\n")
+            }
             is RdmaType.FunctionType -> sb.append("    return wrapUserObject(r, $call);\n")
         }
         sb.append("}\n\n")
@@ -721,6 +796,7 @@ $nsClose} // namespace rdma
         is RdmaType.Primitive -> ty.fqn
         is RdmaType.Ref -> ty.fqn
         is RdmaType.ListType -> "list:" + typeName(ty.element)
+        is RdmaType.MapType -> "map:" + typeName(ty.key) + ":" + typeName(ty.value)
         else -> "kotlin.Any"
     }
 

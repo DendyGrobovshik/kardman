@@ -69,6 +69,7 @@ class CppGenerator(
         is RdmaType.Primitive -> JniTypeMapper.jniSignature(t.fqn)
         is RdmaType.Ref -> "L${t.fqn.replace('.', '/')};"
         is RdmaType.ListType -> "Ljava/util/List;"
+        is RdmaType.MapType -> "Ljava/util/Map;"
         is RdmaType.FunctionType -> "Lkotlin/jvm/functions/Function${t.parameters.size};"
     }
 
@@ -235,6 +236,7 @@ $nsClose} // namespace rdma
         out.write("""#include "${info.className}Proxy.h"
 #include "RdmaJniCache$fileSuffix.h"
 #include "ListHandle.h"
+#include "MapHandle.h"
 #include "RdmaCompose.h"
 """)
         // Include headers for @RDMA types used as parameters or return values
@@ -297,6 +299,14 @@ ${info.className}NativeState::~${info.className}NativeState() {
                         "jobject globalRet = env->NewGlobalRef(jret); env->DeleteLocalRef(jret); " +
                         "return createListHandle(r, jvm, globalRet, \"$elemType\");"
                 }
+                prop.isMap -> {
+                    val nullCheck = if (prop.nullable) "if (jret == nullptr) return jsi::Value::null(); " else ""
+                    val keyType = prop.mapKeyType ?: "kotlin.Any"
+                    val valueType = prop.mapValueType ?: "kotlin.Any"
+                    "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}); $nullCheck" +
+                        "jobject globalRet = env->NewGlobalRef(jret); env->DeleteLocalRef(jret); " +
+                        "return createMapHandle(r, jvm, globalRet, \"$keyType\", \"$valueType\");"
+                }
                 prop.type == "kotlin.String" -> {
                     "auto jstr = (jstring)env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}); auto cstr = env->GetStringUTFChars(jstr, nullptr); auto result = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jstr, cstr); env->DeleteLocalRef(jstr); return result;"
                 }
@@ -322,6 +332,11 @@ static jsi::Value ${info.className}_${getterName}(jsi::Runtime& r, JavaVM* jvm, 
                     prop.isList -> {
                         val elemType = prop.listElementType ?: "kotlin.Any"
                         "auto listObj = args[0].asObject(r); jobject argList = materializeArray(env, r, jvm, listObj, \"$elemType\"); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, argList);"
+                    }
+                    prop.isMap -> {
+                        val keyType = prop.mapKeyType ?: "kotlin.Any"
+                        val valueType = prop.mapValueType ?: "kotlin.Any"
+                        "auto mapObj = args[0].asObject(r); jobject argMap = materializeMap(env, r, jvm, mapObj, \"$keyType\", \"$valueType\"); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, argMap);"
                     }
                     prop.type == "kotlin.Int" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jint)args[0].getNumber());"
                     prop.type == "kotlin.Boolean" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getBool());"
@@ -387,6 +402,17 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     out.write("            arg_${param.name} = materializeArray(env, r, jvm, listObj, \"${param.listElementType ?: ""}\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
+                } else if (param.isMap) {
+                    out.write("    jobject arg_${param.name} = nullptr;\n")
+                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("        auto mapObj = args[$idx].asObject(r);\n")
+                    out.write("        if (mapObj.hasNativeState(r)) {\n")
+                    out.write("            auto ns = mapObj.getNativeState(r);\n")
+                    out.write("            if (ns) arg_${param.name} = *(jobject*)((char*)ns.get() + 16);\n")
+                    out.write("        } else {\n")
+                    out.write("            arg_${param.name} = materializeMap(env, r, jvm, mapObj, \"${param.mapKeyType ?: ""}\", \"${param.mapValueType ?: ""}\");\n")
+                    out.write("        }\n")
+                    out.write("    }\n")
                 } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
@@ -421,6 +447,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     "kotlin.Long" -> "(jlong)cpp_${param.name}"
                     else -> when {
                         param.isList -> "arg_${param.name}"
+                        param.isMap -> "arg_${param.name}"
                         isObjectRef(param.type) -> "arg_${param.name}"
                         else -> "nullptr"
                     }
@@ -444,7 +471,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     "kotlin.Boolean" -> "auto result = env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
                     "kotlin.Double", "kotlin.Float" -> "auto result = env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
                     "kotlin.Long" -> "auto result = env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
-                    else -> if (isObjectRef(method.returnType) || method.isList) {
+                    else -> if (isObjectRef(method.returnType) || method.isList || method.isMap) {
                         "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
                     } else ""
                 }
@@ -470,6 +497,13 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                             out.write("        jobject globalRet = env->NewGlobalRef(jret);\n")
                             out.write("        env->DeleteLocalRef(jret);\n")
                             out.write("        return createListHandle(r, jvm, globalRet, \"${method.listElementType ?: ""}\");\n")
+                            out.write("    }\n")
+                            out.write("    return jsi::Value::null();\n")
+                        } else if (method.isMap) {
+                            out.write("    if (jret != nullptr) {\n")
+                            out.write("        jobject globalRet = env->NewGlobalRef(jret);\n")
+                            out.write("        env->DeleteLocalRef(jret);\n")
+                            out.write("        return createMapHandle(r, jvm, globalRet, \"${method.mapKeyType ?: ""}\", \"${method.mapValueType ?: ""}\");\n")
                             out.write("    }\n")
                             out.write("    return jsi::Value::null();\n")
                         } else {
@@ -562,6 +596,19 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     out.write("            arg_${param.name} = materializeArray(env, rt, jvm, listObj_${param.name}, \"$elemType\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
+                } else if (param.isMap) {
+                    val keyType = param.mapKeyType ?: "kotlin.Any"
+                    val valueType = param.mapValueType ?: "kotlin.Any"
+                    out.write("    jobject arg_${param.name} = nullptr;\n")
+                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("        auto mapObj_${param.name} = args[$idx].asObject(rt);\n")
+                    out.write("        if (mapObj_${param.name}.hasNativeState(rt)) {\n")
+                    out.write("            auto ns_${param.name} = mapObj_${param.name}.getNativeState(rt);\n")
+                    out.write("            if (ns_${param.name}) arg_${param.name} = *(jobject*)((char*)ns_${param.name}.get() + 16);\n")
+                    out.write("        } else {\n")
+                    out.write("            arg_${param.name} = materializeMap(env, rt, jvm, mapObj_${param.name}, \"$keyType\", \"$valueType\");\n")
+                    out.write("        }\n")
+                    out.write("    }\n")
                 } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
@@ -592,6 +639,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     "kotlin.Long" -> "(jlong)cpp_${param.name}"
                     else -> when {
                         param.isList -> "arg_${param.name}"
+                        param.isMap -> "arg_${param.name}"
                         isObjectRef(param.type) -> "arg_${param.name}"
                         else -> "nullptr"
                     }
@@ -683,6 +731,7 @@ $nsClose} // namespace rdma
 #include "RdmaJniCache$fileSuffix.h"
 #include "RdmaVtable.h"
 #include "ListHandle.h"
+#include "MapHandle.h"
 #include "RdmaCompose.h"
 #include "RdmaWidgetBridge$fileSuffix.h"
 """)
@@ -968,6 +1017,20 @@ $body}
                     "        }\n" +
                     "    }\n"
             }
+            is RdmaType.MapType -> {
+                val key = typeName(t.key)
+                val value = typeName(t.value)
+                "    jobject arg_${p.name} = nullptr;\n" +
+                    "    if (!args[$i].isNull()) {\n" +
+                    "        auto mapObj_${p.name} = args[$i].asObject(r);\n" +
+                    "        if (mapObj_${p.name}.hasNativeState(r)) {\n" +
+                    "            auto ns_${p.name} = mapObj_${p.name}.getNativeState(r);\n" +
+                    "            if (ns_${p.name}) arg_${p.name} = *(jobject*)((char*)ns_${p.name}.get() + 16);\n" +
+                    "        } else {\n" +
+                    "            arg_${p.name} = materializeMap(env, r, jvm, mapObj_${p.name}, \"$key\", \"$value\");\n" +
+                    "        }\n" +
+                    "    }\n"
+            }
             is RdmaType.FunctionType -> {
                 val arity = t.parameters.size
                 "    jlong id_${p.name} = (jlong)args[$i].getNumber();\n" +
@@ -985,7 +1048,7 @@ $body}
             "kotlin.Long" -> "(jlong)cpp_${p.name}"
             else -> "nullptr"
         }
-        is RdmaType.Ref, is RdmaType.ListType, is RdmaType.FunctionType -> "arg_${p.name}"
+        is RdmaType.Ref, is RdmaType.ListType, is RdmaType.MapType, is RdmaType.FunctionType -> "arg_${p.name}"
         is RdmaType.UnitType -> ""
     }
 
@@ -993,6 +1056,7 @@ $body}
         is RdmaType.Primitive -> t.fqn
         is RdmaType.Ref -> t.fqn
         is RdmaType.ListType -> "list:" + typeName(t.element)
+        is RdmaType.MapType -> "map:" + typeName(t.key) + ":" + typeName(t.value)
         else -> "kotlin.Any"
     }
 
@@ -1037,6 +1101,13 @@ $body}
                 "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
                     "    checkAndThrowJs(env, r);\n" +
                     "    if (jret != nullptr) {\n        jobject globalRet = env->NewGlobalRef(jret);\n        env->DeleteLocalRef(jret);\n        return createListHandle(r, jvm, globalRet, \"$elem\");\n    }\n$deleteJStrings    return jsi::Value::null();\n"
+            }
+            is RdmaType.MapType -> {
+                val key = typeName(t.key)
+                val value = typeName(t.value)
+                "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                    "    checkAndThrowJs(env, r);\n" +
+                    "    if (jret != nullptr) {\n        jobject globalRet = env->NewGlobalRef(jret);\n        env->DeleteLocalRef(jret);\n        return createMapHandle(r, jvm, globalRet, \"$key\", \"$value\");\n    }\n$deleteJStrings    return jsi::Value::null();\n"
             }
             is RdmaType.FunctionType -> "    return jsi::Value::undefined();\n"
         }

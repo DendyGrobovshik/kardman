@@ -91,6 +91,15 @@ step_4_cross_runtime() {
     wait_logcat "RdmaRuntime" "LIST_XRT_K2J: size=2 last=100"
 }
 
+# 5) A morphed list iterates (map/joinToString) and toString reads native data
+#    (not the stale backing array); a kernel-returned list exposes toString.
+step_5_iteration() {
+    step "5: list iteration and toString"
+    wait_logcat "RdmaRuntime" "LIST_ITER: sum=20 joined=1,2,3,4"
+    wait_logcat "RdmaRuntime" "LIST_STR: \[1, 2, 3, 4\]"
+    wait_logcat "RdmaRuntime" "LIST_KSTR: \[5, 6\]"
+}
+
 main() {
     adb_dev
     mkdir -p "$VERSIONS_DIR"
@@ -100,6 +109,7 @@ main() {
     step_2_mutation
     step_3_nesting
     step_4_cross_runtime
+    step_5_iteration
 
     echo
     echo "ALL LIST-BEHAVIOR STEPS PASSED"

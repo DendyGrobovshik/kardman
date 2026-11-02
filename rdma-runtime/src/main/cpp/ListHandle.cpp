@@ -14,24 +14,45 @@
  * limitations under the License.
  */
 #include "ListHandle.h"
+#include "MapHandle.h"
 #include "RdmaCompose.h"
 #include <jni.h>
 
 namespace facebook {
 namespace rdma {
 
-// Element type is a recursive descriptor: primitives / @RDMA FQN, or a nested
-// `list:<elem>` for a list-of-lists.
+// Element type is a recursive descriptor: primitives / @RDMA FQN, `list:<elem>`
+// for a list-of-lists, or `map:<key>:<value>` for a map.
 static bool isListElementType(const std::string& elementType) {
     return elementType.rfind("list:", 0) == 0;
+}
+
+static bool isMapElementType(const std::string& elementType) {
+    return elementType.rfind("map:", 0) == 0;
 }
 
 static std::string nestedElementType(const std::string& elementType) {
     return elementType.substr(5);
 }
 
+// Parses a `map:<key>:<value>` body (after `map:`) into key/value descriptors.
+static std::pair<std::string, std::string> parseMapBody(const std::string& s) {
+    if (s.rfind("list:", 0) == 0) {
+        auto inner = parseMapBody(s.substr(5));
+        return {"list:" + inner.first, inner.second};
+    }
+    if (s.rfind("map:", 0) == 0) {
+        auto k = parseMapBody(s.substr(4));
+        auto v = parseMapBody(k.second);
+        return {"map:" + k.first + ":" + v.first, v.second};
+    }
+    size_t idx = s.find(':');
+    if (idx == std::string::npos) return {s, ""};
+    return {s.substr(0, idx), s.substr(idx + 1)};
+}
+
 // Converts a single JS value into a JVM object using the element type. Nested
-// lists materialize recursively; @RDMA objects reuse their held jobject;
+// lists/maps materialize recursively; @RDMA objects reuse their held jobject;
 // primitives/strings are boxed.
 static jobject jsiToJobject(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm,
                             const jsi::Value& v, const std::string& elementType) {
@@ -39,6 +60,11 @@ static jobject jsiToJobject(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm,
     if (isListElementType(elementType)) {
         jsi::Object obj = v.asObject(rt);
         return materializeArray(env, rt, jvm, obj, nestedElementType(elementType));
+    }
+    if (isMapElementType(elementType)) {
+        auto kv = parseMapBody(elementType.substr(4));
+        jsi::Object obj = v.asObject(rt);
+        return materializeMap(env, rt, jvm, obj, kv.first, kv.second);
     }
     if (v.isObject()) {
         jsi::Object eo = v.asObject(rt);
@@ -583,6 +609,13 @@ static int listKindOf(jsi::Runtime& rt, const jsi::Value& v) {
 }
 
 jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object& jsObj, const std::string& elementType) {
+    // Already a list handle we produced earlier (a nested list that crossed the
+    // boundary before): reuse the native list instead of re-materializing from a
+    // possibly-stale backing array.
+    if (jsObj.hasNativeState(rt)) {
+        auto ns = std::dynamic_pointer_cast<ListNativeState>(jsObj.getNativeState(rt));
+        if (ns) return ns->globalListRef_;
+    }
     int kind = listKindOf(rt, jsi::Value(rt, jsObj));
     if (kind == 2) {
         throw jsi::JSError(rt, "unsupported List implementation crossing the runtime boundary; only ArrayList and EmptyList are supported");

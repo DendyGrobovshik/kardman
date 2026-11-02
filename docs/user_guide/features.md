@@ -91,6 +91,7 @@ a violation is a **compile error**, not a runtime failure.
 | nullable variants (e.g. `String?`) | by copy (may be `null`) | as above |
 | `@RDMA` class | by reference (handle) | only in kernel memory |
 | `List<T>` / `MutableList<T>` of an allowed `T` | by reference (handle) | materialized in kernel memory |
+| `Map<K, V>` / `MutableMap<K, V>` | by reference (handle) | materialized in kernel memory |
 | function / lambda type | registration + callback | body lives in the plugin; kernel holds an id |
 | `Unit` | — | return type only |
 
@@ -104,6 +105,10 @@ Two of these deserve a note:
   in the plugin is materialized into a native `ArrayList` on its first crossing and
   morphed into a proxy list; from then on all reads and mutations go through the
   proxy list. `EmptyList` materializes into a native immutable empty list. See
+  [collections.md](../design/collections.md).
+- **`Map<K, V>` is a special case.** Only `LinkedHashMap`, `HashMap`, and
+  `emptyMap` cross. Keys must be a primitive/`String`/`@RDMA`; values may be any
+  allowed type. `keys`/`values`/`entries` are live views. See
   [collections.md](../design/collections.md).
 
 ### What the plugin can write
@@ -143,8 +148,8 @@ or return, function parameter or return, and anything nested inside a `List` or
 function signature — must be an allowed type. A non-`@RDMA` class on the
 boundary is a compile error. Concretely, the following are **not** supported:
 
-- composite value types without `@RDMA` (data classes, `enum`, `Array`, `Map`);
-- generics other than the `List<T>` / `MutableList<T>` special case;
+- composite value types without `@RDMA` (data classes, `enum`, `Array`);
+- generics other than the `List<T>` / `MutableList<T>` and `Map<K, V>` / `MutableMap<K, V>` special cases;
 - secondary/overloaded constructors, named arguments, default parameter values;
 - overloaded methods, extension functions, `suspend`/coroutine functions.
 
@@ -275,14 +280,15 @@ app-update-free updates of both plugin logic and UI.
 (`val`/`var`), public methods, companion statics, `@RDMA` top-level functions
 and widgets; types `Int`/`Long`/`Float`/`Double`/`Boolean`/`String` (nullable
 allowed), `@RDMA` references (incl. cross-module), `List<T>`/`MutableList<T>`
-(`ArrayList`; see [collections.md](design/collections.md)), lambdas, `Unit`
-returns; UI via the base Compose protocol (`remember`/`mutableStateOf`/widgets +
+(`ArrayList`; see [collections.md](design/collections.md)), `Map<K, V>`/`MutableMap<K, V>`
+(`LinkedHashMap`/`HashMap`/`emptyMap`; see [collections.md](design/collections.md)),
+lambdas, `Unit` returns; UI via the base Compose protocol (`remember`/`mutableStateOf`/widgets +
 content lambdas and callbacks) plus the `SideEffect`, `DisposableEffect` and
 `LaunchedEffect` effects
 and `rememberCoroutineScope` (single-threaded, `Dispatchers.Main`/`.immediate`).
 
-**Not yet** — non-`@RDMA` value types (`enum`, `Array`, `Map`, data classes),
-generics beyond `List<T>`/`MutableList<T>`; secondary constructors, named/default arguments;
+**Not yet** — non-`@RDMA` value types (`enum`, `Array`, data classes),
+generics beyond `List<T>`/`MutableList<T>` and `Map<K, V>`/`MutableMap<K, V>`; secondary constructors, named/default arguments;
 overloaded methods, extension and `suspend` functions; block-body overrides;
 `derivedStateOf`/`snapshotFlow`, animations and anything else outside the
 allowlist; `delay(ms)`/timers; stable identity for object/`@RDMA` effect keys;

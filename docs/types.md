@@ -29,6 +29,7 @@ allowed types below.
 | `@RDMA` companion `val` (static) | by reference (handle) | singleton exposed as `RDMA.<class><Name>()` (e.g. `RDMA.alignmentCenter()`) |
 | Function / lambda | registration + callback | body lives in the plugin; kernel holds an id |
 | `List<T>` / `MutableList<T>` | special case (`ArrayList`) | native `ArrayList` in kernel memory after first crossing; plugin holds a proxy list |
+| `Map<K, V>` / `MutableMap<K, V>` | special case (`LinkedHashMap`/`HashMap`) | native map in kernel memory after first crossing; plugin holds a proxy map |
 | `Unit` | — | return type only |
 
 ## Semantics
@@ -44,6 +45,12 @@ allowed types below.
   From then on the native list is the source of truth and all JS operations go through the
   proxy list. `EmptyList` materializes into a native immutable empty list. See
   [collections.md](design/collections.md).
+- **`Map`** is a special case. Keys must be a primitive/`String`/`@RDMA`; values may be any
+  allowed type (including nested `List`/`Map`/`@RDMA`). Only `LinkedHashMap`, `HashMap` and
+  `emptyMap` cross. A map first created in the plugin is materialized into a native map on
+  its first crossing and morphed into a proxy map; from then on the native map is the source
+  of truth. `keys`/`values`/`entries` are live views backed by the native map. See
+  [collections.md](design/collections.md).
 - **Function / lambda** — a parameter or return type of a function crossing the boundary
   must itself be an allowed type (`@RDMA` or primitive). The lambda is registered in JS,
   the kernel receives its id and invokes it through JNI; a lambda's return value is
@@ -58,8 +65,8 @@ type. A violation is a compile error.
 
 ## Not supported (yet)
 
-- Composite value types: data classes without `@RDMA`, `enum`, `Array`, `Map`.
-- Generics, except the `List<T>` / `MutableList<T>` special case.
+- Composite value types: data classes without `@RDMA`, `enum`, `Array`.
+- Generics, except the `List<T>` / `MutableList<T>` and `Map<K, V>` / `MutableMap<K, V>` special cases.
 - `suspend` / async functions, overloaded functions/constructors, default parameter values.
 
 ## Base Compose protocol (plugin)

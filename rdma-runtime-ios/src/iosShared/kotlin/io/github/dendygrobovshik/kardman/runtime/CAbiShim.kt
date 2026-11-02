@@ -263,6 +263,40 @@ fun rdma_listCreate(handles: CPointer<LongVar>?, count: Int): COpaquePointer {
     return list.handle()
 }
 
+fun rdma_listSubList(listHandle: COpaquePointer, from: Int, to: Int): COpaquePointer? {
+    @Suppress("UNCHECKED_CAST")
+    return (listHandle.obj<Any>() as MutableList<Any?>).subList(from, to).handle()
+}
+
+fun rdma_listToString(listHandle: COpaquePointer): CPointer<ByteVar>? =
+    rdmaStringToCStr(listHandle.obj<List<Any?>>().toString())
+
+fun rdma_listEquals(a: COpaquePointer, b: COpaquePointer): Boolean =
+    a.obj<List<Any?>>() == b.obj<List<Any?>>()
+
+fun rdma_listHashCode(listHandle: COpaquePointer): Int =
+    listHandle.obj<List<Any?>>().hashCode()
+
+fun rdma_listAddAll(listHandle: COpaquePointer, otherHandle: COpaquePointer): Boolean {
+    @Suppress("UNCHECKED_CAST")
+    return (listHandle.obj<Any>() as MutableList<Any?>).addAll(otherHandle.obj<Collection<Any?>>())
+}
+
+fun rdma_listAddAllAt(listHandle: COpaquePointer, index: Int, otherHandle: COpaquePointer): Boolean {
+    @Suppress("UNCHECKED_CAST")
+    return (listHandle.obj<Any>() as MutableList<Any?>).addAll(index, otherHandle.obj<Collection<Any?>>())
+}
+
+fun rdma_listRemoveAll(listHandle: COpaquePointer, otherHandle: COpaquePointer): Boolean {
+    @Suppress("UNCHECKED_CAST")
+    return (listHandle.obj<Any>() as MutableList<Any?>).removeAll(otherHandle.obj<Collection<Any?>>())
+}
+
+fun rdma_listRetainAll(listHandle: COpaquePointer, otherHandle: COpaquePointer): Boolean {
+    @Suppress("UNCHECKED_CAST")
+    return (listHandle.obj<Any>() as MutableList<Any?>).retainAll(otherHandle.obj<Collection<Any?>>())
+}
+
 fun rdma_arrayCreate(handles: CPointer<LongVar>?, count: Int): COpaquePointer {
     val arr = arrayOfNulls<Any?>(count)
     var p = handles
@@ -273,6 +307,69 @@ fun rdma_arrayCreate(handles: CPointer<LongVar>?, count: Int): COpaquePointer {
         p = p?.plus(1)
     }
     return arr.handle()
+}
+
+// ------------------------------------------------------------- map access
+
+fun rdma_mapSize(mapHandle: COpaquePointer): Int = mapHandle.obj<Map<Any?, Any?>>().size
+
+fun rdma_mapGet(mapHandle: COpaquePointer, keyHandle: COpaquePointer?): COpaquePointer? {
+    val value = mapHandle.obj<Map<Any?, Any?>>()[keyHandle?.obj<Any>()]
+    return value?.handle()
+}
+
+fun rdma_mapPut(mapHandle: COpaquePointer, keyHandle: COpaquePointer?, valueHandle: COpaquePointer?) {
+    @Suppress("UNCHECKED_CAST")
+    (mapHandle.obj<Any>() as MutableMap<Any?, Any?>)[keyHandle?.obj<Any>()] = valueHandle?.obj<Any>()
+}
+
+fun rdma_mapRemove(mapHandle: COpaquePointer, keyHandle: COpaquePointer?): Boolean {
+    @Suppress("UNCHECKED_CAST")
+    return (mapHandle.obj<Any>() as MutableMap<Any?, Any?>).remove(keyHandle?.obj<Any>()) != null
+}
+
+fun rdma_mapClear(mapHandle: COpaquePointer) {
+    @Suppress("UNCHECKED_CAST")
+    (mapHandle.obj<Any>() as MutableMap<Any?, Any?>).clear()
+}
+
+fun rdma_mapContainsKey(mapHandle: COpaquePointer, keyHandle: COpaquePointer?): Boolean =
+    mapHandle.obj<Map<Any?, Any?>>().containsKey(keyHandle?.obj<Any>())
+
+fun rdma_mapIsEmpty(mapHandle: COpaquePointer): Boolean =
+    mapHandle.obj<Map<Any?, Any?>>().isEmpty()
+
+fun rdma_mapKeyAt(mapHandle: COpaquePointer, index: Int): COpaquePointer? {
+    val key = mapHandle.obj<Map<Any?, Any?>>().keys.elementAt(index)
+    return key?.handle()
+}
+
+fun rdma_mapValueAt(mapHandle: COpaquePointer, index: Int): COpaquePointer? {
+    val value = mapHandle.obj<Map<Any?, Any?>>().values.elementAt(index)
+    return value?.handle()
+}
+
+fun rdma_mapRemoveValue(mapHandle: COpaquePointer, valueHandle: COpaquePointer?): Boolean {
+    @Suppress("UNCHECKED_CAST")
+    return (mapHandle.obj<Any>() as MutableMap<Any?, Any?>).values.remove(valueHandle?.obj<Any>())
+}
+
+fun rdma_emptyMap(): COpaquePointer = emptyMap<Any?, Any?>().handle()
+
+fun rdma_mapCreate(keys: CPointer<LongVar>?, values: CPointer<LongVar>?, count: Int): COpaquePointer {
+    val map = LinkedHashMap<Any?, Any?>(count)
+    var kp = keys
+    var vp = values
+    for (i in 0 until count) {
+        val kraw = kp?.pointed?.value ?: 0L
+        val vraw = vp?.pointed?.value ?: 0L
+        val kh: COpaquePointer? = if (kraw == 0L) null else kraw.toCPointer<CPointed>()
+        val vh: COpaquePointer? = if (vraw == 0L) null else vraw.toCPointer<CPointed>()
+        map[kh?.let { it.obj<Any>() }] = vh?.let { it.obj<Any>() }
+        kp = kp?.plus(1)
+        vp = vp?.plus(1)
+    }
+    return map.handle()
 }
 
 // ------------------------------------------------------------ composer proxy
@@ -412,7 +509,27 @@ private val _register = run {
     rdmaRegisterFunction("rdma_listIsEmpty", staticCFunction(::rdma_listIsEmpty))
     rdmaRegisterFunction("rdma_emptyList", staticCFunction(::rdma_emptyList))
     rdmaRegisterFunction("rdma_listCreate", staticCFunction(::rdma_listCreate))
+    rdmaRegisterFunction("rdma_listSubList", staticCFunction(::rdma_listSubList))
+    rdmaRegisterFunction("rdma_listToString", staticCFunction(::rdma_listToString))
+    rdmaRegisterFunction("rdma_listEquals", staticCFunction(::rdma_listEquals))
+    rdmaRegisterFunction("rdma_listHashCode", staticCFunction(::rdma_listHashCode))
+    rdmaRegisterFunction("rdma_listAddAll", staticCFunction(::rdma_listAddAll))
+    rdmaRegisterFunction("rdma_listAddAllAt", staticCFunction(::rdma_listAddAllAt))
+    rdmaRegisterFunction("rdma_listRemoveAll", staticCFunction(::rdma_listRemoveAll))
+    rdmaRegisterFunction("rdma_listRetainAll", staticCFunction(::rdma_listRetainAll))
     rdmaRegisterFunction("rdma_arrayCreate", staticCFunction(::rdma_arrayCreate))
+    rdmaRegisterFunction("rdma_mapSize", staticCFunction(::rdma_mapSize))
+    rdmaRegisterFunction("rdma_mapGet", staticCFunction(::rdma_mapGet))
+    rdmaRegisterFunction("rdma_mapPut", staticCFunction(::rdma_mapPut))
+    rdmaRegisterFunction("rdma_mapRemove", staticCFunction(::rdma_mapRemove))
+    rdmaRegisterFunction("rdma_mapClear", staticCFunction(::rdma_mapClear))
+    rdmaRegisterFunction("rdma_mapContainsKey", staticCFunction(::rdma_mapContainsKey))
+    rdmaRegisterFunction("rdma_mapIsEmpty", staticCFunction(::rdma_mapIsEmpty))
+    rdmaRegisterFunction("rdma_mapKeyAt", staticCFunction(::rdma_mapKeyAt))
+    rdmaRegisterFunction("rdma_mapValueAt", staticCFunction(::rdma_mapValueAt))
+    rdmaRegisterFunction("rdma_mapRemoveValue", staticCFunction(::rdma_mapRemoveValue))
+    rdmaRegisterFunction("rdma_emptyMap", staticCFunction(::rdma_emptyMap))
+    rdmaRegisterFunction("rdma_mapCreate", staticCFunction(::rdma_mapCreate))
     rdmaRegisterFunction("rdma_composer_startRestartGroup", staticCFunction(::rdma_composer_startRestartGroup))
     rdmaRegisterFunction("rdma_composer_endRestartGroup", staticCFunction(::rdma_composer_endRestartGroup))
     rdmaRegisterFunction("rdma_composer_startReplaceGroup", staticCFunction(::rdma_composer_startReplaceGroup))

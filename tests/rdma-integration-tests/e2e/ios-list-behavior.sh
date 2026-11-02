@@ -106,6 +106,9 @@ step_2_run_and_assert() {
     wait_marker "$log" "LIST_XRT_READ: sum=10"
     wait_marker "$log" "LIST_XRT_WRITE: size=3 last=30"
     wait_marker "$log" "LIST_XRT_K2J: size=2 last=100"
+    wait_marker "$log" "LIST_ITER: sum=20 joined=1,2,3,4"
+    wait_marker "$log" "LIST_STR: \[1, 2, 3, 4\]"
+    wait_marker "$log" "LIST_KSTR: \[5, 6\]"
 
     kill "$launch_pid" 2>/dev/null || true
     trap - EXIT

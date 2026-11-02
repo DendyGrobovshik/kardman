@@ -202,6 +202,42 @@ class IntegrationTest {
         assertContains(wrapperCpp, "arg_items")
     }
 
+    @Test
+    fun `Map property getter wraps via createMapHandle`() {
+        val holder = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "HeaderHolder",
+            qualifiedName = "com.example.kernel.HeaderHolder",
+            constructors = listOf(ConstructorInfo(emptyList())),
+            methods = emptyList(),
+            properties = listOf(
+                PropertyInfo("headers", "kotlin.collections.Map", false, isMap = true, mapKeyType = "kotlin.String", mapValueType = "kotlin.String"),
+            ),
+        )
+        val cppFiles = generateCpp(listOf(holder, personInfo))
+        val holderCpp = cppFiles["HeaderHolderProxy.cpp"] ?: error("HeaderHolder C++ not generated")
+
+        assertContains(holderCpp, "createMapHandle")
+        assertContains(holderCpp, "getter_headers")
+    }
+
+    @Test
+    fun `Map constructor param materializes JS map`() {
+        val wrapper = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "MapWrapper",
+            qualifiedName = "com.example.kernel.MapWrapper",
+            constructors = listOf(ConstructorInfo(listOf(
+                ParameterInfo("headers", "kotlin.collections.Map", isMap = true, mapKeyType = "kotlin.String", mapValueType = "kotlin.String"),
+            ))),
+            methods = emptyList(),
+            properties = emptyList(),
+        )
+        val cppFiles = generateCpp(listOf(wrapper, personInfo))
+        val wrapperCpp = cppFiles["MapWrapperProxy.cpp"] ?: error("MapWrapper C++ not generated")
+
+        assertContains(wrapperCpp, "materializeMap")
+        assertContains(wrapperCpp, "arg_headers")
+    }
+
     private fun generateCpp(classes: List<RdmaClassInfo>): Map<String, String> {
         val files = mutableMapOf<String, ByteArrayOutputStream>()
         CppGenerator { fileName, _ ->

@@ -28,6 +28,7 @@ import kotlinx.serialization.json.JsonClassDiscriminator
  *  - @RDMA classes (reference / handle)
  *  - functions / lambdas (registered + invoked back)
  *  - List (special-cased)
+ *  - Map (special-cased)
  *  - Unit (return-only)
  */
 @OptIn(ExperimentalSerializationApi::class)
@@ -49,6 +50,10 @@ sealed class RdmaType {
     @Serializable
     @SerialName("list")
     data class ListType(val element: RdmaTypeRef) : RdmaType()
+
+    @Serializable
+    @SerialName("map")
+    data class MapType(val key: RdmaTypeRef, val value: RdmaTypeRef) : RdmaType()
 
     @Serializable
     @SerialName("unit")

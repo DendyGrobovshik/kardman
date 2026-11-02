@@ -85,6 +85,9 @@ object RdmaClassExtractor {
                     isOpen = isOpen,
                     isList = fn.returnType.isList(),
                     listElementType = fn.returnType.listElementType(),
+                    isMap = fn.returnType.isMap(),
+                    mapKeyType = fn.returnType.mapKeyType(),
+                    mapValueType = fn.returnType.mapValueType(),
                     vtableId = -1,
                 )
             }
@@ -106,6 +109,9 @@ object RdmaClassExtractor {
                     nullable = type.isNullable(),
                     isList = type.isList(),
                     listElementType = type.listElementType(),
+                    isMap = type.isMap(),
+                    mapKeyType = type.mapKeyType(),
+                    mapValueType = type.mapValueType(),
                 )
             }
             .toList()
@@ -145,6 +151,9 @@ object RdmaClassExtractor {
             nullable = type.isNullable(),
             isList = type.isList(),
             listElementType = type.listElementType(),
+            isMap = type.isMap(),
+            mapKeyType = type.mapKeyType(),
+            mapValueType = type.mapValueType(),
         )
     }
 
@@ -167,13 +176,41 @@ object RdmaClassExtractor {
         return elemType.toTypeDescriptor()
     }
 
-    // Recursive element-type descriptor consumed by the C++ runtime to (un)wrap list
-    // elements: a primitive/@RDMA FQN, or `list:<elem>` for a nested list.
+    private fun IrType.isMap(): Boolean {
+        val fqn = toTypeName()
+        return fqn == "kotlin.collections.Map" || fqn == "kotlin.collections.MutableMap"
+    }
+
+    private fun IrType.mapKeyType(): String? {
+        if (!isMap()) return null
+        val simple = this as? IrSimpleType ?: return "kotlin.Any"
+        val keyType = simple.arguments.getOrNull(0)?.typeOrNull ?: return "kotlin.Any"
+        return keyType.toTypeDescriptor()
+    }
+
+    private fun IrType.mapValueType(): String? {
+        if (!isMap()) return null
+        val simple = this as? IrSimpleType ?: return "kotlin.Any"
+        val valType = simple.arguments.getOrNull(1)?.typeOrNull ?: return "kotlin.Any"
+        return valType.toTypeDescriptor()
+    }
+
+    // Recursive element-type descriptor consumed by the C++ runtime to (un)wrap
+    // collection elements: a primitive/@RDMA FQN, `list:<elem>` for a nested list,
+    // or `map:<key>:<value>` for a map.
     private fun IrType.toTypeDescriptor(): String {
         val fqn = toTypeName()
-        if (fqn != "kotlin.collections.List" && fqn != "kotlin.collections.MutableList") return fqn
-        val elem = (this as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
-            ?: return "list:kotlin.Any"
-        return "list:" + elem.toTypeDescriptor()
+        if (fqn == "kotlin.collections.List" || fqn == "kotlin.collections.MutableList") {
+            val elem = (this as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
+                ?: return "list:kotlin.Any"
+            return "list:" + elem.toTypeDescriptor()
+        }
+        if (fqn == "kotlin.collections.Map" || fqn == "kotlin.collections.MutableMap") {
+            val args = (this as? IrSimpleType)?.arguments?.mapNotNull { it.typeOrNull } ?: emptyList()
+            val key = args.getOrNull(0) ?: return "map:kotlin.Any:kotlin.Any"
+            val value = args.getOrNull(1) ?: return "map:${key.toTypeDescriptor()}:kotlin.Any"
+            return "map:" + key.toTypeDescriptor() + ":" + value.toTypeDescriptor()
+        }
+        return fqn
     }
 }

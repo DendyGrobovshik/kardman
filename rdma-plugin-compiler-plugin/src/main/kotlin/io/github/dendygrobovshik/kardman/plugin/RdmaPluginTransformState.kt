@@ -282,7 +282,10 @@ object RdmaPluginTransformState {
                     else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
                 }
             }.joinToString(", ")
-            sb.appendLine("fun $bridgeName($params): dynamic = js(\"RDMA\").${fn.name}($args)")
+            sb.appendLine("fun $bridgeName($params): dynamic {")
+            sb.appendLine("    rdmaListKindInstalled")
+            sb.appendLine("    return js(\"RDMA\").${fn.name}($args)")
+            sb.appendLine("}")
             sb.appendLine()
         }
         return sb.toString()

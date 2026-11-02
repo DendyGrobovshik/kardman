@@ -48,6 +48,8 @@ object RdmaTypeParser {
             fqn in primitiveFqns -> RdmaType.Primitive(fqn)
             fqn == "kotlin.collections.List" || fqn == "kotlin.collections.MutableList" ->
                 RdmaType.ListType((type as? IrSimpleType)?.toElementTypeRef() ?: anyRef())
+            fqn == "kotlin.collections.Map" || fqn == "kotlin.collections.MutableMap" ->
+                (type as? IrSimpleType)?.toMapTypeRef() ?: RdmaType.MapType(anyRef(), anyRef())
             fqn.startsWith("kotlin.Function") ->
                 (type as? IrSimpleType)?.toFunctionType() ?: anyRef().type
             else -> RdmaType.Ref(fqn)
@@ -59,6 +61,13 @@ object RdmaTypeParser {
 
     private fun IrSimpleType.toElementTypeRef(): RdmaTypeRef =
         arguments.firstOrNull()?.typeOrNull?.let { toRdmaTypeRef(it) } ?: anyRef()
+
+    private fun IrSimpleType.toMapTypeRef(): RdmaType.MapType {
+        val args = arguments.mapNotNull { it.typeOrNull }
+        val key = args.getOrNull(0)?.let { toRdmaTypeRef(it) } ?: anyRef()
+        val value = args.getOrNull(1)?.let { toRdmaTypeRef(it) } ?: anyRef()
+        return RdmaType.MapType(key, value)
+    }
 
     private fun IrSimpleType.toFunctionType(): RdmaType.FunctionType {
         val args = arguments.mapNotNull { it.typeOrNull }
@@ -78,6 +87,10 @@ object RdmaTypeValidator {
                     errors += "$path: '${t.fqn}' is not a @RDMA type; only @RDMA classes, primitives, functions and lists can cross the runtime boundary"
                 }
                 is RdmaType.ListType -> check(t.element.type, "$path[]")
+                is RdmaType.MapType -> {
+                    check(t.key.type, "$path.key")
+                    check(t.value.type, "$path.value")
+                }
                 is RdmaType.FunctionType -> {
                     t.parameters.forEachIndexed { i, p -> check(p.type, "$path.param$i") }
                     check(t.returnType.type, "$path.return")
@@ -113,38 +126,81 @@ object RdmaTypeValidator {
             }
         }
 
+        // Splits the front descriptor off [s] and returns it together with the
+        // unconsumed remainder. A descriptor is a leaf FQN, `list:<elem>`, or
+        // `map:<key>:<value>`; collection prefixes are consumed recursively.
+        fun splitDescriptor(s: String): Pair<String, String> {
+            if (s.startsWith("list:")) {
+                val (elem, rest) = splitDescriptor(s.removePrefix("list:"))
+                return "list:$elem" to rest
+            }
+            if (s.startsWith("map:")) {
+                val (key, rest1) = splitDescriptor(s.removePrefix("map:"))
+                val (value, rest2) = splitDescriptor(rest1)
+                return "map:$key:$value" to rest2
+            }
+            val idx = s.indexOf(':')
+            return if (idx < 0) s to "" else s.substring(0, idx) to s.substring(idx + 1)
+        }
+
         fun checkDescriptor(descriptor: String, path: String) {
-            if (descriptor.startsWith("list:")) {
-                checkDescriptor(descriptor.removePrefix("list:"), "$path[]")
-            } else {
-                checkLeaf(descriptor, path)
+            when {
+                descriptor.startsWith("list:") ->
+                    checkDescriptor(descriptor.removePrefix("list:"), "$path[]")
+                descriptor.startsWith("map:") -> {
+                    val (key, value) = splitDescriptor(descriptor.removePrefix("map:"))
+                    checkDescriptor(key, "$path.key")
+                    checkDescriptor(value, "$path.value")
+                }
+                else -> checkLeaf(descriptor, path)
             }
         }
 
         fun checkParameter(p: ParameterInfo, path: String) {
-            if (p.isList) {
-                val elem = p.listElementType
-                if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
-            } else if (p.type != "kotlin.Unit") {
-                checkLeaf(p.type, path)
+            when {
+                p.isList -> {
+                    val elem = p.listElementType
+                    if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
+                }
+                p.isMap -> {
+                    val key = p.mapKeyType
+                    val value = p.mapValueType
+                    if (key == null || value == null) errors.add("$path: map key/value type is missing")
+                    else { checkDescriptor(key, "$path.key"); checkDescriptor(value, "$path.value") }
+                }
+                p.type != "kotlin.Unit" -> checkLeaf(p.type, path)
             }
         }
 
         fun checkProperty(p: PropertyInfo, path: String) {
-            if (p.isList) {
-                val elem = p.listElementType
-                if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
-            } else {
-                checkLeaf(p.type, path)
+            when {
+                p.isList -> {
+                    val elem = p.listElementType
+                    if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
+                }
+                p.isMap -> {
+                    val key = p.mapKeyType
+                    val value = p.mapValueType
+                    if (key == null || value == null) errors.add("$path: map key/value type is missing")
+                    else { checkDescriptor(key, "$path.key"); checkDescriptor(value, "$path.value") }
+                }
+                else -> checkLeaf(p.type, path)
             }
         }
 
         fun checkMethodReturn(m: MethodInfo, path: String) {
-            if (m.isList) {
-                val elem = m.listElementType
-                if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
-            } else if (m.returnType != "kotlin.Unit") {
-                checkLeaf(m.returnType, path)
+            when {
+                m.isList -> {
+                    val elem = m.listElementType
+                    if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
+                }
+                m.isMap -> {
+                    val key = m.mapKeyType
+                    val value = m.mapValueType
+                    if (key == null || value == null) errors.add("$path: map key/value type is missing")
+                    else { checkDescriptor(key, "$path.key"); checkDescriptor(value, "$path.value") }
+                }
+                m.returnType != "kotlin.Unit" -> checkLeaf(m.returnType, path)
             }
         }
 

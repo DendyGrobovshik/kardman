@@ -54,6 +54,26 @@ class RdmaTypeValidatorTest {
     }
 
     @Test
+    fun `map type validates key and value recursively`() {
+        val type = RdmaTypeRef(RdmaType.MapType(
+            RdmaTypeRef(RdmaType.Primitive("kotlin.String")),
+            RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.Ref("com.example.kernel.Person")))),
+        ))
+        assertTrue(RdmaTypeValidator.validate(type) { it == "com.example.kernel.Person" }.isEmpty())
+    }
+
+    @Test
+    fun `map with non-RDMA value is rejected`() {
+        val type = RdmaTypeRef(RdmaType.MapType(
+            RdmaTypeRef(RdmaType.Primitive("kotlin.String")),
+            RdmaTypeRef(RdmaType.Ref("com.example.Unknown")),
+        ))
+        val errors = RdmaTypeValidator.validate(type) { it == "com.example.kernel.Person" }
+        assertEquals(1, errors.size)
+        assertContains(errors[0], "com.example.Unknown")
+    }
+
+    @Test
     fun `non-RDMA type inside function parameter is rejected`() {
         val fn = RdmaFunctionInfo(
             name = "foo",
@@ -231,6 +251,26 @@ class RdmaFunctionCodegenTest {
         val bridge = generated["RdmaBridge.cpp"] ?: error("missing bridge")
         assertTrue(!bridge.contains("rdma_fn_Text"))
     }
+
+    @Test
+    fun `map param and return use key and value types`() {
+        val mapType = RdmaTypeRef(RdmaType.MapType(
+            RdmaTypeRef(RdmaType.Primitive("kotlin.String")),
+            RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.Primitive("kotlin.Int")))),
+        ))
+        val fn = RdmaFunctionInfo(
+            name = "echoMap",
+            qualifiedName = "com.example.kernel.echoMap",
+            facadeClass = "com.example.kernel.WidgetsKt",
+            composable = false,
+            parameters = listOf(RdmaParameterInfo("headers", mapType)),
+            returnType = mapType,
+        )
+        val generated = generate(listOf(person()), listOf(fn))
+        val bridge = generated["RdmaBridge.cpp"] ?: error("missing bridge")
+        assertContains(bridge, """materializeMap(env, r, jvm, mapObj_headers, "kotlin.String", "list:kotlin.Int")""")
+        assertContains(bridge, """createMapHandle(r, jvm, globalRet, "kotlin.String", "list:kotlin.Int")""")
+    }
 }
 
 class RdmaManifestSerializationTest {
@@ -290,5 +330,17 @@ class RdmaManifestSerializationTest {
         val json = Json.encodeToString(RdmaTypeRef.serializer(), type)
         val decoded = Json.decodeFromString(RdmaTypeRef.serializer(), json)
         assertEquals(type, decoded)
+    }
+
+    @Test
+    fun `map type round-trips`() {
+        val type = RdmaTypeRef(RdmaType.MapType(
+            RdmaTypeRef(RdmaType.Primitive("kotlin.Int")),
+            RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.Ref("com.example.kernel.Person")))),
+        ))
+        val json = Json.encodeToString(RdmaTypeRef.serializer(), type)
+        val decoded = Json.decodeFromString(RdmaTypeRef.serializer(), json)
+        assertEquals(type, decoded)
+        assertContains(json, "\"kind\":\"map\"")
     }
 }
