@@ -16,16 +16,29 @@
 package com.example.plugin.bob
 
 import com.example.kernel.internal.services.appendToList
+import com.example.kernel.internal.services.computeSum
+import com.example.kernel.internal.services.describeInfoSuspend
 import com.example.kernel.internal.services.echoIntList
 import com.example.kernel.internal.services.echoIntListList
 import com.example.kernel.internal.services.echoIntListMap
+import com.example.kernel.internal.services.echoIntListSuspend
+import com.example.kernel.internal.services.echoIntMapSuspend
 import com.example.kernel.internal.services.echoStringMap
+import com.example.kernel.internal.services.failNestedSuspend
+import com.example.kernel.internal.services.failSuspend
+import com.example.kernel.internal.services.fetchPlatformInfoSuspend
 import com.example.kernel.internal.services.httpGet
 import com.example.kernel.internal.services.mapValue
+import com.example.kernel.internal.services.maybeNullSuspend
 import com.example.kernel.internal.services.mutateInPlace
 import com.example.kernel.internal.services.platformInfo
 import com.example.kernel.internal.services.putMapValue
 import com.example.kernel.internal.services.sumList
+import com.example.kernel.internal.services.touchSuspend
+import com.example.kernel.internal.services.SuspendService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 fun runServicesDemo() {
     val info = platformInfo()
@@ -46,6 +59,66 @@ fun runServicesDemo() {
     runMapMutationDemo()
     runMapNestingDemo()
     runMapCrossRuntimeDemo()
+
+    CoroutineScope(Dispatchers.Main).launch { runSuspendDemo() }
+}
+
+suspend fun runSuspendDemo() {
+    val sum = computeSum(2, 3)
+    println("SUSPEND_FN: sum=$sum")
+
+    val list = echoIntListSuspend(listOf(1, 2, 3))
+    println("SUSPEND_LIST: size=${list.size} first=${list.get(0)}")
+
+    val service = SuspendService()
+    val v = service.fetch(7)
+    println("SUSPEND_METHOD: v=$v")
+
+    val map = echoIntMapSuspend(mapOf("a" to 1, "b" to 2))
+    println("SUSPEND_MAP: size=${map.size} b=${map.get("b")}")
+
+    touchSuspend()
+    println("SUSPEND_UNIT: ok")
+
+    val nullVal = maybeNullSuspend(false)
+    val nonNull = maybeNullSuspend(true)
+    println("SUSPEND_NULL: null=${nullVal ?: "null"} v=$nonNull")
+
+    val info = platformInfo()
+    val desc = describeInfoSuspend(info)
+    println("SUSPEND_ARG: $desc")
+
+    try {
+        failSuspend()
+        println("SUSPEND_ERR: NOT_THROWN")
+    } catch (e: Throwable) {
+        println("SUSPEND_ERR: caught=${e.message}")
+    }
+
+    try {
+        failNestedSuspend()
+        println("SUSPEND_CAUSE: NOT_THROWN")
+    } catch (e: Throwable) {
+        println("SUSPEND_CAUSE: msg=${e.message} cause=${e.cause?.message} inner=${e.cause?.cause?.message}")
+    }
+
+    val pinfo = fetchPlatformInfoSuspend()
+    println("SUSPEND_RDMA: os=${pinfo.os} model=${pinfo.deviceModel} version=${pinfo.osVersion}")
+
+    // Three suspend calls fired concurrently; each completion must be routed back
+    // to its own continuation.
+    CoroutineScope(Dispatchers.Main).launch {
+        val a = computeSum(1, 1)
+        println("SUSPEND_CONCURRENT_1: $a")
+    }
+    CoroutineScope(Dispatchers.Main).launch {
+        val b = computeSum(2, 2)
+        println("SUSPEND_CONCURRENT_2: $b")
+    }
+    CoroutineScope(Dispatchers.Main).launch {
+        val c = computeSum(3, 3)
+        println("SUSPEND_CONCURRENT_3: $c")
+    }
 }
 
 fun runListMutationDemo() {

@@ -51,6 +51,7 @@ data class MethodInfo(
     val parameters: List<ParameterInfo>,
     val nullableReturn: Boolean = false,
     val isOpen: Boolean = false,
+    val isSuspend: Boolean = false,
     val isList: Boolean = false,
     val listElementType: String? = null,
     val isMap: Boolean = false,
@@ -92,6 +93,7 @@ data class RdmaFunctionInfo(
     val composable: Boolean,
     val parameters: List<RdmaParameterInfo>,
     val returnType: RdmaTypeRef,
+    val suspend: Boolean = false,
 )
 
 @Serializable

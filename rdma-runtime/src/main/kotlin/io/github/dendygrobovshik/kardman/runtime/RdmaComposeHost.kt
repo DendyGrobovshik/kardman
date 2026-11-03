@@ -42,6 +42,12 @@ object RdmaComposeHost {
     external fun nativeInvokeEffectBody(blockId: Long): Long
     external fun nativeInvokeDispose(resultId: Long)
     external fun nativeInvokeFreeBlock(blockId: Long)
+
+    // Suspend completion. `nativeInvokeContinuation` marshals [value] by the type
+    // descriptor registered for [completionId] (see RdmaSuspend); the error variant
+    // serializes [throwable] and resumes the plugin continuation with the exception.
+    external fun nativeInvokeContinuation(completionId: Long, value: Any?)
+    external fun nativeInvokeContinuationError(completionId: Long, throwable: Throwable)
 }
 
 class ComposerScopeBlock(private val blockId: Long) : Function2<Composer, Int, Unit> {

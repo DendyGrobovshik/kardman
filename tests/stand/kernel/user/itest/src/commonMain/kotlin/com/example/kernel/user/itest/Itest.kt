@@ -27,7 +27,8 @@ fun itestPlaceholder(): String = "placeholder"
 
 /**
  * Throws a host exception (used by the exception-propagation e2e to verify
- * Native -> JS delivery: the plugin catches a JS `Error` with `__rdmaCause`).
+ * Native -> JS delivery: the plugin catches a JS `Error` whose `cause` carries
+ * the nested host exception).
  */
 @RDMA
 fun itestThrow(message: String): String {

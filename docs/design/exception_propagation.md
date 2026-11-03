@@ -68,8 +68,9 @@ the JS trace as `remoteStack`/`cause`.
 
 The plugin calls a host function (a widget, `@RDMA` method, state access). The host
 function throws a Kotlin exception; the bridge catches it (JNI `ExceptionCheck` /
-Kotlin `try`-wrap on iOS), serializes it, and throws a JS `Error` whose `__rdmaCause`
-carries the host exception and whose `stack` prints the whole chain.
+Kotlin `try`-wrap on iOS), serializes it, and throws a JS `Error` whose `message`/
+`name` mirror the host exception, whose `stack` is the host trace, and whose `cause`
+carries the nested host exception (recursively).
 
 Either direction can nest: an exception may cross the boundary multiple times
 (host → plugin → host) and the `cause` chain grows each time.
@@ -147,7 +148,8 @@ the stack.
 ## 10. Implementation status (work in progress)
 
 - **Done (Android, verified on emulator):** S2 (native→JS), H2 (global handler),
-  double crossing (host→JS→host cause chain via `fromJSError` reading `__rdmaCause`),
+  double crossing (host→JS→host cause chain via `fromJSError` reading the nested
+  `Error.cause`),
   A2 (BundleLoadException from `nativeIsReady`). Per-plugin handler removed; a single
   global handler + emergency `LOGW` remain.
 - **S1a (sync rethrow from `content`)**: verified only as a crash-test — see §5.1 note.

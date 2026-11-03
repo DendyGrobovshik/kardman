@@ -47,7 +47,7 @@ class RdmaPluginAdditionalCheckersExtension(session: FirSession) : FirAdditional
     }
 
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
-        override val functionCallCheckers = setOf(RdmaPluginFunctionCallChecker, RdmaPluginWidgetCallChecker, RdmaPluginComposeCallChecker)
+        override val functionCallCheckers = setOf(RdmaPluginFunctionCallChecker, RdmaPluginWidgetCallChecker, RdmaPluginComposeCallChecker, RdmaPluginSuspendMethodCallChecker)
         override val propertyAccessExpressionCheckers = setOf(RdmaPluginPropertyAccessChecker)
         override val variableAssignmentCheckers = setOf(RdmaPluginVariableAssignmentChecker)
     }
@@ -194,6 +194,41 @@ object RdmaPluginWidgetCallChecker : FirExpressionChecker<FirFunctionCall>(MppCh
         val path = filePathOf(context) ?: return
         val bridgeName = RdmaPluginTransformState.bridgeNameFor(fqn)
         RdmaPluginTransformState.addEdit(path, nameSrc.startOffset, nameSrc.endOffset, bridgeName)
+    }
+}
+
+/**
+ * Rewrites calls to `suspend` methods of `@RDMA` classes into a generated suspend
+ * bridge. A suspend method cannot dispatch dynamically on the JS proxy (a JS method
+ * call is not a coroutine suspension point), so `client.fetch(url)` becomes
+ * `rdmaHttpClientFetch(client, url)`, which forwards to `RDMA._HttpClient_fetchAsync`.
+ */
+object RdmaPluginSuspendMethodCallChecker : FirExpressionChecker<FirFunctionCall>(MppCheckerKind.Common) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(expression: FirFunctionCall) {
+        val symbol = expression.calleeReference.toResolvedSymbol<FirNamedFunctionSymbol>() ?: return
+        val callableId = symbol.callableId ?: return
+        val classId = callableId.classId ?: return
+        val classFqn = classId.asSingleFqName().asString()
+        val type = RdmaPluginTransformState.typeByQualifiedName(classFqn) ?: return
+        val methodName = symbol.name.asString()
+        val method = type.suspendMethods.find { it.name == methodName } ?: return
+
+        val src = expression.source ?: return
+        val nameSrc = expression.calleeReference.source ?: return
+        val path = filePathOf(context) ?: return
+        val text = RdmaPluginTransformState.textOf(path)
+
+        val receiver = text.substring(src.startOffset, nameSrc.startOffset).trim().trimEnd('.')
+        val argTexts = expression.argumentList.arguments.map { arg ->
+            val argSrc = arg.source
+            if (argSrc != null) text.substring(argSrc.startOffset, argSrc.endOffset).trim() else ""
+        }
+        val bridge = RdmaPluginTransformState.methodBridgeName(type.simpleName, methodName)
+        val replacement = "$bridge(${(listOf(receiver) + argTexts).joinToString(", ")})"
+
+        RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, replacement)
+        RdmaPluginTransformState.recordUsedSymbol(classFqn)
     }
 }
 

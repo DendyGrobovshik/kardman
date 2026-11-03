@@ -70,6 +70,7 @@ class CAbiKotlinGenerator(
 
 package $kernelPackage
 
+import io.github.dendygrobovshik.kardman.runtime.RdmaSuspend
 import io.github.dendygrobovshik.kardman.runtime.rdmaCaptureError
 import io.github.dendygrobovshik.kardman.runtime.rdmaRegisterFunction
 import io.github.dendygrobovshik.kardman.runtime.rdmaStringToCStr
@@ -90,13 +91,17 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
 """)
         for (info in classInfos) {
             writeCtor(out, info, registered)
-            for (method in info.methods) writeMethod(out, info, method, registered)
+            for (method in info.methods) {
+                if (method.isSuspend) writeSuspendMethod(out, info, method, registered)
+                else writeMethod(out, info, method, registered)
+            }
             for (prop in info.properties) writeProperty(out, info, prop, registered)
             for (static in info.statics) writeStatic(out, info, static, registered)
             writeVtableSetter(out, info, registered)
         }
         for (fn in plainFunctions) {
-            writeFunction(out, fn, registered)
+            if (fn.suspend) writeSuspendFunction(out, fn, registered)
+            else writeFunction(out, fn, registered)
         }
         writeTypeIdOf(out, classInfos, registered)
         writeRegistration(out, registered)
@@ -371,6 +376,41 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         out.write("""
 fun $name($params): $retK {
 $body}
+""")
+        registered += name
+    }
+
+    // -------------------------------------------------------------- suspend
+
+    private fun writeSuspendFunction(out: BufferedWriter, fn: RdmaFunctionInfo, registered: MutableList<String>) {
+        val name = cName(fn.name + "Async")
+        val declParams = listOf("completionId: Long") + fn.parameters.map { "${it.name}: ${functionParamKotlinType(it.type)}" }
+        val args = fn.parameters.joinToString(", ") { functionParamFromC(it) }
+        val call = "${fn.qualifiedName}($args)"
+        out.write("""
+fun $name(${declParams.joinToString(", ")}) {
+    RdmaSuspend.launch {
+        try { RdmaSuspend.completeResult(completionId, $call) }
+        catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
+    }
+}
+""")
+        registered += name
+    }
+
+    private fun writeSuspendMethod(out: BufferedWriter, info: RdmaClassInfo, method: MethodInfo, registered: MutableList<String>) {
+        val name = cName(info.className + "_" + method.name + "Async")
+        val declParams = listOf("completionId: Long", "receiver: COpaquePointer") +
+            method.parameters.map { "${it.name}: ${kotlinType(it.toMemberType())}" }
+        val args = method.parameters.joinToString(", ") { fromC(it.name, it.toMemberType()) }
+        val call = "receiver.obj<${info.qualifiedName}>().${method.name}($args)"
+        out.write("""
+fun $name(${declParams.joinToString(", ")}) {
+    RdmaSuspend.launch {
+        try { RdmaSuspend.completeResult(completionId, $call) }
+        catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
+    }
+}
 """)
         registered += name
     }

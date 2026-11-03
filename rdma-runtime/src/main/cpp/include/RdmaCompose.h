@@ -130,6 +130,12 @@ extern "C" void rdmaSetObjectWrapper(ObjectWrapper wrapper);
 // `unboxJni`, anything else via the registered object wrapper (if any).
 jsi::Value wrapAny(jsi::Runtime& rt, HostContext ctx, jobject obj);
 
+// Associates a suspend-completion id with the return type descriptor of the
+// suspend function being invoked. Called by the generated `RDMA._<name>Async`
+// host function (from librdma_user.so) before it starts the kernel suspend body.
+// The descriptor is a leaf FQN, `list:<elem>`, or `map:<key>:<value>`.
+void rdmaRegisterSuspendResultType(int64_t completionId, const std::string& typeDesc);
+
 // Runs the registered content on the Hermes thread. The passed composer is a
 // global ref owned by the caller (the content task); it is deleted by the caller.
 void invokeRegisteredContent(jsi::Runtime& rt, jobject composerGlobal);
@@ -233,6 +239,14 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeDispo
 JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeFreeBlock(
     JNIEnv* env, jclass, jlong blockId);
+
+JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeContinuation(
+    JNIEnv* env, jclass, jlong completionId, jobject value);
+
+JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeContinuationError(
+    JNIEnv* env, jclass, jlong completionId, jthrowable throwable);
 }
 
 } // namespace rdma

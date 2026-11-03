@@ -146,6 +146,12 @@ inline void* rdma_mapCreate(void* const* keys, void* const* values, int32_t coun
 namespace facebook {
 namespace rdma {
 
+// Associates a suspend-completion id with the return type descriptor of the
+// suspend function being invoked. Called by the generated `RDMA._<name>Async`
+// host function before it starts the kernel suspend body. The descriptor is a
+// leaf FQN, `list:<elem>`, or `map:<key>:<value>`. Defined in RdmaComposeCAbi.cpp.
+void rdmaRegisterSuspendResultType(int64_t completionId, const std::string& typeDesc);
+
 // C-ABI variant of RdmaObjectNativeState: owns a StableRef handle (void*) and
 // disposes it when the JSI object is collected. The generated per-class
 // NativeState subclasses this instead of the JNI RdmaObjectNativeState.

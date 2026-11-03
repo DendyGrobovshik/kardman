@@ -64,6 +64,18 @@ int64_t g_nextJsValueId = 1;
 // Block id -> owning pluginId (recorded by registerBlock, design §6).
 std::unordered_map<int64_t, std::string> g_blockPluginId;
 
+// Suspend completions: id -> the two registered JS continuation callbacks (result
+// and error) plus the return type descriptor registered by the generated
+// `_<name>Async` host function. All entries are created and consumed on the Hermes
+// thread.
+struct SuspendContinuation {
+    std::shared_ptr<jsi::Function> onResult;
+    std::shared_ptr<jsi::Function> onError;
+    std::string typeDesc;
+};
+static std::unordered_map<int64_t, SuspendContinuation> g_suspendContinuations;
+static int64_t g_nextContinuationId = 1;
+
 static thread_local bool g_inComposition = false;
 
 static UserBridgeInstaller g_userBridge = nullptr;
@@ -767,6 +779,10 @@ static jsi::Array mapToEntries(jsi::Runtime& rt, const jsi::Object& obj) {
 // lists/maps are wrapped as their host objects; everything else (primitives,
 // String, @RDMA) goes through wrapAnyCAbi.
 static jsi::Value wrapTypedHandle(jsi::Runtime& rt, void* handle, const std::string& type) {
+    if (type == "kotlin.Unit") {
+        if (handle) rdma_disposeStableRef(handle);
+        return jsi::Value::undefined();
+    }
     if (!handle) return jsi::Value::null();
     if (isListElementType(type)) {
         auto host = std::make_shared<ListCAbiHost>(handle, type.substr(5));
@@ -778,6 +794,13 @@ static jsi::Value wrapTypedHandle(jsi::Runtime& rt, void* handle, const std::str
         return jsi::Object::createFromHostObject(rt, host);
     }
     return wrapAnyCAbi(rt, nullptr, handle);
+}
+
+void rdmaRegisterSuspendResultType(int64_t completionId, const std::string& typeDesc) {
+    auto it = g_suspendContinuations.find(completionId);
+    if (it != g_suspendContinuations.end()) {
+        it->second.typeDesc = typeDesc;
+    }
 }
 
 MapCAbiHost::MapCAbiHost(void* mapHandle, const std::string& keyType, const std::string& valueType)
@@ -1411,6 +1434,22 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
         });
     rdma.setProperty(rt, "registerBlock", std::move(registerBlockFn));
 
+    auto registerContinuationFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "registerContinuation"), 2,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 2 || !args[0].isObject() || !args[0].asObject(r).isFunction(r) ||
+                !args[1].isObject() || !args[1].asObject(r).isFunction(r)) {
+                return jsi::Value::undefined();
+            }
+            SuspendContinuation cont;
+            cont.onResult = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
+            cont.onError = std::make_shared<jsi::Function>(args[1].asObject(r).asFunction(r));
+            int64_t id = g_nextContinuationId++;
+            g_suspendContinuations[id] = std::move(cont);
+            return jsi::Value((double)id);
+        });
+    rdma.setProperty(rt, "registerContinuation", std::move(registerContinuationFn));
+
     auto sideEffectFn = jsi::Function::createFromHostFunction(
         rt, jsi::PropNameID::forAscii(rt, "sideEffect"), 1,
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
@@ -1466,6 +1505,45 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
 
     rt.global().setProperty(rt, "RDMA", std::move(rdma));
     LOGI("Compose bridge installed (C ABI)");
+}
+
+// Resumes the plugin suspend continuation with a marshalled result. Runs on the
+// Hermes thread; `valueHandle` is a StableRef consumed here (transferred into the
+// proxy host object or disposed after unboxing).
+static void runSuspendResult(jsi::Runtime& rt, int64_t completionId, void* valueHandle) {
+    auto it = g_suspendContinuations.find(completionId);
+    if (it == g_suspendContinuations.end()) {
+        if (valueHandle) rdma_disposeStableRef(valueHandle);
+        return;
+    }
+    auto onResult = it->second.onResult;
+    std::string desc = it->second.typeDesc;
+    g_suspendContinuations.erase(it);
+    try {
+        jsi::Value v = wrapTypedHandle(rt, valueHandle, desc);
+        const jsi::Value* callArgs = &v;
+        onResult->call(rt, callArgs, static_cast<size_t>(1));
+    } catch (const jsi::JSError& e) {
+        rdmaUncaughtException(fromJSError(rt, e), "");
+    }
+}
+
+// Resumes the plugin suspend continuation with an error. Runs on the Hermes
+// thread; the description mirrors Android's RdmaExceptionInfo so the plugin sees
+// the same `message`/`name` (originalExceptionType) shape on both platforms.
+static void runSuspendError(jsi::Runtime& rt, int64_t completionId, const RdmaExceptionInfo& info) {
+    auto it = g_suspendContinuations.find(completionId);
+    if (it == g_suspendContinuations.end()) return;
+    auto onError = it->second.onError;
+    g_suspendContinuations.erase(it);
+    try {
+        jsi::Object err = makeJsErrorObject(rt, info);
+        jsi::Value errValue(rt, err);
+        const jsi::Value* callArgs = &errValue;
+        onError->call(rt, callArgs, static_cast<size_t>(1));
+    } catch (const jsi::JSError& e) {
+        rdmaUncaughtException(fromJSError(rt, e), "");
+    }
 }
 
 } // namespace rdma
@@ -1577,6 +1655,66 @@ void rdma_nativeInvokeFreeBlock(int64_t blockId) {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (!rt) return;
         g_scopeBlocks.erase(blockId);
+    });
+}
+
+void rdma_nativeInvokeContinuation(int64_t completionId, void* valueHandle) {
+    using namespace facebook::rdma;
+    rdmaPostJs([completionId, valueHandle] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            runSuspendResult(*rt, completionId, valueHandle);
+        } else if (valueHandle) {
+            rdma_disposeStableRef(valueHandle);
+        }
+    });
+}
+
+// Parses the length-prefixed serialization produced by the Kotlin/Native shim
+// (RdmaComposeHost.serializeThrowable): each level is
+// `<typeLen>:<type><msgLen>:<msg><stackLen>:<stack><hasCause>` where `hasCause`
+// is '1' (nested level follows) or '0'. `pos` advances through the shared buffer.
+static facebook::rdma::RdmaExceptionInfo parseSerializedThrowable(const std::string& s, size_t& pos) {
+    using namespace facebook::rdma;
+    RdmaExceptionInfo info;
+    auto readField = [&]() -> std::string {
+        size_t colon = s.find(':', pos);
+        if (colon == std::string::npos) return "";
+        size_t len = 0;
+        for (size_t i = pos; i < colon; i++) {
+            len = len * 10 + static_cast<size_t>(s[i] - '0');
+        }
+        pos = colon + 1;
+        if (pos + len > s.size()) return "";
+        std::string v = s.substr(pos, len);
+        pos += len;
+        return v;
+    };
+    info.originalExceptionType = readField();
+    info.message = readField();
+    info.stack = readField();
+    if (pos < s.size()) {
+        char flag = s[pos++];
+        if (flag == '1') {
+            info.cause = std::make_shared<RdmaExceptionInfo>(parseSerializedThrowable(s, pos));
+        }
+    }
+    return info;
+}
+
+void rdma_nativeInvokeContinuationError(int64_t completionId, const char* serialized) {
+    using namespace facebook::rdma;
+    std::string s = serialized ? serialized : "";
+    RdmaExceptionInfo info;
+    if (!s.empty()) {
+        size_t pos = 0;
+        info = parseSerializedThrowable(s, pos);
+    }
+    rdmaPostJs([completionId, info] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            runSuspendError(*rt, completionId, info);
+        }
     });
 }
 

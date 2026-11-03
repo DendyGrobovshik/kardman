@@ -210,6 +210,9 @@ object RdmaTypeValidator {
         }
         classInfo.properties.forEach { p -> checkProperty(p, "$prefix: property '${p.name}'") }
         classInfo.methods.forEach { m ->
+            if (m.isSuspend && m.isOpen) {
+                errors += "$prefix: method '${m.name}': overriding a suspend method from the plugin is not supported"
+            }
             m.parameters.forEachIndexed { i, p -> checkParameter(p, "$prefix: method '${m.name}' parameter '${p.name}'") }
             checkMethodReturn(m, "$prefix: method '${m.name}' return")
         }

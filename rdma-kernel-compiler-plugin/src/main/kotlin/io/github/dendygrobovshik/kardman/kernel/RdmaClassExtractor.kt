@@ -83,6 +83,7 @@ object RdmaClassExtractor {
                     parameters = fn.valueParams().map { it.toParameterInfo() },
                     nullableReturn = fn.returnType.isNullable(),
                     isOpen = isOpen,
+                    isSuspend = fn.isSuspend,
                     isList = fn.returnType.isList(),
                     listElementType = fn.returnType.listElementType(),
                     isMap = fn.returnType.isMap(),

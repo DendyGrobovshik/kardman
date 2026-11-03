@@ -201,7 +201,14 @@ class RdmaKernelGenerationExtension(
             }
         } else {
             cppOutputDir?.let { dir ->
-                CppGenerator(modId) { fileName, _ ->
+                CppGenerator(modId, pkg) { fileName, _ ->
+                    File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
+                }.generate(classInfos, functions)
+            }
+            // JVM-side async bridge wrappers for @RDMA suspend functions/methods,
+            // compiled into the app (the widget-kotlin dir is added as an app source dir).
+            kotlinOutputDir?.let { dir ->
+                RdmaSuspendBridgeGenerator(pkg) { fileName, _ ->
                     File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
                 }.generate(classInfos, functions)
             }

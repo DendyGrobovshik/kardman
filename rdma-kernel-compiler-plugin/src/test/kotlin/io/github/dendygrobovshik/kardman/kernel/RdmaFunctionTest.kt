@@ -141,6 +141,33 @@ class RdmaTypeValidatorTest {
         assertTrue(errors.isNotEmpty())
         assertContains(errors[0], "com.example.Unknown")
     }
+
+    @Test
+    fun `open suspend method is rejected`() {
+        val cls = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Svc",
+            qualifiedName = "com.example.kernel.Svc",
+            constructors = emptyList(),
+            methods = listOf(MethodInfo("fetch", "kotlin.String", emptyList(), isOpen = true, isSuspend = true)),
+            properties = emptyList(),
+        )
+        val errors = RdmaTypeValidator.validateClass(cls) { it == "com.example.kernel.Person" }
+        assertTrue(errors.isNotEmpty())
+        assertContains(errors[0], "not supported")
+    }
+
+    @Test
+    fun `non-open suspend method is accepted`() {
+        val cls = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Svc",
+            qualifiedName = "com.example.kernel.Svc",
+            constructors = emptyList(),
+            methods = listOf(MethodInfo("fetch", "kotlin.String", emptyList(), isSuspend = true)),
+            properties = emptyList(),
+        )
+        val errors = RdmaTypeValidator.validateClass(cls) { it == "com.example.kernel.Person" }
+        assertTrue(errors.isEmpty(), errors.joinToString("\n"))
+    }
 }
 
 class RdmaFunctionCodegenTest {
@@ -342,5 +369,34 @@ class RdmaManifestSerializationTest {
         val decoded = Json.decodeFromString(RdmaTypeRef.serializer(), json)
         assertEquals(type, decoded)
         assertContains(json, "\"kind\":\"map\"")
+    }
+
+    @Test
+    fun `suspend flags round-trip`() {
+        val manifest = RdmaManifest(
+            classes = listOf(RdmaClassInfo(
+                packageName = "com.example.kernel", className = "Svc",
+                qualifiedName = "com.example.kernel.Svc",
+                constructors = emptyList(),
+                methods = listOf(MethodInfo("fetch", "kotlin.String", emptyList(), isSuspend = true)),
+                properties = emptyList(),
+            )),
+            functions = listOf(RdmaFunctionInfo(
+                name = "computeSum",
+                qualifiedName = "com.example.kernel.computeSum",
+                facadeClass = "com.example.kernel.SuspendDemoKt",
+                composable = false,
+                parameters = emptyList(),
+                returnType = RdmaTypeRef(RdmaType.Primitive("kotlin.Int")),
+                suspend = true,
+            )),
+        )
+
+        val json = Json.encodeToString(RdmaManifest.serializer(), manifest)
+        val decoded = Json.decodeFromString(RdmaManifest.serializer(), json)
+
+        assertEquals(manifest, decoded)
+        assertContains(json, "\"suspend\":true")
+        assertContains(json, "\"isSuspend\":true")
     }
 }

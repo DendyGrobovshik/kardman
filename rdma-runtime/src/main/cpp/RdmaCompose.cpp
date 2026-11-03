@@ -16,6 +16,8 @@
 #include "RdmaCompose.h"
 #include "RdmaComposerProxy.h"
 #include "RdmaRuntime.h"
+#include "ListHandle.h"
+#include "MapHandle.h"
 
 #include <jsi/jsi.h>
 #include <jni.h>
@@ -48,6 +50,18 @@ std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
 int64_t g_nextJsValueId = 1;
 jobject g_currentComposer = nullptr; // borrowed global ref; owned by the content/scope task
 
+// Suspend completions: id -> the two registered JS continuation callbacks (result
+// and error) plus the return type descriptor registered by the generated
+// `_<name>Async` host function. All entries are created and consumed on the Hermes
+// thread; the JVM side only posts back a (id, result/throwable) pair.
+struct SuspendContinuation {
+    std::shared_ptr<jsi::Function> onResult;
+    std::shared_ptr<jsi::Function> onError;
+    std::string typeDesc;
+};
+static std::unordered_map<int64_t, SuspendContinuation> g_suspendContinuations;
+static int64_t g_nextContinuationId = 1;
+
 // True on the Hermes thread while content/scope blocks are executing (i.e. during
 // composition). State reads performed in this window rendezvous to the UI thread so
 // that Compose's snapshot read observer records the dependency.
@@ -78,6 +92,66 @@ jsi::Value wrapAny(jsi::Runtime& rt, HostContext jvm, jobject obj) {
         return g_objectWrapper(rt, jvm, obj);
     }
     return jsi::Value::undefined();
+}
+
+// -------------------------------------------------------- suspend completion
+
+// Consumes one descriptor at `pos`: kind 0 = leaf (a = fqn), kind 1 = list
+// (a = element descriptor), kind 2 = map (a = key descriptor, b = value
+// descriptor). Returns the index just past the consumed descriptor.
+static size_t parseTypeDesc(const std::string& d, size_t pos, int& kind, std::string& a, std::string& b) {
+    if (d.compare(pos, 5, "list:") == 0) {
+        int k; std::string ka, kb;
+        size_t end = parseTypeDesc(d, pos + 5, k, ka, kb);
+        kind = 1;
+        a = d.substr(pos + 5, end - (pos + 5));
+        return end;
+    }
+    if (d.compare(pos, 4, "map:") == 0) {
+        int kk; std::string kka, kkb;
+        size_t keyEnd = parseTypeDesc(d, pos + 4, kk, kka, kkb);
+        int vk; std::string vka, vkb;
+        size_t end = parseTypeDesc(d, keyEnd, vk, vka, vkb);
+        kind = 2;
+        a = d.substr(pos + 4, keyEnd - (pos + 4));
+        b = d.substr(keyEnd, end - keyEnd);
+        return end;
+    }
+    size_t colon = d.find(':', pos);
+    size_t end = (colon == std::string::npos) ? d.size() : colon;
+    kind = 0;
+    a = d.substr(pos, end - pos);
+    return end;
+}
+
+// Marshals the kernel-returned `value` (a JVM object) into a jsi::Value using the
+// type descriptor. Lists/maps become native-backed proxies; everything else goes
+// through `wrapAny` (primitives/String/@RDMA/Unit).
+static jsi::Value marshalSuspendResult(jsi::Runtime& rt, JavaVM* jvm, jobject value, const std::string& desc) {
+    if (!value) return jsi::Value::null();
+    JNIEnv* env = getEnv(jvm);
+    if (!env) return jsi::Value::undefined();
+    int kind; std::string a, b;
+    parseTypeDesc(desc, 0, kind, a, b);
+    if (kind == 0 && a == "kotlin.Unit") {
+        return jsi::Value::undefined();
+    }
+    if (kind == 1) {
+        jobject global = env->NewGlobalRef(value);
+        return createListHandle(rt, jvm, global, a);
+    }
+    if (kind == 2) {
+        jobject global = env->NewGlobalRef(value);
+        return createMapHandle(rt, jvm, global, a, b);
+    }
+    return wrapAny(rt, jvm, value);
+}
+
+void rdmaRegisterSuspendResultType(int64_t completionId, const std::string& typeDesc) {
+    auto it = g_suspendContinuations.find(completionId);
+    if (it != g_suspendContinuations.end()) {
+        it->second.typeDesc = typeDesc;
+    }
 }
 
 // ---------------------------------------------------------------- JNI cache
@@ -785,6 +859,25 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
         });
     rdma.setProperty(rt, "registerBlock", std::move(registerBlockFn));
 
+    // Registers the two JS callbacks (result and error) that resume a plugin
+    // suspend continuation. Returns the completion id; the generated `_<name>Async`
+    // host function later attaches the return type descriptor to the same id.
+    auto registerContinuationFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "registerContinuation"), 2,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 2 || !args[0].isObject() || !args[0].asObject(r).isFunction(r) ||
+                !args[1].isObject() || !args[1].asObject(r).isFunction(r)) {
+                return jsi::Value::undefined();
+            }
+            SuspendContinuation cont;
+            cont.onResult = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
+            cont.onError = std::make_shared<jsi::Function>(args[1].asObject(r).asFunction(r));
+            int64_t id = g_nextContinuationId++;
+            g_suspendContinuations[id] = std::move(cont);
+            return jsi::Value((double)id);
+        });
+    rdma.setProperty(rt, "registerContinuation", std::move(registerContinuationFn));
+
     auto sideEffectFn = jsi::Function::createFromHostFunction(
         rt, jsi::PropNameID::forAscii(rt, "sideEffect"), 1,
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
@@ -944,6 +1037,52 @@ static void throwIfError(JNIEnv* env, const RdmaExceptionInfo& info) {
     }
 }
 
+// Resumes the plugin suspend continuation with a marshalled result. Runs on the
+// Hermes thread; `valueGlobal` is a global ref consumed here.
+static void runSuspendResult(jsi::Runtime& rt, jlong completionId, jobject valueGlobal) {
+    auto it = g_suspendContinuations.find(completionId);
+    if (it == g_suspendContinuations.end()) {
+        deleteGlobalRef(valueGlobal);
+        return;
+    }
+    auto onResult = it->second.onResult;
+    std::string desc = it->second.typeDesc;
+    g_suspendContinuations.erase(it);
+    try {
+        jsi::Value v = marshalSuspendResult(rt, g_composeCache.jvm, valueGlobal, desc);
+        const jsi::Value* callArgs = &v;
+        onResult->call(rt, callArgs, static_cast<size_t>(1));
+    } catch (const jsi::JSError& e) {
+        rdmaUncaughtException(fromJSError(rt, e), "");
+    }
+    deleteGlobalRef(valueGlobal);
+}
+
+// Resumes the plugin suspend continuation with an error. Runs on the Hermes
+// thread; `throwableGlobal` is a global ref consumed here.
+static void runSuspendError(jsi::Runtime& rt, jlong completionId, jobject throwableGlobal) {
+    auto it = g_suspendContinuations.find(completionId);
+    if (it == g_suspendContinuations.end()) {
+        deleteGlobalRef(throwableGlobal);
+        return;
+    }
+    auto onError = it->second.onError;
+    g_suspendContinuations.erase(it);
+    try {
+        JNIEnv* env = getEnv(g_composeCache.jvm);
+        if (env) {
+            RdmaExceptionInfo info = fromJniThrowable(env, (jthrowable)throwableGlobal);
+            jsi::Object err = makeJsErrorObject(rt, info);
+            jsi::Value errValue(rt, err);
+            const jsi::Value* callArgs = &errValue;
+            onError->call(rt, callArgs, static_cast<size_t>(1));
+        }
+    } catch (const jsi::JSError& e) {
+        rdmaUncaughtException(fromJSError(rt, e), "");
+    }
+    deleteGlobalRef(throwableGlobal);
+}
+
 } // namespace rdma
 } // namespace facebook
 
@@ -1078,5 +1217,37 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeFreeB
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (!rt) return;
         g_scopeBlocks.erase(blockId);
+    });
+}
+
+// -------------------------------------------------------------- suspend resume
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeContinuation(
+    JNIEnv* env, jclass, jlong completionId, jobject value) {
+    using namespace facebook::rdma;
+    jobject valueGlobal = value ? env->NewGlobalRef(value) : nullptr;
+    rdmaPostJs([completionId, valueGlobal] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            runSuspendResult(*rt, completionId, valueGlobal);
+        } else {
+            deleteGlobalRef(valueGlobal);
+        }
+    });
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeContinuationError(
+    JNIEnv* env, jclass, jlong completionId, jthrowable throwable) {
+    using namespace facebook::rdma;
+    jobject throwableGlobal = throwable ? env->NewGlobalRef(throwable) : nullptr;
+    rdmaPostJs([completionId, throwableGlobal] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) {
+            runSuspendError(*rt, completionId, throwableGlobal);
+        } else {
+            deleteGlobalRef(throwableGlobal);
+        }
     });
 }

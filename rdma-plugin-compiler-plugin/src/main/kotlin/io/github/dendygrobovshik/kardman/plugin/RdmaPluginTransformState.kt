@@ -218,7 +218,8 @@ object RdmaPluginTransformState {
     private fun writeFunctionBridge(outDir: File) {
         val bridgeFile = File(outDir, "RdmaFunctionBridge.kt")
         val plain = functions.filter { !it.composable }
-        if (plain.isEmpty()) {
+        val suspendMethodCount = types.sumOf { it.suspendMethods.size }
+        if (plain.isEmpty() && suspendMethodCount == 0) {
             bridgeFile.delete()
             return
         }
@@ -263,7 +264,16 @@ object RdmaPluginTransformState {
         val sb = StringBuilder()
         sb.appendLine("package $pluginPackage")
         sb.appendLine()
-        for (fn in plainFunctions) {
+        val suspendFns = plainFunctions.filter { it.suspend }
+        val suspendMethods = types.flatMap { t -> t.suspendMethods.map { t to it } }
+        if (suspendFns.isNotEmpty() || suspendMethods.isNotEmpty()) {
+            sb.appendLine("import kotlin.coroutines.Continuation")
+            sb.appendLine("import kotlin.coroutines.suspendCoroutine")
+            sb.appendLine("import kotlin.coroutines.resume")
+            sb.appendLine("import kotlin.coroutines.resumeWithException")
+            sb.appendLine()
+        }
+        for (fn in plainFunctions.filter { !it.suspend }) {
             if (fn.composable) continue
             val bridgeName = bridgeNameFor(fn.qualifiedName)
             val params = fn.parameters.map { p ->
@@ -288,8 +298,55 @@ object RdmaPluginTransformState {
             sb.appendLine("}")
             sb.appendLine()
         }
+        for (fn in suspendFns) {
+            val bridgeName = bridgeNameFor(fn.qualifiedName)
+            val params = fn.parameters.map { p ->
+                when (p.kind) {
+                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE, RdmaParamKind.LIST_HANDLE -> "${p.name}: dynamic"
+                    else -> {
+                        val inner = (0 until (p.lambdaArity ?: 0)).joinToString(", ") { "dynamic" }
+                        "${p.name}: ($inner) -> dynamic"
+                    }
+                }
+            }.joinToString(", ")
+            val args = fn.parameters.map { p ->
+                when (p.kind) {
+                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
+                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
+                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
+                }
+            }.joinToString(", ")
+            sb.appendLine("suspend fun $bridgeName($params): dynamic {")
+            sb.appendLine("    return suspendCoroutine { cont: Continuation<Any?> ->")
+            sb.appendLine("        val id = js(\"RDMA\").registerContinuation(")
+            sb.appendLine("            { v: dynamic -> cont.resume(v) },")
+            sb.appendLine("            { e: dynamic -> cont.resumeWithException(e) }")
+            sb.appendLine("        )")
+            sb.appendLine("        js(\"RDMA\")._${fn.name}Async(id${if (args.isEmpty()) "" else ", $args"})")
+            sb.appendLine("    }")
+            sb.appendLine("}")
+            sb.appendLine()
+        }
+        for ((type, m) in suspendMethods) {
+            val bridgeName = methodBridgeName(type.simpleName, m.name)
+            val params = listOf("self: dynamic") + (0 until m.paramCount).map { "p$it: dynamic" }
+            val args = listOf("self") + (0 until m.paramCount).map { "p$it" }
+            sb.appendLine("suspend fun $bridgeName(${params.joinToString(", ")}): dynamic {")
+            sb.appendLine("    return suspendCoroutine { cont: Continuation<Any?> ->")
+            sb.appendLine("        val id = js(\"RDMA\").registerContinuation(")
+            sb.appendLine("            { v: dynamic -> cont.resume(v) },")
+            sb.appendLine("            { e: dynamic -> cont.resumeWithException(e) }")
+            sb.appendLine("        )")
+            sb.appendLine("        js(\"RDMA\")._${type.simpleName}_${m.name}Async(id${if (args.isEmpty()) "" else ", ${args.joinToString(", ")}"})")
+            sb.appendLine("    }")
+            sb.appendLine("}")
+            sb.appendLine()
+        }
         return sb.toString()
     }
+
+    fun methodBridgeName(className: String, methodName: String): String =
+        "rdma" + className + methodName.replaceFirstChar { it.uppercase() }
 
     internal fun buildWidgetBridge(widgets: List<RdmaPluginFunction>): String {
         val sb = StringBuilder()

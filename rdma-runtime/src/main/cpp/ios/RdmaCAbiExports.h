@@ -28,6 +28,8 @@ void rdma_nativeInvokeLambda(int64_t blockId, void* argsHandle);
 int64_t rdma_nativeInvokeEffectBody(int64_t blockId);
 void rdma_nativeInvokeDispose(int64_t resultId);
 void rdma_nativeInvokeFreeBlock(int64_t blockId);
+void rdma_nativeInvokeContinuation(int64_t completionId, void* valueHandle);
+void rdma_nativeInvokeContinuationError(int64_t completionId, const char* serialized);
 void* rdma_vtableDispatch(int64_t vtablePtr, int32_t vtableId);
 void rdma_start(void* ctx);
 int32_t rdma_is_ready(void);

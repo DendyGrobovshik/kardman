@@ -25,6 +25,8 @@ import androidx.compose.runtime.Composer
 import androidx.compose.runtime.currentComposer
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeCallback
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeContent
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeContinuation
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeContinuationError
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeDispose
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeEffectBody
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeFreeBlock
@@ -94,6 +96,41 @@ object RdmaComposeHost {
     fun nativeInvokeEffectBody(blockId: Long): Long = rdma_nativeInvokeEffectBody(blockId)
     fun nativeInvokeDispose(resultId: Long) = rdma_nativeInvokeDispose(resultId)
     fun nativeInvokeFreeBlock(blockId: Long) = rdma_nativeInvokeFreeBlock(blockId)
+
+    fun nativeInvokeContinuation(completionId: Long, value: Any?) {
+        rdma_nativeInvokeContinuation(completionId, value?.let { StableRef.create(it).asCPointer() })
+    }
+
+    fun nativeInvokeContinuationError(completionId: Long, throwable: Throwable) {
+        rdma_nativeInvokeContinuationError(completionId, serializeThrowable(throwable))
+    }
+
+    /**
+     * Length-prefixed serialization of the full cause chain, mirrored by
+     * `parseSerializedThrowable` in `RdmaComposeCAbi.cpp`. Each level is
+     * `<typeLen>:<type><msgLen>:<msg><stackLen>:<stack><hasCause>` where
+     * `hasCause` is '1' (a nested level follows) or '0'.
+     */
+    private fun serializeThrowable(throwable: Throwable): String {
+        val sb = StringBuilder()
+        fun write(level: Throwable) {
+            val type = level::class.simpleName ?: "Throwable"
+            val message = level.message ?: ""
+            val stack = level.stackTraceToString()
+            sb.append(type.length).append(':').append(type)
+            sb.append(message.length).append(':').append(message)
+            sb.append(stack.length).append(':').append(stack)
+            val cause = level.cause
+            if (cause != null) {
+                sb.append('1')
+                write(cause)
+            } else {
+                sb.append('0')
+            }
+        }
+        write(throwable)
+        return sb.toString()
+    }
 
     /** Vtable dispatch (native actual): calls the JS override, returns the boxed String. */
     fun rdmaVtableDispatch(vtablePtr: Long, vtableId: Int): Any? {

@@ -16,17 +16,23 @@
 package io.github.dendygrobovshik.kardman.kernel
 
 import io.github.dendygrobovshik.kardman.types.ConstructorInfo
+import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
+import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
+import io.github.dendygrobovshik.kardman.types.RdmaType
+import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains
+import kotlin.test.assertFalse
 
 class CAbiKotlinGeneratorTest {
 
-    private fun generate(classInfos: List<RdmaClassInfo>): String {
+    private fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo> = emptyList()): String {
         val out = ByteArrayOutputStream()
-        CAbiKotlinGenerator("", "com.example.kernel") { _, _ -> out }.generate(classInfos, emptyList())
+        CAbiKotlinGenerator("", "com.example.kernel") { _, _ -> out }.generate(classInfos, functions)
         return out.toString("UTF-8")
     }
 
@@ -58,5 +64,44 @@ class CAbiKotlinGeneratorTest {
         )
         val kotlin = generate(listOf(cls))
         assertContains(kotlin, "List<kotlin.String>")
+    }
+
+    @Test
+    fun `suspend function generates async shim and registration`() {
+        val fn = RdmaFunctionInfo(
+            name = "computeSum",
+            qualifiedName = "com.example.kernel.computeSum",
+            facadeClass = "com.example.kernel.SuspendDemoKt",
+            composable = false,
+            parameters = listOf(
+                RdmaParameterInfo("a", RdmaTypeRef(RdmaType.Primitive("kotlin.Int"))),
+                RdmaParameterInfo("b", RdmaTypeRef(RdmaType.Primitive("kotlin.Int"))),
+            ),
+            returnType = RdmaTypeRef(RdmaType.Primitive("kotlin.Int")),
+            suspend = true,
+        )
+        val kotlin = generate(emptyList(), listOf(fn))
+        assertContains(kotlin, "fun rdma_computeSumAsync(completionId: Long, a: Int, b: Int)")
+        assertContains(kotlin, "RdmaSuspend.completeResult(completionId, com.example.kernel.computeSum(a, b))")
+        assertContains(kotlin, "RdmaSuspend.completeError(completionId, t)")
+        assertContains(kotlin, "rdmaRegisterFunction(\"rdma_computeSumAsync\"")
+        // A suspend function must not also be emitted as a synchronous shim.
+        assertFalse(kotlin.contains("fun rdma_computeSum("))
+    }
+
+    @Test
+    fun `suspend method generates async shim with receiver`() {
+        val cls = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "SuspendService",
+            qualifiedName = "com.example.kernel.SuspendService",
+            constructors = emptyList(),
+            methods = listOf(MethodInfo("fetch", "kotlin.String", listOf(ParameterInfo("id", "kotlin.Int")), isSuspend = true)),
+            properties = emptyList(),
+        )
+        val kotlin = generate(listOf(cls))
+        assertContains(kotlin, "fun rdma_SuspendService_fetchAsync(completionId: Long, receiver: COpaquePointer, id: Int)")
+        assertContains(kotlin, "receiver.obj<com.example.kernel.SuspendService>().fetch(id)")
+        assertContains(kotlin, "rdmaRegisterFunction(\"rdma_SuspendService_fetchAsync\"")
+        assertFalse(kotlin.contains("fun rdma_SuspendService_fetch("))
     }
 }

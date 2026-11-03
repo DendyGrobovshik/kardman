@@ -25,13 +25,17 @@ data class RdmaPluginType(
     val constructorParams: List<Pair<String, String>>,
     val properties: List<Pair<String, Boolean>>,
     val statics: List<String> = emptyList(),
+    val suspendMethods: List<RdmaPluginMethod> = emptyList(),
 )
+
+data class RdmaPluginMethod(val name: String, val paramCount: Int)
 
 data class RdmaPluginFunction(
     val name: String,
     val qualifiedName: String,
     val composable: Boolean,
     val parameters: List<RdmaPluginParameter>,
+    val suspend: Boolean = false,
 )
 
 enum class RdmaParamKind { VALUE, CONTENT, CALLBACK, LIST_VALUE, LIST_HANDLE }
@@ -64,7 +68,8 @@ object RdmaPluginConfig {
                 ?: emptyList()
             val properties = cls.properties.map { it.name to it.isMutable }
             val statics = cls.statics.map { it.name }
-            RdmaPluginType(cls.className, cls.qualifiedName, constructorParams, properties, statics)
+            val suspendMethods = cls.methods.filter { it.isSuspend }.map { RdmaPluginMethod(it.name, it.parameters.size) }
+            RdmaPluginType(cls.className, cls.qualifiedName, constructorParams, properties, statics, suspendMethods)
         }
 
         val functions = raw.functions.map { fn ->
@@ -111,7 +116,7 @@ object RdmaPluginConfig {
                         RdmaPluginParameter(p.name, RdmaParamKind.VALUE, kotlinTypeFor(fqnOf(p.type.type)))
                 }
             }
-            RdmaPluginFunction(fn.name, fn.qualifiedName, fn.composable, parameters)
+            RdmaPluginFunction(fn.name, fn.qualifiedName, fn.composable, parameters, fn.suspend)
         }
 
         return RdmaPluginManifest(classes, functions)

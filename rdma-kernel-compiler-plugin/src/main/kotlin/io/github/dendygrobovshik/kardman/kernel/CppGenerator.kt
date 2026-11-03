@@ -20,11 +20,14 @@ import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
 import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
+import io.github.dendygrobovshik.kardman.types.MethodInfo
+import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.StaticInfo
 import java.io.OutputStream
 
 class CppGenerator(
     private val moduleId: String = "",
+    private val kernelPackage: String = "",
     private val output: (String, String) -> OutputStream,
 ) {
 
@@ -75,6 +78,16 @@ class CppGenerator(
 
     private fun jniReturnSignature(type: RdmaTypeRef): String = jniSignature(type)
 
+    /** FQN of the generated suspend-wrapper facade (`<pkg>.RdmaSuspendBridgeKt`), or null if none. */
+    private fun suspendFacade(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>): String? {
+        val pkg = kernelPackage.ifEmpty {
+            infos.firstOrNull()?.packageName
+                ?: functions.firstOrNull { it.suspend }?.facadeClass?.substringBeforeLast('.')
+                ?: functions.firstOrNull()?.facadeClass?.substringBeforeLast('.')
+        }
+        return pkg?.let { "$it.RdmaSuspendBridgeKt" }
+    }
+
     private fun generateJniCacheHeader(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
         val out = output("RdmaJniCache$fileSuffix.h", "RdmaJniCache$fileSuffix.h").bufferedWriter()
         out.write("""#pragma once
@@ -98,7 +111,7 @@ struct RdmaJniCache {
                 out.write("        jclass companionClazz = nullptr;\n")
                 out.write("        jfieldID companionField = nullptr;\n")
             }
-            for (method in info.methods) {
+            for (method in info.methods.filter { !it.isSuspend }) {
                 out.write("        jmethodID method_${method.name} = nullptr;\n")
             }
             for (prop in info.properties) {
@@ -114,8 +127,20 @@ struct RdmaJniCache {
             out.write("    ${info.className}Cache ${info.className.lowercase()}_cache;\n")
         }
         for (fn in functions) {
+            if (fn.suspend) continue
             out.write("    jclass fn_${fn.name}_clazz = nullptr;\n")
             out.write("    jmethodID fn_${fn.name}_method = nullptr;\n")
+        }
+        val suspendFns = functions.filter { it.suspend }
+        val suspendMethods = infos.flatMap { cls -> cls.methods.filter { it.isSuspend }.map { cls to it } }
+        if (suspendFns.isNotEmpty() || suspendMethods.isNotEmpty()) {
+            out.write("    jclass suspendClazz = nullptr;\n")
+            for (fn in suspendFns) {
+                out.write("    jmethodID suspend_fn_${fn.name}Async = nullptr;\n")
+            }
+            for ((cls, m) in suspendMethods) {
+                out.write("    jmethodID suspend_${cls.className}_${m.name}Async = nullptr;\n")
+            }
         }
         out.write("};\n\nextern RdmaJniCache g_rdmaCache;\n\nvoid initJniCache(JNIEnv* env);\n")
         out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
@@ -157,7 +182,7 @@ void initJniCache(JNIEnv* env) {
                 }
                 out.write("        g_rdmaCache.$cacheVar.constructor = env->GetMethodID(g_rdmaCache.$cacheVar.clazz, \"<init>\", \"($paramSig)V\");\n")
             }
-            for (method in info.methods) {
+            for (method in info.methods.filter { !it.isSuspend }) {
                 val paramSig = method.parameters.joinToString("") {
                     JniTypeMapper.jniSignature(it.type)
                 }
@@ -182,6 +207,7 @@ void initJniCache(JNIEnv* env) {
             out.write("    }\n")
         }
         for (fn in functions) {
+            if (fn.suspend) continue
             val facade = fn.facadeClass.replace('.', '/')
             val paramSig = fn.parameters.joinToString("") { jniSignature(it.type) }
             val retSig = jniReturnSignature(fn.returnType)
@@ -193,6 +219,29 @@ void initJniCache(JNIEnv* env) {
         g_rdmaCache.fn_${fn.name}_method = env->GetStaticMethodID(g_rdmaCache.fn_${fn.name}_clazz, "${fn.name}", "($paramSig)$retSig");
     }
 """)
+        }
+        val suspendFns = functions.filter { it.suspend }
+        val suspendMethods = infos.flatMap { cls -> cls.methods.filter { it.isSuspend }.map { cls to it } }
+        if (suspendFns.isNotEmpty() || suspendMethods.isNotEmpty()) {
+            suspendFacade(infos, functions)?.let { facade ->
+                val facadePath = facade.replace('.', '/')
+                out.write("""
+    {
+        jclass localCls = env->FindClass("$facadePath");
+        g_rdmaCache.suspendClazz = (jclass)env->NewGlobalRef(localCls);
+        env->DeleteLocalRef(localCls);
+    }
+""")
+                for (fn in suspendFns) {
+                    val paramSig = fn.parameters.joinToString("") { jniSignature(it.type) }
+                    out.write("    g_rdmaCache.suspend_fn_${fn.name}Async = env->GetStaticMethodID(g_rdmaCache.suspendClazz, \"_${fn.name}Async\", \"(J$paramSig)V\");\n")
+                }
+                for ((cls, m) in suspendMethods) {
+                    val receiverSig = "L${cls.qualifiedName.replace('.', '/')};"
+                    val paramSig = m.parameters.joinToString("") { JniTypeMapper.jniSignature(it.type) }
+                    out.write("    g_rdmaCache.suspend_${cls.className}_${m.name}Async = env->GetStaticMethodID(g_rdmaCache.suspendClazz, \"_${cls.className}_${m.name}Async\", \"(J$receiverSig$paramSig)V\");\n")
+                }
+            }
         }
         out.write("}\n")
         out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
@@ -359,7 +408,7 @@ static jsi::Value ${info.className}_${setterName}(jsi::Runtime& r, JavaVM* jvm, 
             }
         }
 
-        for (method in info.methods) {
+        for (method in info.methods.filter { !it.isSuspend }) {
             val paramCount = method.parameters.size
             val returnType = JniTypeMapper.forType(method.returnType)
             val isVoid = JniTypeMapper.isVoid(method.returnType)
@@ -527,7 +576,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
         out.write("""
 void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
 """)
-        for (method in info.methods) {
+        for (method in info.methods.filter { !it.isSuspend }) {
             val paramCount = method.parameters.size
             out.write("""
     {
@@ -660,7 +709,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
         out.write("""
     // Copy prototype methods onto instance
 """)
-        for (method in info.methods) {
+        for (method in info.methods.filter { !it.isSuspend }) {
             out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
         }
         for (prop in info.properties) {
@@ -679,7 +728,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
     auto nativeState = std::make_shared<${info.className}NativeState>(jvm, globalObj);
     jsObj.setNativeState(rt, nativeState);
 """)
-        for (method in info.methods) {
+        for (method in info.methods.filter { !it.isSuspend }) {
             out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
         }
         for (prop in info.properties) {
@@ -748,8 +797,16 @@ namespace facebook {
 namespace rdma {
 $nsOpen
 """)
-        for (fn in functions) {
+        for (fn in functions.filter { !it.suspend }) {
             cpp.write(functionImpl(fn, infos))
+        }
+        for (fn in functions.filter { it.suspend }) {
+            cpp.write(suspendFunctionImpl(fn, infos))
+        }
+        for (info in infos) {
+            for (m in info.methods.filter { it.isSuspend }) {
+                cpp.write(suspendMethodImpl(info, m, infos))
+            }
         }
         for (info in infos) {
             for (static in info.statics) {
@@ -787,8 +844,16 @@ void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
     }
 """)
         }
-        for (fn in functions) {
+        for (fn in functions.filter { !it.suspend }) {
             cpp.write(functionRegistration(fn))
+        }
+        for (fn in functions.filter { it.suspend }) {
+            cpp.write(suspendFunctionRegistration(fn))
+        }
+        for (info in infos) {
+            for (m in info.methods.filter { it.isSuspend }) {
+                cpp.write(suspendMethodRegistration(info, m))
+            }
         }
         for (info in infos) {
             for (static in info.statics) {
@@ -903,6 +968,149 @@ static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Va
 
     private fun staticJsName(info: RdmaClassInfo, static: StaticInfo): String =
         info.className.replaceFirstChar { it.lowercase() } + static.name.replaceFirstChar { it.uppercase() }
+
+    // ---------------------------------------------------------------- suspend
+
+    private fun suspendFunctionImpl(fn: RdmaFunctionInfo, allClasses: List<RdmaClassInfo>): String {
+        val sb = StringBuilder()
+        val typeDesc = typeName(fn.returnType)
+        sb.append("""
+static jsi::Value rdma_suspend_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
+    JNIEnv* env = nullptr;
+    jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (!env) return jsi::Value::undefined();
+    jlong completionId = (jlong)args[0].getNumber();
+    rdmaRegisterSuspendResultType(completionId, "$typeDesc");
+""")
+        fn.parameters.forEachIndexed { i, p ->
+            sb.append(functionParamExtraction(p, i + 1, allClasses))
+        }
+        val argsStr = fn.parameters.joinToString(", ") { callArg(it) }
+        val callSuffix = if (argsStr.isEmpty()) "" else ", $argsStr"
+        sb.append("    env->CallStaticVoidMethod(g_rdmaCache.suspendClazz, g_rdmaCache.suspend_fn_${fn.name}Async, completionId$callSuffix);\n")
+        sb.append("    checkAndThrowJs(env, r);\n")
+        fn.parameters.filter { (it.type.type as? RdmaType.Primitive)?.fqn == "kotlin.String" }
+            .forEach { sb.append("    env->DeleteLocalRef(j_${it.name});\n") }
+        sb.append("    return jsi::Value::undefined();\n}\n\n")
+        return sb.toString()
+    }
+
+    private fun suspendMethodImpl(cls: RdmaClassInfo, m: MethodInfo, allClasses: List<RdmaClassInfo>): String {
+        val sb = StringBuilder()
+        val typeDesc = methodTypeDesc(m)
+        sb.append("""
+static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
+    JNIEnv* env = nullptr;
+    jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (!env) return jsi::Value::undefined();
+    jlong completionId = (jlong)args[0].getNumber();
+    rdmaRegisterSuspendResultType(completionId, "$typeDesc");
+    auto recvObj = args[1].asObject(r);
+    auto recvState = std::static_pointer_cast<RdmaObjectNativeState>(recvObj.getNativeState(r));
+    jobject receiver = recvState->getObject();
+""")
+        m.parameters.forEachIndexed { i, p ->
+            sb.append(suspendMethodParamExtraction(p, i + 2))
+        }
+        m.parameters.filter { it.type == "kotlin.String" }.forEachIndexed { i, p ->
+            sb.append("    jstring j_${p.name} = args[${i + 2}].isNull() ? nullptr : env->NewStringUTF(cpp_${p.name}.c_str());\n")
+        }
+        val paramsCall = m.parameters.joinToString(", ") { callArgMethodParam(it) }
+        val callSuffix = if (paramsCall.isEmpty()) "" else ", $paramsCall"
+        sb.append("    env->CallStaticVoidMethod(g_rdmaCache.suspendClazz, g_rdmaCache.suspend_${cls.className}_${m.name}Async, completionId, receiver$callSuffix);\n")
+        sb.append("    checkAndThrowJs(env, r);\n")
+        m.parameters.filter { it.type == "kotlin.String" }.forEach { sb.append("    env->DeleteLocalRef(j_${it.name});\n") }
+        sb.append("    return jsi::Value::undefined();\n}\n\n")
+        return sb.toString()
+    }
+
+    private fun suspendFunctionRegistration(fn: RdmaFunctionInfo): String = """
+    {
+        auto fn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "_${fn.name}Async"), ${fn.parameters.size + 1},
+            [jvm](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                return rdma_suspend_${fn.name}(r, jvm, args, count);
+            }
+        );
+        rdma.setProperty(rt, "_${fn.name}Async", std::move(fn));
+    }
+"""
+
+    private fun suspendMethodRegistration(cls: RdmaClassInfo, m: MethodInfo): String = """
+    {
+        auto fn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "_${cls.className}_${m.name}Async"), ${m.parameters.size + 2},
+            [jvm](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                return rdma_suspend_${cls.className}_${m.name}(r, jvm, args, count);
+            }
+        );
+        rdma.setProperty(rt, "_${cls.className}_${m.name}Async", std::move(fn));
+    }
+"""
+
+    private fun suspendMethodParamExtraction(p: ParameterInfo, idx: Int): String {
+        val type = JniTypeMapper.forType(p.type)
+        if (type != null) {
+            if (p.nullable) {
+                return "    ${type.cppType} cpp_${p.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.fromJsi.replace("%d", idx.toString())});\n"
+            }
+            return "    ${type.cppType} cpp_${p.name} = ${type.fromJsi.replace("%d", idx.toString())};\n"
+        }
+        if (p.isList) {
+            return "    jobject arg_${p.name} = nullptr;\n" +
+                "    if (!args[$idx].isNull()) {\n" +
+                "        auto listObj = args[$idx].asObject(r);\n" +
+                "        if (listObj.hasNativeState(r)) {\n" +
+                "            auto ns = listObj.getNativeState(r);\n" +
+                "            if (ns) arg_${p.name} = *(jobject*)((char*)ns.get() + 16);\n" +
+                "        } else {\n" +
+                "            arg_${p.name} = materializeArray(env, r, jvm, listObj, \"${p.listElementType ?: ""}\");\n" +
+                "        }\n" +
+                "    }\n"
+        }
+        if (p.isMap) {
+            return "    jobject arg_${p.name} = nullptr;\n" +
+                "    if (!args[$idx].isNull()) {\n" +
+                "        auto mapObj = args[$idx].asObject(r);\n" +
+                "        if (mapObj.hasNativeState(r)) {\n" +
+                "            auto ns = mapObj.getNativeState(r);\n" +
+                "            if (ns) arg_${p.name} = *(jobject*)((char*)ns.get() + 16);\n" +
+                "        } else {\n" +
+                "            arg_${p.name} = materializeMap(env, r, jvm, mapObj, \"${p.mapKeyType ?: ""}\", \"${p.mapValueType ?: ""}\");\n" +
+                "        }\n" +
+                "    }\n"
+        }
+        if (p.nullable) {
+            return "    jobject arg_${p.name} = nullptr;\n" +
+                "    if (!args[$idx].isNull()) {\n" +
+                "        auto argObj = args[$idx].asObject(r);\n" +
+                "        auto argState = std::static_pointer_cast<RdmaObjectNativeState>(argObj.getNativeState(r));\n" +
+                "        arg_${p.name} = argState->getObject();\n" +
+                "    }\n"
+        }
+        return "    auto argObj_${p.name} = args[$idx].asObject(r);\n" +
+            "    auto argState_${p.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${p.name}.getNativeState(r));\n" +
+            "    jobject arg_${p.name} = argState_${p.name}->getObject();\n"
+    }
+
+    private fun callArgMethodParam(p: ParameterInfo): String = when (p.type) {
+        "kotlin.String" -> "j_${p.name}"
+        "kotlin.Int" -> "(jint)cpp_${p.name}"
+        "kotlin.Boolean" -> "(jboolean)cpp_${p.name}"
+        "kotlin.Double", "kotlin.Float" -> "(jdouble)cpp_${p.name}"
+        "kotlin.Long" -> "(jlong)cpp_${p.name}"
+        else -> when {
+            p.isList || p.isMap -> "arg_${p.name}"
+            isObjectRef(p.type) -> "arg_${p.name}"
+            else -> "nullptr"
+        }
+    }
+
+    private fun methodTypeDesc(m: MethodInfo): String = when {
+        m.isList -> "list:${m.listElementType ?: "kotlin.Any"}"
+        m.isMap -> "map:${m.mapKeyType ?: "kotlin.Any"}:${m.mapValueType ?: "kotlin.Any"}"
+        else -> m.returnType
+    }
 
     private fun staticImpl(info: RdmaClassInfo, static: StaticInfo, allClasses: List<RdmaClassInfo>): String {
         val cacheVar = "${info.className.lowercase()}_cache"
@@ -1057,7 +1265,8 @@ $body}
         is RdmaType.Ref -> t.fqn
         is RdmaType.ListType -> "list:" + typeName(t.element)
         is RdmaType.MapType -> "map:" + typeName(t.key) + ":" + typeName(t.value)
-        else -> "kotlin.Any"
+        is RdmaType.UnitType -> "kotlin.Unit"
+        is RdmaType.FunctionType -> "kotlin.Any"
     }
 
     private fun functionReturnMarshaling(fn: RdmaFunctionInfo, allClasses: List<RdmaClassInfo>, callSuffix: String): String {

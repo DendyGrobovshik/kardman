@@ -71,6 +71,9 @@ kotlin {
 
         val buildCpp = tasks.register("buildRdmaCpp_$targetName", Exec::class.java) {
             inputs.files(srcs.map { cppRoot.file(it) })
+            inputs.dir(cppRoot.dir("include"))
+            inputs.dir(cppRoot.dir("common"))
+            inputs.dir(cppRoot.dir("ios"))
             outputs.file(cppBuildDir.map { it.file("librdma_core.a") })
             val objDir = cppBuildDir.get().asFile
             val script = buildString {

@@ -68,7 +68,7 @@ object RdmaFunctionExtractor {
                 } else {
                     RdmaTypeParser.toRdmaTypeRef(fn.returnType)
                 }
-                result += RdmaFunctionInfo(fn.name.asString(), qualifiedName, facadeClass, composable, parameters, returnType)
+                result += RdmaFunctionInfo(fn.name.asString(), qualifiedName, facadeClass, composable, parameters, returnType, suspend = fn.isSuspend)
             }
         }
         return result

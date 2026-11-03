@@ -20,6 +20,8 @@ import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
 import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
+import io.github.dendygrobovshik.kardman.types.MethodInfo
+import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.StaticInfo
 import java.io.OutputStream
 
@@ -106,7 +108,7 @@ class CAbiCppGenerator(
                 val params = ctor.parameters.map { CAbi.forMemberType(it.type).cppType to it.name }
                 out.write(cWrapper("void*", cFn(info.className + "_new"), params) + "\n")
             }
-            for (method in info.methods) {
+            for (method in info.methods.filter { !it.isSuspend }) {
                 val ret = CAbi.forMemberType(method.returnType).cppType
                 val params = buildList {
                     add("void*" to "handle")
@@ -131,6 +133,17 @@ class CAbiCppGenerator(
             val ret = cRetType(fn.returnType)
             val params = fn.parameters.map { cParamType(it) to it.name }
             out.write(cWrapper(ret, cFn(fn.name), params) + "\n")
+        }
+        for (fn in functions.filter { it.suspend }) {
+            val params = listOf("int64_t" to "completionId") + fn.parameters.map { cParamType(it) to it.name }
+            out.write(cWrapper("void", cFn(fn.name + "Async"), params) + "\n")
+        }
+        for (info in infos) {
+            for (method in info.methods.filter { it.isSuspend }) {
+                val params = listOf("int64_t" to "completionId", "void*" to "receiver") +
+                    method.parameters.map { CAbi.forMemberType(it.type).cppType to it.name }
+                out.write(cWrapper("void", cFn(info.className + "_" + method.name + "Async"), params) + "\n")
+            }
         }
         out.write(cWrapper("int32_t", cFn("typeIdOf"), listOf("void*" to "handle")) + "\n")
         out.close()
@@ -272,7 +285,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
         }
 
         // Methods
-        for (method in info.methods) {
+        for (method in info.methods.filter { !it.isSuspend }) {
             val isVoid = CAbi.isVoid(method.returnType)
             val ret = CAbi.forMemberType(method.returnType).cppType
             out.write("""static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) {
@@ -346,7 +359,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
         // register bridge
         out.write("""void register${info.className}Bridge(jsi::Runtime& rt) {
 """)
-        for (method in info.methods) {
+        for (method in info.methods.filter { !it.isSuspend }) {
             out.write("""    {
         auto fn = jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "${method.name}"), ${method.parameters.size},
@@ -427,7 +440,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
     auto nativeState = std::make_shared<${info.className}NativeState>(handle);
     jsObj.setNativeState(rt, nativeState);
 """)
-        for (method in info.methods) {
+        for (method in info.methods.filter { !it.isSuspend }) {
             out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
         }
         for (prop in info.properties) {
@@ -446,7 +459,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
     auto nativeState = std::make_shared<${info.className}NativeState>(handle);
     jsObj.setNativeState(rt, nativeState);
 """)
-        for (method in info.methods) {
+        for (method in info.methods.filter { !it.isSuspend }) {
             out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
         }
         for (prop in info.properties) {
@@ -501,8 +514,16 @@ namespace facebook {
 namespace rdma {
 $nsOpen
 """)
-        for (fn in functions) {
+        for (fn in functions.filter { !it.suspend }) {
             cpp.write(functionImpl(fn, infos))
+        }
+        for (fn in functions.filter { it.suspend }) {
+            cpp.write(suspendFunctionImpl(fn, infos))
+        }
+        for (info in infos) {
+            for (m in info.methods.filter { it.isSuspend }) {
+                cpp.write(suspendMethodImpl(info, m, infos))
+            }
         }
         for (info in infos) {
             for (static in info.statics) {
@@ -529,8 +550,16 @@ $nsOpen
     }
 """)
         }
-        for (fn in functions) {
+        for (fn in functions.filter { !it.suspend }) {
             cpp.write(functionRegistration(fn))
+        }
+        for (fn in functions.filter { it.suspend }) {
+            cpp.write(suspendFunctionRegistration(fn))
+        }
+        for (info in infos) {
+            for (m in info.methods.filter { it.isSuspend }) {
+                cpp.write(suspendMethodRegistration(info, m))
+            }
         }
         for (info in infos) {
             for (static in info.statics) {
@@ -797,7 +826,8 @@ $nsClose} // namespace rdma
         is RdmaType.Ref -> ty.fqn
         is RdmaType.ListType -> "list:" + typeName(ty.element)
         is RdmaType.MapType -> "map:" + typeName(ty.key) + ":" + typeName(ty.value)
-        else -> "kotlin.Any"
+        is RdmaType.UnitType -> "kotlin.Unit"
+        is RdmaType.FunctionType -> "kotlin.Any"
     }
 
     private fun functionRegistration(fn: RdmaFunctionInfo): String = """
@@ -810,6 +840,163 @@ $nsClose} // namespace rdma
         rdma.setProperty(rt, "${fn.name}", std::move(fn));
     }
 """
+
+    // ---------------------------------------------------------------- suspend
+
+    private fun suspendFunctionImpl(fn: RdmaFunctionInfo, allClasses: List<RdmaClassInfo>): String {
+        val sb = StringBuilder()
+        sb.append("""static jsi::Value rdma_suspend_${fn.name}(jsi::Runtime& r, const jsi::Value* args, size_t count) {
+    int64_t completionId = (int64_t)args[0].getNumber();
+    rdmaRegisterSuspendResultType(completionId, "${typeName(fn.returnType)}");
+""")
+        val argNames = mutableListOf<String>()
+        fn.parameters.forEachIndexed { i, p ->
+            suspendFunctionParamExtraction(sb, p, i + 1, allClasses, argNames)
+        }
+        val callArgs = argNames.joinToString(", ")
+        val suffix = if (callArgs.isEmpty()) "completionId" else "completionId, $callArgs"
+        sb.append("    ${cFn(fn.name + "Async")}($suffix);\n")
+        sb.append("    return jsi::Value::undefined();\n}\n\n")
+        return sb.toString()
+    }
+
+    private fun suspendMethodImpl(cls: RdmaClassInfo, m: MethodInfo, allClasses: List<RdmaClassInfo>): String {
+        val sb = StringBuilder()
+        sb.append("""static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, const jsi::Value* args, size_t count) {
+    int64_t completionId = (int64_t)args[0].getNumber();
+    rdmaRegisterSuspendResultType(completionId, "${methodTypeDesc(m)}");
+    void* receiver = nullptr;
+    if (!args[1].isNull() && args[1].isObject()) {
+        auto recvState = std::static_pointer_cast<RdmaObjectNativeStateCAbi>(args[1].asObject(r).getNativeState(r));
+        if (recvState) receiver = recvState->handle();
+    }
+""")
+        val argNames = mutableListOf<String>()
+        m.parameters.forEachIndexed { i, p ->
+            suspendMethodParamExtraction(sb, p, i + 2, allClasses, argNames)
+        }
+        val callArgs = argNames.joinToString(", ")
+        val suffix = if (callArgs.isEmpty()) "completionId, receiver" else "completionId, receiver, $callArgs"
+        sb.append("    ${cFn(cls.className + "_" + m.name + "Async")}($suffix);\n")
+        sb.append("    return jsi::Value::undefined();\n}\n\n")
+        return sb.toString()
+    }
+
+    private fun suspendFunctionParamExtraction(sb: StringBuilder, p: RdmaParameterInfo, idx: Int, allClasses: List<RdmaClassInfo>, argNames: MutableList<String>) {
+        when (val ty = p.type.type) {
+            is RdmaType.Primitive -> {
+                if (ty.fqn == "kotlin.String") {
+                    sb.append("    std::string cpp_${p.name} = args[$idx].getString(r).utf8(r);\n")
+                    argNames.add("cpp_${p.name}.c_str()")
+                } else {
+                    val cType = CAbi.forMemberType(ty.fqn).cppType
+                    val expr = when (ty.fqn) {
+                        "kotlin.Int" -> "(int32_t)args[$idx].getNumber()"
+                        "kotlin.Boolean" -> "args[$idx].getBool()"
+                        "kotlin.Long" -> "(int64_t)args[$idx].getNumber()"
+                        else -> "args[$idx].getNumber()"
+                    }
+                    sb.append("    $cType cpp_${p.name} = $expr;\n")
+                    argNames.add("cpp_${p.name}")
+                }
+            }
+            is RdmaType.Ref -> {
+                sb.append("    void* arg_${p.name} = nullptr;\n")
+                sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                sb.append("        auto argState = std::static_pointer_cast<${rdmaClassByName(ty.fqn, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(args[$idx].asObject(r).getNativeState(r));\n")
+                sb.append("        if (argState) arg_${p.name} = argState->handle();\n")
+                sb.append("    }\n")
+                argNames.add("arg_${p.name}")
+            }
+            is RdmaType.ListType -> {
+                sb.append("    void* arg_${p.name} = nullptr;\n")
+                sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+                sb.append("        arg_${p.name} = materializeList(r, argObj_${p.name}, \"${typeName(ty.element)}\");\n")
+                sb.append("    }\n")
+                argNames.add("arg_${p.name}")
+            }
+            is RdmaType.MapType -> {
+                sb.append("    void* arg_${p.name} = nullptr;\n")
+                sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+                sb.append("        arg_${p.name} = materializeMap(r, argObj_${p.name}, \"${typeName(ty.key)}\", \"${typeName(ty.value)}\");\n")
+                sb.append("    }\n")
+                argNames.add("arg_${p.name}")
+            }
+            is RdmaType.FunctionType -> {
+                sb.append("    int64_t cpp_${p.name} = (int64_t)args[$idx].getNumber();\n")
+                argNames.add("cpp_${p.name}")
+            }
+            is RdmaType.UnitType -> {}
+        }
+    }
+
+    private fun suspendMethodParamExtraction(sb: StringBuilder, p: ParameterInfo, idx: Int, allClasses: List<RdmaClassInfo>, argNames: MutableList<String>) {
+        val type = CAbi.forMemberType(p.type)
+        if (p.type == "kotlin.String") {
+            sb.append("    std::string cpp_${p.name} = args[$idx].getString(r).utf8(r);\n")
+            argNames.add("cpp_${p.name}.c_str()")
+        } else if (CAbi.isPrimitive(p.type)) {
+            val expr = when (p.type) {
+                "kotlin.Int" -> "(int32_t)args[$idx].getNumber()"
+                "kotlin.Boolean" -> "args[$idx].getBool()"
+                "kotlin.Long" -> "(int64_t)args[$idx].getNumber()"
+                else -> "args[$idx].getNumber()"
+            }
+            sb.append("    ${type.cppType} cpp_${p.name} = $expr;\n")
+            argNames.add("cpp_${p.name}")
+        } else if (p.isList) {
+            sb.append("    void* arg_${p.name} = nullptr;\n")
+            sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+            sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+            sb.append("        arg_${p.name} = materializeList(r, argObj_${p.name}, \"${p.listElementType ?: "kotlin.Any"}\");\n")
+            sb.append("    }\n")
+            argNames.add("arg_${p.name}")
+        } else if (p.isMap) {
+            sb.append("    void* arg_${p.name} = nullptr;\n")
+            sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+            sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+            sb.append("        arg_${p.name} = materializeMap(r, argObj_${p.name}, \"${p.mapKeyType ?: "kotlin.Any"}\", \"${p.mapValueType ?: "kotlin.Any"}\");\n")
+            sb.append("    }\n")
+            argNames.add("arg_${p.name}")
+        } else {
+            sb.append("    void* arg_${p.name} = nullptr;\n")
+            sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+            sb.append("        auto argState = std::static_pointer_cast<RdmaObjectNativeStateCAbi>(args[$idx].asObject(r).getNativeState(r));\n")
+            sb.append("        if (argState) arg_${p.name} = argState->handle();\n")
+            sb.append("    }\n")
+            argNames.add("arg_${p.name}")
+        }
+    }
+
+    private fun suspendFunctionRegistration(fn: RdmaFunctionInfo): String = """
+    {
+        auto fn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "_${fn.name}Async"), ${fn.parameters.size + 1},
+            [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                return rdma_suspend_${fn.name}(r, args, count);
+            });
+        rdma.setProperty(rt, "_${fn.name}Async", std::move(fn));
+    }
+"""
+
+    private fun suspendMethodRegistration(cls: RdmaClassInfo, m: MethodInfo): String = """
+    {
+        auto fn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "_${cls.className}_${m.name}Async"), ${m.parameters.size + 2},
+            [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                return rdma_suspend_${cls.className}_${m.name}(r, args, count);
+            });
+        rdma.setProperty(rt, "_${cls.className}_${m.name}Async", std::move(fn));
+    }
+"""
+
+    private fun methodTypeDesc(m: MethodInfo): String = when {
+        m.isList -> "list:${m.listElementType ?: "kotlin.Any"}"
+        m.isMap -> "map:${m.mapKeyType ?: "kotlin.Any"}:${m.mapValueType ?: "kotlin.Any"}"
+        else -> m.returnType
+    }
 
     private fun staticJsName(info: RdmaClassInfo, static: StaticInfo): String =
         info.className.replaceFirstChar { it.lowercase() } + static.name.replaceFirstChar { it.uppercase() }

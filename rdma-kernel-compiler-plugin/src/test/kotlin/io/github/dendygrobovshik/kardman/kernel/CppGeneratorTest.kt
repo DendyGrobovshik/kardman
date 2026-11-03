@@ -20,6 +20,10 @@ import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.PropertyInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
+import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
+import io.github.dendygrobovshik.kardman.types.RdmaType
+import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import io.github.dendygrobovshik.kardman.types.StaticInfo
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -201,6 +205,95 @@ class CppGeneratorTest {
         val generated = generate(createPerson())
         val cpp = generated["PersonProxy.cpp"] ?: error("PersonProxy.cpp not generated")
         assertContains(cpp, "checkAndThrowJs(env, r)", message = "method JNI calls should capture host exceptions")
+    }
+
+    @Test
+    fun `generates suspend async wrapper and completion registration`() {
+        val fn = RdmaFunctionInfo(
+            name = "computeSum",
+            qualifiedName = "com.example.kernel.computeSum",
+            facadeClass = "com.example.kernel.SuspendDemoKt",
+            composable = false,
+            parameters = listOf(
+                RdmaParameterInfo("a", RdmaTypeRef(RdmaType.Primitive("kotlin.Int"))),
+                RdmaParameterInfo("b", RdmaTypeRef(RdmaType.Primitive("kotlin.Int"))),
+            ),
+            returnType = RdmaTypeRef(RdmaType.Primitive("kotlin.Int")),
+            suspend = true,
+        )
+        val files = mutableMapOf<String, ByteArrayOutputStream>()
+        CppGenerator(moduleId = "", kernelPackage = "com.example.kernel") { fileName, _ ->
+            ByteArrayOutputStream().also { files[fileName] = it }
+        }.generate(emptyList(), listOf(fn))
+        val generated = files.mapValues { it.value.use { it.toString("UTF-8") } }
+
+        val bridge = generated["RdmaBridge.cpp"] ?: error("RdmaBridge.cpp not generated")
+        assertContains(bridge, "rdma_suspend_computeSum")
+        assertContains(bridge, "rdmaRegisterSuspendResultType(completionId, \"kotlin.Int\")")
+        assertContains(bridge, """PropNameID::forAscii(rt, "_computeSumAsync")""")
+
+        val cache = generated["RdmaJniCache.cpp"] ?: error("RdmaJniCache.cpp not generated")
+        assertContains(cache, "suspendClazz")
+        assertContains(cache, "suspend_fn_computeSumAsync")
+    }
+
+    @Test
+    fun `suspend method generates async wrapper with receiver`() {
+        val service = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "SuspendService",
+            qualifiedName = "com.example.kernel.SuspendService",
+            constructors = emptyList(),
+            methods = listOf(MethodInfo("fetch", "kotlin.String", listOf(ParameterInfo("id", "kotlin.Int")), isSuspend = true)),
+            properties = emptyList(),
+        )
+        val files = mutableMapOf<String, ByteArrayOutputStream>()
+        CppGenerator(moduleId = "", kernelPackage = "com.example.kernel") { fileName, _ ->
+            ByteArrayOutputStream().also { files[fileName] = it }
+        }.generate(listOf(service), emptyList())
+        val generated = files.mapValues { it.value.use { it.toString("UTF-8") } }
+
+        val bridge = generated["RdmaBridge.cpp"] ?: error("RdmaBridge.cpp not generated")
+        assertContains(bridge, "rdma_suspend_SuspendService_fetch")
+        assertContains(bridge, """PropNameID::forAscii(rt, "_SuspendService_fetchAsync")""")
+
+        // The suspend method must not be generated as a synchronous proxy method.
+        val proxy = generated["SuspendServiceProxy.cpp"] ?: error("SuspendServiceProxy.cpp not generated")
+        assertFalse(proxy.contains("SuspendService_fetch("), "suspend method should not get a sync proxy method")
+    }
+
+    @Test
+    fun `suspend return type descriptors cover RDMA, map and list`() {
+        val person = createPerson()
+        val cases = listOf(
+            RdmaTypeRef(RdmaType.Ref("com.example.kernel.Person")) to "com.example.kernel.Person",
+            RdmaTypeRef(RdmaType.MapType(
+                RdmaTypeRef(RdmaType.Primitive("kotlin.String")),
+                RdmaTypeRef(RdmaType.Primitive("kotlin.Int")),
+            )) to "map:kotlin.String:kotlin.Int",
+            RdmaTypeRef(RdmaType.ListType(RdmaTypeRef(RdmaType.Primitive("kotlin.Int")))) to "list:kotlin.Int",
+        )
+        val functions = cases.mapIndexed { i, (ret, _) ->
+            RdmaFunctionInfo(
+                name = "suspendCase$i",
+                qualifiedName = "com.example.kernel.suspendCase$i",
+                facadeClass = "com.example.kernel.SuspendDemoKt",
+                composable = false,
+                parameters = emptyList(),
+                returnType = ret,
+                suspend = true,
+            )
+        }
+        val files = mutableMapOf<String, ByteArrayOutputStream>()
+        CppGenerator(moduleId = "", kernelPackage = "com.example.kernel") { fileName, _ ->
+            ByteArrayOutputStream().also { files[fileName] = it }
+        }.generate(listOf(person), functions)
+        val generated = files.mapValues { it.value.use { it.toString("UTF-8") } }
+        val bridge = generated["RdmaBridge.cpp"] ?: error("RdmaBridge.cpp not generated")
+
+        cases.forEachIndexed { i, (_, desc) ->
+            assertContains(bridge, "rdmaRegisterSuspendResultType(completionId, \"$desc\")")
+            assertContains(bridge, "rdma_suspend_suspendCase$i")
+        }
     }
 
     private fun createPerson() = RdmaClassInfo(

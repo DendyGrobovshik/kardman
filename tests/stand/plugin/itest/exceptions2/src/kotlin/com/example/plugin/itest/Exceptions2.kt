@@ -48,9 +48,9 @@ fun Exceptions2Content() {
         //     catches it around a plain (non-@Composable) call.
         //  2. Double crossing (host -> JS -> host): itestThrow() makes the HOST throw;
         //     the bridge turns it into a JS Error carrying the host exception in
-        //     __rdmaCause; the catch here rethrows the SAME error object, so the
-        //     exception crosses back to the host once more. After the fromJSError fix
-        //     the host-side RdmaException must carry a non-null cause chain.
+        //     the nested `cause` Error; the catch here rethrows the SAME error object,
+        //     so the exception crosses back to the host once more. After the fromJSError
+        //     fix the host-side RdmaException must carry a non-null cause chain.
         try {
             itestThrow("host-inner")
         } catch (e: Throwable) {
