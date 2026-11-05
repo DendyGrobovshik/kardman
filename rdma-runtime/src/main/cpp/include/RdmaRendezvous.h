@@ -17,8 +17,13 @@
 #include <functional>
 #include <string>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <vector>
+
+#include <jsi/jsi.h>
 
 #include "RdmaPlatform.h"
 #include "RdmaException.h"
@@ -93,6 +98,15 @@ void rdmaPostJsHigh(JsTask task);
 // current compose/init work completes, so they never stall the blocking
 // UI->JS rendezvous.
 void rdmaPostJsSelf(JsTask task);
+
+// Timers (Hermes-thread only; see docs/architecture.md#timers). setTimeout with
+// a positive delay schedules a callback; clearTimeout cancels a pending timer.
+// The event loop (jsThreadMain) reads the next deadline to drive wait_until and
+// pops due callbacks to run them on the low-priority queue.
+int64_t rdmaScheduleTimer(int64_t ms, std::shared_ptr<facebook::jsi::Function> fn);
+void rdmaCancelTimer(int64_t handle);
+std::optional<std::chrono::steady_clock::time_point> rdmaNextTimerDeadline();
+std::vector<std::shared_ptr<facebook::jsi::Function>> rdmaPopDueTimers();
 
 // Start the Hermes thread (async). Must be called on the UI thread after all
 // platform caches are initialized. The thread creates the runtime + bridge and

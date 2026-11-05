@@ -38,7 +38,9 @@ import com.example.kernel.internal.services.touchSuspend
 import com.example.kernel.internal.services.SuspendService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 fun runServicesDemo() {
     val info = platformInfo()
@@ -119,6 +121,26 @@ suspend fun runSuspendDemo() {
         val c = computeSum(3, 3)
         println("SUSPEND_CONCURRENT_3: $c")
     }
+
+    runTimerDemo()
+}
+
+suspend fun runTimerDemo() {
+    // delay(1000) must not complete within 100ms: the timeout fires first, proving
+    // the timer actually waits rather than resuming immediately.
+    val timedOut = withTimeoutOrNull(100) { delay(1000); "done" }
+    println("SUSPEND_TIMEOUT_OK: result=${timedOut ?: "null"}")
+
+    // delay(100) must complete within 500ms: proving the timer does fire and resume.
+    val completed = withTimeoutOrNull(500) { delay(100); "done" }
+    println("SUSPEND_TIMEOUT_DONE: result=${completed ?: "null"}")
+
+    // Cancelling a pending delay must not crash and must not block the scope.
+    val job = CoroutineScope(Dispatchers.Main).launch { delay(10000) }
+    delay(20)
+    job.cancel()
+    delay(30)
+    println("SUSPEND_CANCEL_OK")
 }
 
 fun runListMutationDemo() {

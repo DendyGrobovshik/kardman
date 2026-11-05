@@ -15,12 +15,15 @@
  */
 #include "RdmaRendezvous.h"
 
+#include <chrono>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <condition_variable>
+#include <queue>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <pthread.h>
 #include <unistd.h>
 
@@ -70,6 +73,29 @@ std::deque<std::shared_ptr<UiRequest>> g_jsToUi;
 // low (async: callbacks/lambdas) so that async parsing never stalls composition.
 std::deque<std::shared_ptr<JsRequest>> g_uiToJsHigh;
 std::deque<std::shared_ptr<JsRequest>> g_uiToJsLow;
+
+// Timer state (Hermes-thread only). setTimeout/clearTimeout are JS host functions
+// and therefore run on the Hermes thread, so no locking is needed: a timer can only
+// be inserted while the event loop is executing, and the loop re-reads the nearest
+// deadline on the next iteration (no lost-wakeup race).
+struct TimerEntry {
+    int64_t handle;
+    std::chrono::steady_clock::time_point deadline;
+    std::shared_ptr<jsi::Function> fn;
+};
+// Min-heap by deadline (earliest on top); ties broken by handle for determinism.
+struct TimerEntryLater {
+    bool operator()(const TimerEntry& a, const TimerEntry& b) const {
+        if (a.deadline != b.deadline) return a.deadline > b.deadline;
+        return a.handle > b.handle;
+    }
+};
+std::priority_queue<TimerEntry, std::vector<TimerEntry>, TimerEntryLater> g_timers;
+// Lazily-cancelled handles: clearTimeout marks them; they are skipped (and erased)
+// when their deadline is reached. Cancelled entries linger until their deadline,
+// which is negligible at delay/withTimeout scale.
+std::unordered_set<int64_t> g_cancelledTimers;
+int64_t g_nextTimerHandle = 1;
 
 std::atomic<bool> g_runtimeReady{false};
 std::atomic<int> g_evalPending{0};
@@ -276,6 +302,41 @@ void rdmaPostJsSelf(JsTask task) {
     g_cv.notify_all();
 }
 
+int64_t rdmaScheduleTimer(int64_t ms, std::shared_ptr<jsi::Function> fn) {
+    const int64_t handle = g_nextTimerHandle++;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    g_timers.push(TimerEntry{handle, deadline, std::move(fn)});
+    return handle;
+}
+
+void rdmaCancelTimer(int64_t handle) {
+    g_cancelledTimers.insert(handle);
+}
+
+std::optional<std::chrono::steady_clock::time_point> rdmaNextTimerDeadline() {
+    // Drop cancelled entries sitting on top so they don't force a pointless wakeup.
+    while (!g_timers.empty() && g_cancelledTimers.count(g_timers.top().handle)) {
+        g_cancelledTimers.erase(g_timers.top().handle);
+        g_timers.pop();
+    }
+    if (g_timers.empty()) return std::nullopt;
+    return g_timers.top().deadline;
+}
+
+std::vector<std::shared_ptr<jsi::Function>> rdmaPopDueTimers() {
+    std::vector<std::shared_ptr<jsi::Function>> due;
+    const auto now = std::chrono::steady_clock::now();
+    while (!g_timers.empty() && g_timers.top().deadline <= now) {
+        TimerEntry entry = g_timers.top();
+        g_timers.pop();
+        if (g_cancelledTimers.erase(entry.handle)) {
+            continue; // cancelled: drop
+        }
+        due.push_back(std::move(entry.fn));
+    }
+    return due;
+}
+
 void rdmaEvalAsset(const std::string& code) {
     g_evalPending.fetch_add(1, std::memory_order_relaxed);
     rdmaPostJsHigh([code] {
@@ -351,13 +412,37 @@ static void jsThreadMain() {
         std::shared_ptr<JsRequest> req;
         {
             std::unique_lock<std::mutex> lk(g_mutex);
-            g_cv.wait(lk, [&] {
+            // Wait until a queued task arrives or the nearest timer deadline
+            // passes. Timers are only inserted from the Hermes thread while it
+            // is executing (never while it sleeps here), so re-reading the
+            // deadline each iteration has no lost-wakeup race.
+            auto deadline = rdmaNextTimerDeadline();
+            auto predicate = [&] {
                 return !g_uiToJsHigh.empty() || !g_uiToJsLow.empty() || g_stopped.load();
-            });
+            };
+            if (deadline) {
+                g_cv.wait_until(lk, *deadline, predicate);
+            } else {
+                g_cv.wait(lk, predicate);
+            }
             if (g_stopped.load() && g_uiToJsHigh.empty() && g_uiToJsLow.empty()) {
                 return;
             }
-            popJsRequestLocked(req);
+            // Fire due timers first: append their callbacks to the low queue so
+            // they run after already-queued work and never preempt composition.
+            auto dueFns = rdmaPopDueTimers();
+            for (auto& fn : dueFns) {
+                auto timerReq = std::make_shared<JsRequest>();
+                timerReq->task = [fn = std::move(fn)] {
+                    jsi::Runtime* rt = getRdmaRuntime();
+                    if (rt) fn->call(*rt, nullptr, 0);
+                };
+                g_uiToJsLow.push_back(timerReq);
+            }
+            if (!popJsRequestLocked(req)) {
+                // Spurious wakeup or only cancelled timers: nothing to run.
+                continue;
+            }
         }
         executeJsTask(*req);
         if (req->hasError && !req->blocking) {

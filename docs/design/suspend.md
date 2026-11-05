@@ -134,6 +134,5 @@ cancel the in-flight kernel call. Propagating cancellation is a follow-up.
 
 ## Out of scope
 
-- `delay(ms)` / timers (the `setTimeout` shim currently ignores the delay).
 - Overriding an `open` suspend method from the plugin.
 - Plugin-defined `suspend` functions passed into the kernel.

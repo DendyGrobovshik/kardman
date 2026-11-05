@@ -145,6 +145,21 @@ step_12_suspend_rdma_return() {
     wait_logcat "RdmaRuntime" "SUSPEND_RDMA: os=suspend-os model=suspend-model version=suspend-version"
 }
 
+step_13_timer_delay() {
+    step "13: delay(1000) must not complete within 100ms (timer waits)"
+    wait_logcat "RdmaRuntime" "SUSPEND_TIMEOUT_OK: result=null"
+}
+
+step_14_timer_timeout() {
+    step "14: delay(100) must complete within 500ms (timer fires)"
+    wait_logcat "RdmaRuntime" "SUSPEND_TIMEOUT_DONE: result=done"
+}
+
+step_15_timer_cancel() {
+    step "15: cancelling a pending delay"
+    wait_logcat "RdmaRuntime" "SUSPEND_CANCEL_OK"
+}
+
 main() {
     adb_dev
     mkdir -p "$VERSIONS_DIR"
@@ -163,6 +178,9 @@ main() {
     step_10_suspend_cause
     step_11_suspend_concurrent
     step_12_suspend_rdma_return
+    step_13_timer_delay
+    step_14_timer_timeout
+    step_15_timer_cancel
 
     echo
     echo "ALL SUSPEND-BEHAVIOR STEPS PASSED"

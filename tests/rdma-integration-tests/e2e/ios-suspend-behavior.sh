@@ -134,6 +134,9 @@ step_2_run_and_assert() {
     wait_marker "$log" "SUSPEND_CONCURRENT_2: 4"
     wait_marker "$log" "SUSPEND_CONCURRENT_3: 6"
     wait_marker "$log" "SUSPEND_RDMA: os=suspend-os model=suspend-model version=suspend-version"
+    wait_marker "$log" "SUSPEND_TIMEOUT_OK: result=null"
+    wait_marker "$log" "SUSPEND_TIMEOUT_DONE: result=done"
+    wait_marker "$log" "SUSPEND_CANCEL_OK"
 
     kill "$LAUNCH_PID" 2>/dev/null || true
     LAUNCH_PID=""

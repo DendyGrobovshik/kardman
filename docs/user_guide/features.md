@@ -256,8 +256,10 @@ i.e. after any in-flight composition, never in the middle of it.
   no background thread pool); `Dispatchers.IO` does not exist on JS and is a
   compile error. Real parallelism lives in the kernel: offload heavy work to an
   `@RDMA` function rather than a dispatcher.
-- `delay(ms)` is not yet implemented (timers are a separate follow-up); `launch`
-  without `delay` works today.
+- `delay(ms)` and `withTimeout` are supported: they suspend the plugin-side
+  coroutine and resume on a real timer via the `setTimeout` shim, on the Hermes
+  thread (see [architecture.md](../architecture.md#timers)). `delay(0)` yields to
+  the low-priority queue rather than running inline.
 
 The plugin must therefore only use **direct** calls inside a coroutine (data-path
 calls and state reads/writes); a blocking JS→UI rendezvous outside the active
@@ -291,7 +293,7 @@ and `rememberCoroutineScope` (single-threaded, `Dispatchers.Main`/`.immediate`).
 generics beyond `List<T>`/`MutableList<T>` and `Map<K, V>`/`MutableMap<K, V>`; secondary constructors, named/default arguments;
 overloaded methods, extension and `suspend` functions; block-body overrides;
 `derivedStateOf`/`snapshotFlow`, animations and anything else outside the
-allowlist; `delay(ms)`/timers; stable identity for object/`@RDMA` effect keys;
+allowlist; stable identity for object/`@RDMA` effect keys;
 cross-runtime object identity/`equals`, JNI exception propagation,
 async/Promise returns, batch transfers.
 

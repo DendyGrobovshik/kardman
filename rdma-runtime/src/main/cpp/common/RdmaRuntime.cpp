@@ -114,29 +114,36 @@ void initRdmaRuntime(facebook::rdma::HostContext ctx) {
     // JSI-only install; platform caches were already initialized on the UI thread.
     facebook::rdma::installRdmaComposeBridge(*g_runtime, ctx);
 
-    // Hermes doesn't have console, globalThis — provide stubs
+    // Hermes doesn't have console, globalThis — provide stubs. `console.error` is
+    // required by kotlinx-coroutines-js (its final-resort uncaught-exception path
+    // calls console.error); without it an uncaught coroutine exception turns into
+    // an "undefined is not a function" TypeError that hides the real cause.
     {
         auto& rt = *g_runtime;
         facebook::jsi::Object console(rt);
-        auto logFn = facebook::jsi::Function::createFromHostFunction(
-            rt, facebook::jsi::PropNameID::forAscii(rt, "log"), 0,
-            [](facebook::jsi::Runtime& r, const facebook::jsi::Value&, const facebook::jsi::Value* args, size_t count) {
-                if (count > 0) {
-                    if (args[0].isString()) {
-                        LOGI("JS: %s", args[0].getString(r).utf8(r).c_str());
-                    } else if (args[0].isObject() && args[0].asObject(r).isFunction(r)) {
-                        auto& irt = *(facebook::jsi::IRuntime*)&r;
-                        auto result = args[0].asObject(r).asFunction(r).call(irt, nullptr, 0);
-                        if (result.isString()) {
-                            LOGI("JS: %s", result.getString(r).utf8(r).c_str());
-                        } else if (result.isNumber()) {
-                            LOGI("JS: %d", (int)result.getNumber());
+        auto makeLog = [&rt](const char* level) {
+            return facebook::jsi::Function::createFromHostFunction(
+                rt, facebook::jsi::PropNameID::forAscii(rt, level), 0,
+                [level](facebook::jsi::Runtime& r, const facebook::jsi::Value&, const facebook::jsi::Value* args, size_t count) {
+                    if (count > 0) {
+                        if (args[0].isString()) {
+                            LOGI("JS(%s): %s", level, args[0].getString(r).utf8(r).c_str());
+                        } else if (args[0].isObject() && args[0].asObject(r).isFunction(r)) {
+                            auto& irt = *(facebook::jsi::IRuntime*)&r;
+                            auto result = args[0].asObject(r).asFunction(r).call(irt, nullptr, 0);
+                            if (result.isString()) {
+                                LOGI("JS(%s): %s", level, result.getString(r).utf8(r).c_str());
+                            } else if (result.isNumber()) {
+                                LOGI("JS(%s): %d", level, (int)result.getNumber());
+                            }
                         }
                     }
-                }
-                return facebook::jsi::Value::undefined();
-            });
-        console.setProperty(rt, "log", std::move(logFn));
+                    return facebook::jsi::Value::undefined();
+                });
+        };
+        console.setProperty(rt, "log", makeLog("log"));
+        console.setProperty(rt, "warn", makeLog("warn"));
+        console.setProperty(rt, "error", makeLog("error"));
         rt.global().setProperty(rt, "console", std::move(console));
         rt.global().setProperty(rt, "globalThis", rt.global());
     }
@@ -165,12 +172,12 @@ void initRdmaRuntime(facebook::rdma::HostContext ctx) {
     // Global setTimeout/clearTimeout shims backing kotlinx-coroutines-js. On JS
     // (with no `window`/`process`/`navigator`, as in Hermes) `Dispatchers.Default`
     // and `Dispatchers.Main` are both `SetTimeoutDispatcher` — they dispatch and
-    // resume `delay()` through the global `setTimeout`. The handler is scheduled
-    // onto the Hermes thread via the low-priority self-post queue (rdmaPostJsSelf),
-    // i.e. after any in-flight blocking UI->JS compose work, so coroutine bodies
-    // launched by LaunchedEffect/rememberCoroutineScope run after composition.
-    // Delayed timers are not yet honored (real `delay(ms)` is a follow-up); the
-    // handle returned is a placeholder and clearTimeout is a no-op.
+    // resume `delay()` through the global `setTimeout`. A zero/negative timeout
+    // defers onto the low-priority self-post queue (rdmaPostJsSelf), i.e. after any
+    // in-flight blocking UI->JS compose work, so coroutine bodies launched by
+    // LaunchedEffect/rememberCoroutineScope run after composition. A positive
+    // timeout is a real timer on the Hermes-thread event loop (see
+    // RdmaRendezvous.cpp); clearTimeout cancels it.
     {
         auto& rt = *g_runtime;
         auto setTimeoutFn = facebook::jsi::Function::createFromHostFunction(
@@ -180,22 +187,33 @@ void initRdmaRuntime(facebook::rdma::HostContext ctx) {
                     return facebook::jsi::Value(0.0);
                 }
                 auto fn = std::make_shared<facebook::jsi::Function>(args[0].asObject(r).asFunction(r));
-                facebook::rdma::rdmaPostJsSelf([fn] {
-                    facebook::jsi::Runtime* rt = getRdmaRuntime();
-                    if (!rt) return;
-                    try {
-                        fn->call(*rt, nullptr, 0);
-                    } catch (const facebook::jsi::JSError& e) {
-                        LOGW("JSError in setTimeout handler: %s", e.what());
-                    }
-                });
-                return facebook::jsi::Value(0.0);
+                const double ms = (count >= 2 && args[1].isNumber()) ? args[1].getNumber() : 0.0;
+                if (ms <= 0) {
+                    // Zero/negative timeout: defer to the low-priority queue (yield), never inline.
+                    facebook::rdma::rdmaPostJsSelf([fn] {
+                        facebook::jsi::Runtime* rt = getRdmaRuntime();
+                        if (!rt) return;
+                        try {
+                            fn->call(*rt, nullptr, 0);
+                        } catch (const facebook::jsi::JSError& e) {
+                            LOGW("JSError in setTimeout handler: %s", e.what());
+                        }
+                    });
+                    return facebook::jsi::Value(0.0);
+                }
+                // Positive timeout: real timer. The handle is returned to JS (exact
+                // below 2^53, which the monotonic counter never reaches).
+                const int64_t handle = facebook::rdma::rdmaScheduleTimer(static_cast<int64_t>(ms), fn);
+                return facebook::jsi::Value(static_cast<double>(handle));
             });
         rt.global().setProperty(rt, "setTimeout", std::move(setTimeoutFn));
 
         auto clearTimeoutFn = facebook::jsi::Function::createFromHostFunction(
             rt, facebook::jsi::PropNameID::forAscii(rt, "clearTimeout"), 1,
-            [](facebook::jsi::Runtime&, const facebook::jsi::Value&, const facebook::jsi::Value*, size_t) -> facebook::jsi::Value {
+            [](facebook::jsi::Runtime&, const facebook::jsi::Value&, const facebook::jsi::Value* args, size_t count) -> facebook::jsi::Value {
+                if (count >= 1 && args[0].isNumber()) {
+                    facebook::rdma::rdmaCancelTimer(static_cast<int64_t>(args[0].getNumber()));
+                }
                 return facebook::jsi::Value::undefined();
             });
         rt.global().setProperty(rt, "clearTimeout", std::move(clearTimeoutFn));

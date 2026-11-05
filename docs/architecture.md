@@ -206,6 +206,18 @@ Hermes (no `window`/`process`/`navigator`) the runtime installs a global
 (never mid-`rdmaCallJs`), while `Dispatchers.Main.immediate` runs inline
 (`isDispatchNeeded = false`). See `RdmaRuntime.cpp` and [features.md](user_guide/features.md).
 
+### Timers
+
+`delay(ms)` (and `setTimeout` in general) are honored by a timer heap owned by the
+Hermes thread: `setTimeout(fn, ms)` records an absolute `steady_clock` deadline
+(fixed at the moment of the call) and the event loop sleeps with
+`wait_until(next deadline)` instead of `wait()`. When a deadline passes, the due
+timer's callback is appended to the low-priority queue and runs on the Hermes
+thread like any other async task. `clearTimeout(handle)` cancels a pending timer
+(lazy cancellation via a cancelled-handle set). A due timer runs after any
+high-priority UI→JS task and after already-queued low-priority tasks (it is
+appended to the low queue), so it never preempts composition.
+
 ## Data Flow
 
 ### Constructor call
@@ -275,6 +287,10 @@ UI thread                                Hermes thread
   from the Hermes thread itself. Backs the `setTimeout` shim, i.e. coroutine
   dispatch (`Dispatchers.Main`/`Default`) and `delay` resumption. A coroutine body
   therefore runs only after the blocking composition rendezvous has drained.
+- **Timers** — `delay(ms)`/`setTimeout` with `ms > 0` are held in a timer heap (see
+  [Timers](#timers)); `ms <= 0` is treated as a zero-delay post onto the low queue.
+  A due timer is appended to the low queue, so it fires after any high-priority
+  UI→JS task and after already-queued low-priority tasks — never mid-composition.
 - **Async init** (`RdmaBridge.nativeInit`/`nativeEvalAsset`): `nativeInit` populates all
   JNI caches on the UI thread (app-class `FindClass` needs the app classloader) and then
   starts the Hermes thread; `nativeEvalAsset` enqueues evals asynchronously.
