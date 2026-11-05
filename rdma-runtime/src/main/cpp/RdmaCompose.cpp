@@ -296,6 +296,19 @@ jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o) {
     jclass dbl = env->FindClass("java/lang/Double");
     jclass lng = env->FindClass("java/lang/Long");
     jclass flt = env->FindClass("java/lang/Float");
+    jclass enumCls = env->FindClass("java/lang/Enum");
+
+    // Enum entries cross kernel -> plugin as their name string (any @RDMA enum).
+    jsi::Value enumResult = jsi::Value::undefined();
+    if (enumCls && env->IsInstanceOf(o, enumCls)) {
+        jmethodID enumName = env->GetMethodID(enumCls, "name", "()Ljava/lang/String;");
+        jstring jname = (jstring)env->CallObjectMethod(o, enumName);
+        const char* nameCstr = env->GetStringUTFChars(jname, nullptr);
+        std::string nameStr(nameCstr);
+        env->ReleaseStringUTFChars(jname, nameCstr);
+        env->DeleteLocalRef(jname);
+        enumResult = jsi::String::createFromUtf8(rt, nameStr);
+    }
 
     jsi::Value result = jsi::Value::undefined();
     if (env->IsInstanceOf(o, integer)) {
@@ -327,6 +340,10 @@ jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o) {
         result = jsi::Value((double)env->CallFloatMethod(o, floatValue));
     }
 
+    if (result.isUndefined() && !enumResult.isUndefined()) {
+        result = std::move(enumResult);
+    }
+
     env->DeleteLocalRef(cls);
     env->DeleteLocalRef(integer);
     env->DeleteLocalRef(boolean);
@@ -334,11 +351,12 @@ jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o) {
     env->DeleteLocalRef(dbl);
     env->DeleteLocalRef(lng);
     env->DeleteLocalRef(flt);
+    if (enumCls) env->DeleteLocalRef(enumCls);
     return result;
 }
 
 // Classifies a boxed JVM value into an RdmaResult descriptor (run on the UI thread).
-// Handles Integer/Boolean/Double/Long/Float/String/null; anything else -> Null.
+// Handles Integer/Boolean/Double/Long/Float/String/enum/null; anything else -> Null.
 RdmaResult classifyBoxedValue(JNIEnv* env, jobject o) {
     if (o == nullptr) return RdmaResult::null();
     jclass integer = env->FindClass("java/lang/Integer");
@@ -347,6 +365,7 @@ RdmaResult classifyBoxedValue(JNIEnv* env, jobject o) {
     jclass dbl = env->FindClass("java/lang/Double");
     jclass lng = env->FindClass("java/lang/Long");
     jclass flt = env->FindClass("java/lang/Float");
+    jclass enumCls = env->FindClass("java/lang/Enum");
 
     RdmaResult r;
     if (env->IsInstanceOf(o, integer)) {
@@ -379,6 +398,13 @@ RdmaResult classifyBoxedValue(JNIEnv* env, jobject o) {
     } else if (env->IsInstanceOf(o, flt)) {
         jmethodID floatValue = env->GetMethodID(flt, "floatValue", "()F");
         r = RdmaResult::number((double)env->CallFloatMethod(o, floatValue));
+    } else if (enumCls && env->IsInstanceOf(o, enumCls)) {
+        jmethodID enumName = env->GetMethodID(enumCls, "name", "()Ljava/lang/String;");
+        jstring jname = (jstring)env->CallObjectMethod(o, enumName);
+        const char* nameCstr = env->GetStringUTFChars(jname, nullptr);
+        r = RdmaResult::string(std::string(nameCstr));
+        env->ReleaseStringUTFChars(jname, nameCstr);
+        env->DeleteLocalRef(jname);
     } else {
         r = RdmaResult::null();
     }
@@ -389,6 +415,7 @@ RdmaResult classifyBoxedValue(JNIEnv* env, jobject o) {
     env->DeleteLocalRef(dbl);
     env->DeleteLocalRef(lng);
     env->DeleteLocalRef(flt);
+    if (enumCls) env->DeleteLocalRef(enumCls);
     return r;
 }
 

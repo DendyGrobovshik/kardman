@@ -20,10 +20,13 @@ import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.PropertyInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.RdmaEnumInfo
 import io.github.dendygrobovshik.kardman.types.StaticInfo
+import org.jetbrains.kotlin.descriptors.ClassKind
 import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
 import org.jetbrains.kotlin.descriptors.Modality
 import org.jetbrains.kotlin.ir.declarations.IrClass
+import org.jetbrains.kotlin.ir.declarations.IrEnumEntry
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.declarations.IrProperty
@@ -52,7 +55,39 @@ object RdmaClassExtractor {
             for (declaration in file.declarations) {
                 val cls = declaration as? IrClass ?: continue
                 if (!cls.hasAnnotation(RDMA_ANNOTATION)) continue
+                // @RDMA enums are extracted by [extractEnums] — they cross as name
+                // strings, not as object handles, so they must not reach the class
+                // machinery (constructor/method/proxy generation).
+                if (cls.kind == ClassKind.ENUM_CLASS) continue
                 result.add(ExtractedClass(cls, extractClass(cls)))
+            }
+        }
+        return result
+    }
+
+    /**
+     * Extracts public `@RDMA enum class` declarations. Only the entry names cross the
+     * boundary (as strings); the enum itself never leaves the kernel as an object.
+     */
+    fun extractEnums(moduleFragment: IrModuleFragment): List<RdmaEnumInfo> {
+        val result = mutableListOf<RdmaEnumInfo>()
+        for (file in moduleFragment.files) {
+            for (declaration in file.declarations) {
+                val cls = declaration as? IrClass ?: continue
+                if (!cls.hasAnnotation(RDMA_ANNOTATION)) continue
+                if (cls.kind != ClassKind.ENUM_CLASS) continue
+                val qualifiedName = cls.fqNameWhenAvailable?.asString() ?: cls.name.asString()
+                val entries = cls.declarations
+                    .filterIsInstance<IrEnumEntry>()
+                    .map { it.name.asString() }
+                result.add(
+                    RdmaEnumInfo(
+                        packageName = cls.fqNameWhenAvailable?.parent()?.asString() ?: "",
+                        enumName = cls.name.asString(),
+                        qualifiedName = qualifiedName,
+                        entries = entries,
+                    ),
+                )
             }
         }
         return result

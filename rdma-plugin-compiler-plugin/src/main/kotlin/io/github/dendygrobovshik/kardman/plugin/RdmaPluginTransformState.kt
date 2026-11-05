@@ -47,6 +47,8 @@ object RdmaPluginTransformState {
         private set
     var functions: List<RdmaPluginFunction> = emptyList()
         private set
+    var enums: List<RdmaPluginEnum> = emptyList()
+        private set
 
     private val fileTexts = mutableMapOf<String, String>()
     private val edits = mutableMapOf<String, MutableList<SourceEdit>>()
@@ -88,16 +90,19 @@ object RdmaPluginTransformState {
         usedSymbols.clear()
         val allTypes = mutableListOf<RdmaPluginType>()
         val allFunctions = mutableListOf<RdmaPluginFunction>()
+        val allEnums = mutableListOf<RdmaPluginEnum>()
         for (path in manifestPaths) {
             val file = File(path)
             if (file.exists()) {
                 val manifest = RdmaPluginConfig.parseManifest(file.readText())
                 allTypes += manifest.classes
                 allFunctions += manifest.functions
+                allEnums += manifest.enums
             }
         }
         types = allTypes
         functions = allFunctions
+        enums = allEnums
     }
 
     fun recordUsedSymbol(fqn: String) {
@@ -108,11 +113,15 @@ object RdmaPluginTransformState {
 
     fun isClassQualifiedName(fqn: String): Boolean = types.any { it.qualifiedName == fqn }
 
+    fun enumByQualifiedName(fqn: String): RdmaPluginEnum? = enums.find { it.qualifiedName == fqn }
+
+    fun isEnumQualifiedName(fqn: String): Boolean = enums.any { it.qualifiedName == fqn }
+
     fun isFunctionQualifiedName(fqn: String): Boolean =
         functions.any { it.qualifiedName == fqn } || fqn == runRdmaAppFqn || fqn in composeBridgeable
 
     fun isBridgeableQualifiedName(fqn: String): Boolean =
-        isClassQualifiedName(fqn) || isFunctionQualifiedName(fqn)
+        isClassQualifiedName(fqn) || isFunctionQualifiedName(fqn) || isEnumQualifiedName(fqn)
 
     fun isKernelPackage(fqn: String): Boolean =
         kernelRootPackage.isNotEmpty() && (fqn == kernelRootPackage || fqn.startsWith("$kernelRootPackage."))
@@ -160,6 +169,24 @@ object RdmaPluginTransformState {
         edits.getOrPut(path) { mutableListOf() }.add(SourceEdit(start, end, replacement))
     }
 
+    /** Drops edits fully inside `[start, end)` — used by whole-span rewrites that cover nested expressions. */
+    fun removeEditsWithin(path: String, start: Int, end: Int) {
+        edits[path]?.removeAll { it.start >= start && it.end <= end }
+    }
+
+    /** True if an existing edit fully covers `[start, end)` (a whole-span rewrite above this expression). */
+    fun isCovered(path: String, start: Int, end: Int): Boolean =
+        edits[path]?.any { it.start <= start && it.end >= end } == true
+
+    fun enumOrdinalBridgeName(enumSimpleName: String): String =
+        "rdma" + enumSimpleName + "Ordinal"
+
+    fun enumValueOfBridgeName(enumSimpleName: String): String =
+        "rdma" + enumSimpleName + "ValueOf"
+
+    fun enumJsName(enumSimpleName: String, member: String): String =
+        enumSimpleName.replaceFirstChar { it.lowercase() } + member.replaceFirstChar { it.uppercase() }
+
     fun flush() {
         if (outputDir.isBlank()) return
         val outDir = File(outputDir)
@@ -195,7 +222,32 @@ object RdmaPluginTransformState {
         writeFunctionBridge(outDir)
         writeWidgetBridge(outDir)
         writeStaticBridge(outDir)
+        writeEnumBridge(outDir)
         writeContract(outDir)
+    }
+
+    /**
+     * Plugin-side enum member bridges: `<enum>Ordinal(entryName)` and
+     * `<enum>ValueOf(name)`. Entry *references* are inlined as string literals by the
+     * FIR checkers; only members that need kernel knowledge go through RDMA.
+     */
+    private fun writeEnumBridge(outDir: File) {
+        val bridgeFile = File(outDir, "RdmaEnumBridge.kt")
+        if (enums.isEmpty()) {
+            bridgeFile.delete()
+            return
+        }
+        outDir.mkdirs()
+        val sb = StringBuilder()
+        sb.appendLine("package $pluginPackage")
+        sb.appendLine()
+        for (e in enums) {
+            sb.appendLine("fun ${enumOrdinalBridgeName(e.simpleName)}(entry: dynamic): dynamic = js(\"RDMA\").${enumJsName(e.simpleName, "ordinal")}(entry)")
+            sb.appendLine()
+            sb.appendLine("fun ${enumValueOfBridgeName(e.simpleName)}(name: dynamic): dynamic = js(\"RDMA\").${enumJsName(e.simpleName, "valueOf")}(name)")
+            sb.appendLine()
+        }
+        bridgeFile.writeText(sb.toString())
     }
 
     private fun writeContract(outDir: File) {

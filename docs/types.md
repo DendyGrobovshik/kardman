@@ -25,6 +25,7 @@ allowed types below.
 | Category | Crossing | Where the value lives |
 |---|---|---|
 | Primitives (`Int`, `Long`, `Float`, `Double`, `Boolean`, `String`) | by copy | a copy on each side |
+| `@RDMA` enum | by copy (entry name) | the plugin sees the entry's **name string** (`"GET"`); the kernel materializes it via `valueOf` |
 | `@RDMA` class | by reference (handle) | object lives only in kernel memory; plugin holds a handle |
 | `@RDMA` companion `val` (static) | by reference (handle) | singleton exposed as `RDMA.<class><Name>()` (e.g. `RDMA.alignmentCenter()`) |
 | Function / lambda | registration + callback | body lives in the plugin; kernel holds an id |
@@ -36,6 +37,15 @@ allowed types below.
 
 - **Primitives** cross the boundary by copy. After the call, later mutations on one side
   are not visible on the other.
+- **`@RDMA` enum** crosses by copy as the entry's name string. Entry references in the
+  plugin are rewritten to string literals (`HttpMethod.GET` -> `"GET"`), so `when`
+  compiles to plain JS string equality against the kernel-returned name — no RDMA
+  round trip per condition. `.name` is identity (the value IS the name); `.ordinal`
+  and `valueOf(...)` are validated kernel-side through the `RDMA.<enum>Ordinal` /
+  `RDMA.<enum>ValueOf` host functions. Not supported (yet): `values()`, `List<E>` /
+  `Array<E>` element types, and enums declared in a different kernel module than the
+  one whose bridge marshals them. Exhaustive `when` checking does not apply in the
+  plugin (the subject is dynamic) — an `else` branch is required.
 - **`@RDMA` class** is a reference type. The object is created and kept in the JVM
   (kernel); the plugin receives a proxy handle. Fields/methods are reached through the
   handle, so a mutation happens on the kernel-side object.
@@ -65,9 +75,12 @@ type. A violation is a compile error.
 
 ## Not supported (yet)
 
-- Composite value types: data classes without `@RDMA`, `enum`, `Array`.
+- Composite value types: data classes without `@RDMA`, `Array`.
 - Generics, except the `List<T>` / `MutableList<T>` and `Map<K, V>` / `MutableMap<K, V>` special cases.
 - `suspend` / async functions, overloaded functions/constructors, default parameter values.
+
+`suspend` functions, `enum` classes, and `List`/`Map` collections are supported now;
+see the boundary table above.
 
 ## Base Compose protocol (plugin)
 

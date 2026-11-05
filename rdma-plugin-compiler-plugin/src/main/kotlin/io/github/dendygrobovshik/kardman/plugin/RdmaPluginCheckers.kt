@@ -25,15 +25,19 @@ import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtensi
 import org.jetbrains.kotlin.fir.declarations.FirFile
 import org.jetbrains.kotlin.fir.declarations.FirRegularClass
 import org.jetbrains.kotlin.fir.declarations.FirNamedFunction
+import org.jetbrains.kotlin.fir.expressions.FirExpression
 import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
 import org.jetbrains.kotlin.fir.expressions.FirPropertyAccessExpression
 import org.jetbrains.kotlin.fir.expressions.FirVariableAssignment
 import org.jetbrains.kotlin.fir.references.toResolvedSymbol
+import org.jetbrains.kotlin.fir.symbols.impl.FirCallableSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirConstructorSymbol
+import org.jetbrains.kotlin.fir.symbols.impl.FirEnumEntrySymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirNamedFunctionSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirPropertySymbol
 import org.jetbrains.kotlin.fir.types.ConeClassLikeType
 import org.jetbrains.kotlin.fir.types.coneTypeSafe
+import org.jetbrains.kotlin.fir.types.resolvedType
 import org.jetbrains.kotlin.diagnostics.DiagnosticReporter
 import org.jetbrains.kotlin.diagnostics.reportOn
 import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
@@ -47,13 +51,46 @@ class RdmaPluginAdditionalCheckersExtension(session: FirSession) : FirAdditional
     }
 
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
-        override val functionCallCheckers = setOf(RdmaPluginFunctionCallChecker, RdmaPluginWidgetCallChecker, RdmaPluginComposeCallChecker, RdmaPluginSuspendMethodCallChecker)
-        override val propertyAccessExpressionCheckers = setOf(RdmaPluginPropertyAccessChecker)
+        override val functionCallCheckers = setOf(RdmaPluginFunctionCallChecker, RdmaPluginWidgetCallChecker, RdmaPluginComposeCallChecker, RdmaPluginSuspendMethodCallChecker, RdmaPluginEnumFunctionChecker)
+        override val propertyAccessExpressionCheckers = setOf(RdmaPluginPropertyAccessChecker, RdmaPluginEnumChecker)
         override val variableAssignmentCheckers = setOf(RdmaPluginVariableAssignmentChecker)
     }
 }
 
 private fun filePathOf(context: CheckerContext): String? = context.containingFile?.path
+
+/**
+ * Returns the FQN of the `@RDMA` enum this expression's type refers to, or null.
+ * Covers both enum entry accesses (`HttpMethod.GET` — its type is the enum) and
+ * variables holding an enum value received from the kernel.
+ */
+private fun enumFqnOf(expression: FirExpression): String? {
+    val classId = (expression.resolvedType as? ConeClassLikeType)?.lookupTag?.classId ?: return null
+    val fqn = classId.asSingleFqName().asString()
+    return if (RdmaPluginTransformState.isEnumQualifiedName(fqn)) fqn else null
+}
+
+private fun enumEntryLiteral(expression: FirPropertyAccessExpression): String? {
+    val symbol = expression.calleeReference.toResolvedSymbol<FirCallableSymbol<*>>() as? FirEnumEntrySymbol
+        ?: return null
+    val classId = symbol.callableId?.classId ?: return null
+    val fqn = classId.asSingleFqName().asString()
+    if (!RdmaPluginTransformState.isEnumQualifiedName(fqn)) return null
+    return "\"${symbol.name.asString()}\""
+}
+
+/**
+ * Source text of a call argument with registered `@RDMA` enum entries inlined as
+ * string literals (entry names are compile-time known, so no RDMA round trip).
+ */
+private fun argTextOf(arg: FirExpression, text: String): String {
+    val src = arg.source ?: return ""
+    val raw = text.substring(src.startOffset, src.endOffset).trim()
+    if (arg is FirPropertyAccessExpression) {
+        enumEntryLiteral(arg)?.let { return it }
+    }
+    return raw
+}
 
 private fun endWithNewline(text: String, end: Int): Int {
     var e = end
@@ -142,10 +179,7 @@ object RdmaPluginFunctionCallChecker : FirExpressionChecker<FirFunctionCall>(Mpp
         val path = filePathOf(context) ?: return
         val text = RdmaPluginTransformState.textOf(path)
 
-        val argTexts = expression.argumentList.arguments.map { arg ->
-            val argSrc = arg.source
-            if (argSrc != null) text.substring(argSrc.startOffset, argSrc.endOffset).trim() else ""
-        }
+        val argTexts = expression.argumentList.arguments.map { argTextOf(it, text) }
 
         val subclass = RdmaPluginTransformState.subclassByQualifiedName(fqn)
         if (subclass != null) {
@@ -178,6 +212,9 @@ object RdmaPluginFunctionCallChecker : FirExpressionChecker<FirFunctionCall>(Mpp
         }.joinToString(", ")
 
         val replacement = "js(\"RDMA.create${type.simpleName}(${args.escapeForJs()})\")"
+        // The whole-span replacement embeds the raw arg texts, so any nested edits
+        // (e.g. an inlined enum entry) must be dropped to keep flush() consistent.
+        RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
         RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, replacement)
     }
 }
@@ -220,13 +257,11 @@ object RdmaPluginSuspendMethodCallChecker : FirExpressionChecker<FirFunctionCall
         val text = RdmaPluginTransformState.textOf(path)
 
         val receiver = text.substring(src.startOffset, nameSrc.startOffset).trim().trimEnd('.')
-        val argTexts = expression.argumentList.arguments.map { arg ->
-            val argSrc = arg.source
-            if (argSrc != null) text.substring(argSrc.startOffset, argSrc.endOffset).trim() else ""
-        }
+        val argTexts = expression.argumentList.arguments.map { argTextOf(it, text) }
         val bridge = RdmaPluginTransformState.methodBridgeName(type.simpleName, methodName)
         val replacement = "$bridge(${(listOf(receiver) + argTexts).joinToString(", ")})"
 
+        RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
         RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, replacement)
         RdmaPluginTransformState.recordUsedSymbol(classFqn)
     }
@@ -237,7 +272,6 @@ object RdmaPluginPropertyAccessChecker : FirExpressionChecker<FirPropertyAccessE
     override fun check(expression: FirPropertyAccessExpression) {
         val symbol = expression.calleeReference.toResolvedSymbol<FirPropertySymbol>() ?: return
         val classId = symbol.callableId?.classId ?: return
-
         // Companion object static: `Alignment.Center` -> `rdmaAlignmentCenter()`.
         if (classId.shortClassName.asString() == "Companion") {
             val outer = classId.outerClassId ?: return
@@ -287,13 +321,97 @@ object RdmaPluginVariableAssignmentChecker : FirExpressionChecker<FirVariableAss
         RdmaPluginTransformState.recordUsedSymbol(fqn)
         val src = expression.source ?: return
         val nameSrc = lValue.calleeReference.source ?: return
-        val rValueSrc = expression.rValue.source ?: return
         val path = filePathOf(context) ?: return
         val text = RdmaPluginTransformState.textOf(path)
         val receiver = text.substring(src.startOffset, nameSrc.startOffset)
-        val rValueText = text.substring(rValueSrc.startOffset, rValueSrc.endOffset)
+        val rValueText = argTextOf(expression.rValue, text)
         val setter = "set${propName.replaceFirstChar { it.uppercase() }}"
+        RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
         RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, "$receiver$setter($rValueText)")
+    }
+}
+
+/**
+ * Rewrites `@RDMA` enum usages in the plugin:
+ *  - `HttpMethod.GET`            -> `"GET"`               (entry name is compile-time known)
+ *  - `HttpMethod.GET.name`       -> `"GET"`               (identity under name representation)
+ *  - `HttpMethod.GET.ordinal`    -> `rdmaHttpMethodOrdinal("GET")`
+ *  - `m.name` / `m.ordinal` for an enum-typed receiver — same as above
+ *
+ * `when` needs no special handling: the rewritten conditions are string literals and
+ * the subject is a dynamic string from RDMA, so Kotlin/JS compares plain JS strings.
+ */
+object RdmaPluginEnumChecker : FirExpressionChecker<FirPropertyAccessExpression>(MppCheckerKind.Common) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(expression: FirPropertyAccessExpression) {
+        val path = filePathOf(context) ?: return
+        val src = expression.source ?: return
+
+        // (1) `.name` / `.ordinal` member access on an enum value.
+        val symbol = expression.calleeReference.toResolvedSymbol<FirCallableSymbol<*>>()
+        if (symbol != null) {
+            val member = symbol.name.asString()
+            if (member == "name" || member == "ordinal") {
+                val receiver = expression.explicitReceiver ?: return
+                val enumFqn = enumFqnOf(receiver) ?: return
+                val receiverSrc = receiver.source ?: return
+                val text = RdmaPluginTransformState.textOf(path)
+                val receiverText = text.substring(receiverSrc.startOffset, receiverSrc.endOffset).trim()
+                // A value expression usable as the entry name: an entry access inlines
+                // to its string literal; a variable reference passes through as-is.
+                val receiverValueText = (receiver as? FirPropertyAccessExpression)
+                    ?.let { enumEntryLiteral(it) } ?: receiverText
+                val replacement = if (member == "name") {
+                    // Under the name-string representation the value IS the name.
+                    receiverValueText
+                } else {
+                    "${RdmaPluginTransformState.enumOrdinalBridgeName(enumFqn.substringAfterLast('.'))}($receiverValueText)"
+                }
+                // The whole-span rewrite covers any nested entry access (e.g. the
+                // `HttpMethod.GET` inside `HttpMethod.GET.ordinal`).
+                RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
+                RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, replacement)
+                RdmaPluginTransformState.recordUsedSymbol(enumFqn)
+                return
+            }
+        }
+
+        // (2) Bare enum entry access: `HttpMethod.GET` -> `"GET"`.
+        val literal = enumEntryLiteral(expression) ?: return
+        // Skip if a whole-span rewrite (e.g. `.ordinal`) already covers this span.
+        if (RdmaPluginTransformState.isCovered(path, src.startOffset, src.endOffset)) return
+        RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, literal)
+    }
+}
+
+/**
+ * `HttpMethod.valueOf(x)` -> `rdmaHttpMethodValueOf(x)` (validated by the kernel) and
+ * `HttpMethod.values()` -> compile error (deferred).
+ */
+object RdmaPluginEnumFunctionChecker : FirExpressionChecker<FirFunctionCall>(MppCheckerKind.Common) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(expression: FirFunctionCall) {
+        val symbol = expression.calleeReference.toResolvedSymbol<FirNamedFunctionSymbol>() ?: return
+        val classId = symbol.callableId?.classId ?: return
+        val enumFqn = classId.asSingleFqName().asString()
+        val enum = RdmaPluginTransformState.enumByQualifiedName(enumFqn) ?: return
+        val path = filePathOf(context) ?: return
+        val src = expression.source ?: return
+        when (symbol.name.asString()) {
+            "valueOf" -> {
+                val text = RdmaPluginTransformState.textOf(path)
+                val argTexts = expression.argumentList.arguments.map { argTextOf(it, text) }
+                val bridge = RdmaPluginTransformState.enumValueOfBridgeName(enum.simpleName)
+                RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
+                RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, "$bridge(${argTexts.joinToString(", ")})")
+                RdmaPluginTransformState.recordUsedSymbol(enumFqn)
+            }
+            "values" -> reporter.reportOn(
+                src,
+                FirErrors.UNSUPPORTED,
+                "Enum.values() is not supported in the plugin yet — use explicit entries or a kernel-side @RDMA helper",
+            )
+        }
     }
 }
 

@@ -84,7 +84,7 @@ object RdmaTypeValidator {
             when (t) {
                 is RdmaType.Primitive, is RdmaType.UnitType -> Unit
                 is RdmaType.Ref -> if (!isRdmaClass(t.fqn)) {
-                    errors += "$path: '${t.fqn}' is not a @RDMA type; only @RDMA classes, primitives, functions and lists can cross the runtime boundary"
+                    errors += "$path: '${t.fqn}' is not a @RDMA type; only @RDMA classes, @RDMA enums, primitives, functions and lists can cross the runtime boundary"
                 }
                 is RdmaType.ListType -> check(t.element.type, "$path[]")
                 is RdmaType.MapType -> {
@@ -122,7 +122,7 @@ object RdmaTypeValidator {
 
         fun checkLeaf(fqn: String, path: String) {
             if (fqn !in primitives && !isRdmaClass(fqn)) {
-                errors += "$path: '$fqn' is not a @RDMA type; only @RDMA classes, primitives, functions and lists can cross the runtime boundary"
+                errors += "$path: '$fqn' is not a @RDMA type; only @RDMA classes, @RDMA enums, primitives, functions and lists can cross the runtime boundary"
             }
         }
 

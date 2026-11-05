@@ -52,6 +52,14 @@ data class RdmaPluginParameter(
 data class RdmaPluginManifest(
     val classes: List<RdmaPluginType>,
     val functions: List<RdmaPluginFunction>,
+    val enums: List<RdmaPluginEnum> = emptyList(),
+)
+
+/** A `@RDMA enum` visible to the plugin. Entries cross as name strings. */
+data class RdmaPluginEnum(
+    val simpleName: String,
+    val qualifiedName: String,
+    val entries: List<String> = emptyList(),
 )
 
 object RdmaPluginConfig {
@@ -61,6 +69,8 @@ object RdmaPluginConfig {
         } catch (e: Exception) {
             return RdmaPluginManifest(emptyList(), emptyList())
         }
+
+        val enums = raw.enums.map { RdmaPluginEnum(it.enumName, it.qualifiedName, it.entries) }
 
         val classes = raw.classes.map { cls ->
             val constructorParams = cls.constructors.firstOrNull()
@@ -119,7 +129,7 @@ object RdmaPluginConfig {
             RdmaPluginFunction(fn.name, fn.qualifiedName, fn.composable, parameters, fn.suspend)
         }
 
-        return RdmaPluginManifest(classes, functions)
+        return RdmaPluginManifest(classes, functions, enums)
     }
 
     private fun fqnOf(t: RdmaType): String = when (t) {

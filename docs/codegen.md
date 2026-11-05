@@ -193,6 +193,10 @@ Rewrite rules (all offsets are against the original source text):
 | `LaunchedEffect(keys) { ... }` | `rdmaLaunchedEffect(keys) { ... }` |
 | `rememberCoroutineScope()` | `rdmaRememberCoroutineScope()` |
 | `Alignment.Center` (companion `val`) | `rdmaAlignmentCenter()` |
+| `HttpMethod.GET` (enum entry) | `"GET"` (string literal; entries cross by name) |
+| `HttpMethod.GET.name` | `"GET"` |
+| `HttpMethod.GET.ordinal` | `rdmaHttpMethodOrdinal("GET")` |
+| `HttpMethod.valueOf(x)` | `rdmaHttpMethodValueOf(x)` (kernel-validated) |
 
 Method calls on `@RDMA` receivers are left untouched — they dispatch dynamically
 on the JS proxy. The `ComposeAllowlist` checker rejects any `androidx.compose.*`
@@ -212,6 +216,9 @@ compiler plugin) complete the picture:
   `rdmaRememberCoroutineScope` helpers (the DisposableEffect ones carry the
   guest-side `RdmaDisposableEffectScope` stub)
 - `RdmaWidgetBridge.kt` — per-widget `rdmaXxx` stubs that call `RDMA.composeXxx`
+- `RdmaEnumBridge.kt` — per-enum `rdma<Enum>Ordinal`/`rdma<Enum>ValueOf` bridges
+  calling `RDMA.<enum>Ordinal`/`RDMA.<enum>ValueOf` (entry references themselves are
+  inlined as literals by the FIR checkers and need no bridge)
 
 `jsMain` compiles **only** `build/generated/rdma/`, so the JVM-only original
 source never reaches the JS compiler.

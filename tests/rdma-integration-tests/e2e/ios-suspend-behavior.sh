@@ -137,6 +137,10 @@ step_2_run_and_assert() {
     wait_marker "$log" "SUSPEND_TIMEOUT_OK: result=null"
     wait_marker "$log" "SUSPEND_TIMEOUT_DONE: result=done"
     wait_marker "$log" "SUSPEND_CANCEL_OK"
+    wait_marker "$log" "ENUM_WHEN: get"
+    wait_marker "$log" "ENUM_SUSPEND_WHEN: post"
+    wait_marker "$log" "ENUM_CONFIG: label=method=POST isGet=false"
+    wait_marker "$log" "ENUM_MEMBERS: name=GET ordinal=0 valueOf=true default=true"
 
     kill "$LAUNCH_PID" 2>/dev/null || true
     LAUNCH_PID=""

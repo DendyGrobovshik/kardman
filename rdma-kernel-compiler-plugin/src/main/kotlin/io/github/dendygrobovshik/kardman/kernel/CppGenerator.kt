@@ -23,6 +23,7 @@ import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.StaticInfo
+import io.github.dendygrobovshik.kardman.types.RdmaEnumInfo
 import java.io.OutputStream
 
 class CppGenerator(
@@ -38,17 +39,22 @@ class CppGenerator(
     private val nsOpen: String = if (moduleId.isEmpty()) "" else "namespace $moduleId {\n"
     private val nsClose: String = if (moduleId.isEmpty()) "" else "} // namespace $moduleId\n"
 
-    fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo> = emptyList()) {
+    fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo> = emptyList(), enums: List<RdmaEnumInfo> = emptyList()) {
         val plainFunctions = functions.filter { !it.composable }
-        if (classInfos.isEmpty() && plainFunctions.isEmpty()) return
-        generateJniCacheHeader(classInfos, plainFunctions)
-        generateJniCacheCpp(classInfos, plainFunctions)
+        if (classInfos.isEmpty() && plainFunctions.isEmpty() && enums.isEmpty()) return
+        enumFqns = enums.map { it.qualifiedName }.toSet()
+        generateJniCacheHeader(classInfos, plainFunctions, enums)
+        generateJniCacheCpp(classInfos, plainFunctions, enums)
         for (info in classInfos) {
             generateProxyHeader(info)
             generateProxyCpp(info, classInfos)
         }
-        generateBridge(classInfos, plainFunctions)
+        generateBridge(classInfos, plainFunctions, enums)
     }
+
+    private var enumFqns: Set<String> = emptySet()
+
+    private fun isEnumType(fqn: String): Boolean = fqn in enumFqns
 
     private fun isRdmaClass(typeName: String, allClasses: List<RdmaClassInfo>): Boolean {
         return allClasses.any { it.qualifiedName == typeName }
@@ -88,7 +94,7 @@ class CppGenerator(
         return pkg?.let { "$it.RdmaSuspendBridgeKt" }
     }
 
-    private fun generateJniCacheHeader(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
+    private fun generateJniCacheHeader(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>, enums: List<RdmaEnumInfo>) {
         val out = output("RdmaJniCache$fileSuffix.h", "RdmaJniCache$fileSuffix.h").bufferedWriter()
         out.write("""#pragma once
 #include <jni.h>
@@ -100,6 +106,10 @@ namespace rdma {
 $nsOpen
 struct RdmaJniCache {
     JavaVM* jvm = nullptr;
+    // Shared java.lang.Enum cache: `name()`/`ordinal()` on any enum entry.
+    jclass enumClazz = nullptr;
+    jmethodID enumName = nullptr;
+    jmethodID enumOrdinal = nullptr;
 """)
         for (info in infos) {
             out.write("""
@@ -131,6 +141,10 @@ struct RdmaJniCache {
             out.write("    jclass fn_${fn.name}_clazz = nullptr;\n")
             out.write("    jmethodID fn_${fn.name}_method = nullptr;\n")
         }
+        for (e in enums) {
+            out.write("    jclass enum_${e.enumName}_clazz = nullptr;\n")
+            out.write("    jmethodID enum_${e.enumName}_valueOf = nullptr;\n")
+        }
         val suspendFns = functions.filter { it.suspend }
         val suspendMethods = infos.flatMap { cls -> cls.methods.filter { it.isSuspend }.map { cls to it } }
         if (suspendFns.isNotEmpty() || suspendMethods.isNotEmpty()) {
@@ -147,7 +161,7 @@ struct RdmaJniCache {
         out.close()
     }
 
-    private fun generateJniCacheCpp(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
+    private fun generateJniCacheCpp(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>, enums: List<RdmaEnumInfo>) {
         val out = output("RdmaJniCache$fileSuffix.cpp", "RdmaJniCache$fileSuffix.cpp").bufferedWriter()
         out.write("""#include "RdmaJniCache$fileSuffix.h"
 
@@ -157,7 +171,30 @@ $nsOpen
 RdmaJniCache g_rdmaCache;
 
 void initJniCache(JNIEnv* env) {
+    {
+        jclass localEnum = env->FindClass("java/lang/Enum");
+        if (localEnum) {
+            g_rdmaCache.enumClazz = (jclass)env->NewGlobalRef(localEnum);
+            g_rdmaCache.enumName = env->GetMethodID(g_rdmaCache.enumClazz, "name", "()Ljava/lang/String;");
+            g_rdmaCache.enumOrdinal = env->GetMethodID(g_rdmaCache.enumClazz, "ordinal", "()I");
+            env->DeleteLocalRef(localEnum);
+        }
+    }
 """)
+        for (e in enums) {
+            val jniEnumName = e.qualifiedName.replace('.', '/')
+            val valueOfSig = "(Ljava/lang/String;)L$jniEnumName;"
+            out.write("""
+    {
+        jclass localEnumCls = env->FindClass("$jniEnumName");
+        if (localEnumCls) {
+            g_rdmaCache.enum_${e.enumName}_clazz = (jclass)env->NewGlobalRef(localEnumCls);
+            g_rdmaCache.enum_${e.enumName}_valueOf = env->GetStaticMethodID(g_rdmaCache.enum_${e.enumName}_clazz, "valueOf", "$valueOfSig");
+            env->DeleteLocalRef(localEnumCls);
+        }
+    }
+""")
+        }
         for (info in infos) {
             val jniClassName = info.qualifiedName.replace('.', '/')
             val cacheVar = "${info.className.lowercase()}_cache"
@@ -359,6 +396,11 @@ ${info.className}NativeState::~${info.className}NativeState() {
                 prop.type == "kotlin.String" -> {
                     "auto jstr = (jstring)env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}); auto cstr = env->GetStringUTFChars(jstr, nullptr); auto result = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jstr, cstr); env->DeleteLocalRef(jstr); return result;"
                 }
+                isEnumType(prop.type) -> {
+                    val nullCheck = if (prop.nullable) "if (jret == nullptr) return jsi::Value::null(); " else ""
+                    "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}); $nullCheck" +
+                        "auto jname = (jstring)env->CallObjectMethod(jret, g_rdmaCache.enumName); auto cstr = env->GetStringUTFChars(jname, nullptr); auto result = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jname, cstr); env->DeleteLocalRef(jname); env->DeleteLocalRef(jret); return result;"
+                }
                 prop.type == "kotlin.Int" -> "return jsi::Value((double)env->CallIntMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
                 prop.type == "kotlin.Boolean" -> "return jsi::Value(env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
                 prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "return jsi::Value(env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
@@ -392,6 +434,10 @@ static jsi::Value ${info.className}_${getterName}(jsi::Runtime& r, JavaVM* jvm, 
                     prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getNumber());"
                     prop.type == "kotlin.Long" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jlong)args[0].getNumber());"
                     prop.type == "kotlin.String" -> "auto jstr = env->NewStringUTF(args[0].getString(r).utf8(r).c_str()); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, jstr); env->DeleteLocalRef(jstr);"
+                    isEnumType(prop.type) -> {
+                        val enumName = prop.type.substringAfterLast('.')
+                        "std::string cpp_val = args[0].isNull() ? \"\" : args[0].getString(r).utf8(r); jstring jstr = env->NewStringUTF(cpp_val.c_str()); jobject entry = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, jstr); env->DeleteLocalRef(jstr); checkAndThrowJs(env, r); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, entry);"
+                    }
                     else -> ""
                 }
                 out.write("""
@@ -461,6 +507,16 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     out.write("        } else {\n")
                     out.write("            arg_${param.name} = materializeMap(env, r, jvm, mapObj, \"${param.mapKeyType ?: ""}\", \"${param.mapValueType ?: ""}\");\n")
                     out.write("        }\n")
+                    out.write("    }\n")
+                } else if (isEnumType(param.type)) {
+                    val enumName = param.type.substringAfterLast('.')
+                    out.write("    jobject arg_${param.name} = nullptr;\n")
+                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("        std::string cpp_${param.name} = args[$idx].getString(r).utf8(r);\n")
+                    out.write("        jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
+                    out.write("        arg_${param.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${param.name});\n")
+                    out.write("        env->DeleteLocalRef(j_${param.name});\n")
+                    out.write("        checkAndThrowJs(env, r);\n")
                     out.write("    }\n")
                 } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
@@ -555,6 +611,11 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                             out.write("        return createMapHandle(r, jvm, globalRet, \"${method.mapKeyType ?: ""}\", \"${method.mapValueType ?: ""}\");\n")
                             out.write("    }\n")
                             out.write("    return jsi::Value::null();\n")
+                        } else if (isEnumType(method.returnType)) {
+                            out.write("    auto jname = (jstring)env->CallObjectMethod(jret, g_rdmaCache.enumName);\n")
+                            out.write("    auto cstr = env->GetStringUTFChars(jname, nullptr); auto ret = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jname, cstr); env->DeleteLocalRef(jname);\n")
+                            out.write("    env->DeleteLocalRef(jret);\n")
+                            out.write("    return ret;\n")
                         } else {
                             val rdma = rdmaClassByName(method.returnType, allClasses)
                             if (rdma != null) {
@@ -658,6 +719,16 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     out.write("            arg_${param.name} = materializeMap(env, rt, jvm, mapObj_${param.name}, \"$keyType\", \"$valueType\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
+                } else if (isEnumType(param.type)) {
+                    val enumName = param.type.substringAfterLast('.')
+                    out.write("    jobject arg_${param.name} = nullptr;\n")
+                    out.write("    if (!args[$idx].isNull() && args[$idx].isString()) {\n")
+                    out.write("        std::string cpp_${param.name} = args[$idx].getString(rt).utf8(rt);\n")
+                    out.write("        jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
+                    out.write("        arg_${param.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${param.name});\n")
+                    out.write("        env->DeleteLocalRef(j_${param.name});\n")
+                    out.write("        checkAndThrowJs(env, rt);\n")
+                    out.write("    }\n")
                 } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
@@ -741,7 +812,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
         out.close()
     }
 
-    private fun generateBridge(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
+    private fun generateBridge(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>, enums: List<RdmaEnumInfo> = emptyList()) {
         val out = output("RdmaBridge$fileSuffix.h", "RdmaBridge$fileSuffix.h").bufferedWriter()
         out.write("""#pragma once
 #include <jsi/jsi.h>
@@ -822,6 +893,8 @@ void initUserBridgeJniCaches(JNIEnv* env) {
     initWidgetJniCache(env);
 }
 
+${enumHostFunctions(enums)}
+
 void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
     LOGI("Initializing RDMA user bridge...");
 
@@ -858,6 +931,22 @@ void installUserBridge(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& rdma) {
         for (info in infos) {
             for (static in info.statics) {
                 cpp.write(staticRegistration(info, static))
+            }
+        }
+        for (e in enums) {
+            val jsBase = e.enumName.replaceFirstChar { it.lowercase() }
+            for (suffix in listOf("Ordinal", "ValueOf")) {
+                cpp.write("""
+    {
+        auto fn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "$jsBase$suffix"), 1,
+            [jvm](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                return rdma_enum_${e.enumName}_${suffix.lowercase()}(r, jvm, args, count);
+            }
+        );
+        rdma.setProperty(rt, "$jsBase$suffix", std::move(fn));
+    }
+""")
             }
         }
         cpp.write("""
@@ -1056,6 +1145,17 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
             }
             return "    ${type.cppType} cpp_${p.name} = ${type.fromJsi.replace("%d", idx.toString())};\n"
         }
+        if (isEnumType(p.type)) {
+            val enumName = p.type.substringAfterLast('.')
+            return "    jobject arg_${p.name} = nullptr;\n" +
+                "    if (!args[$idx].isNull()) {\n" +
+                "        std::string cpp_${p.name} = args[$idx].getString(r).utf8(r);\n" +
+                "        jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n" +
+                "        arg_${p.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${p.name});\n" +
+                "        env->DeleteLocalRef(j_${p.name});\n" +
+                "        checkAndThrowJs(env, r);\n" +
+                "    }\n"
+        }
         if (p.isList) {
             return "    jobject arg_${p.name} = nullptr;\n" +
                 "    if (!args[$idx].isNull()) {\n" +
@@ -1112,9 +1212,72 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
         else -> m.returnType
     }
 
+    /**
+     * Host functions backing the plugin-side enum member bridges: `<enum>Ordinal(entry)`
+     * and `<enum>ValueOf(name)`. Both validate through the kernel's `valueOf`, so an
+     * invalid name surfaces as a JS error (the kernel throws IllegalArgumentException).
+     */
+    private fun enumHostFunctions(enums: List<RdmaEnumInfo>): String {
+        if (enums.isEmpty()) return ""
+        val sb = StringBuilder()
+        for (e in enums) {
+            val n = e.enumName
+            sb.append("""
+static jsi::Value rdma_enum_${n}_ordinal(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
+    JNIEnv* env = nullptr;
+    jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (!env || count < 1) return jsi::Value::undefined();
+    std::string name = args[0].isNull() ? "" : args[0].getString(r).utf8(r);
+    jstring jname = env->NewStringUTF(name.c_str());
+    jobject entry = env->CallStaticObjectMethod(g_rdmaCache.enum_${n}_clazz, g_rdmaCache.enum_${n}_valueOf, jname);
+    env->DeleteLocalRef(jname);
+    checkAndThrowJs(env, r);
+    auto result = env->CallIntMethod(entry, g_rdmaCache.enumOrdinal);
+    return jsi::Value((double)result);
+}
+
+static jsi::Value rdma_enum_${n}_valueof(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
+    JNIEnv* env = nullptr;
+    jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (!env || count < 1) return jsi::Value::undefined();
+    std::string name = args[0].isNull() ? "" : args[0].getString(r).utf8(r);
+    jstring jname = env->NewStringUTF(name.c_str());
+    jobject entry = env->CallStaticObjectMethod(g_rdmaCache.enum_${n}_clazz, g_rdmaCache.enum_${n}_valueOf, jname);
+    env->DeleteLocalRef(jname);
+    checkAndThrowJs(env, r);
+    auto jret = (jstring)env->CallObjectMethod(entry, g_rdmaCache.enumName);
+    auto cstr = env->GetStringUTFChars(jret, nullptr);
+    auto ret = jsi::String::createFromUtf8(r, cstr);
+    env->ReleaseStringUTFChars(jret, cstr);
+    env->DeleteLocalRef(jret);
+    return ret;
+}
+
+""")
+        }
+        return sb.toString()
+    }
+
     private fun staticImpl(info: RdmaClassInfo, static: StaticInfo, allClasses: List<RdmaClassInfo>): String {
         val cacheVar = "${info.className.lowercase()}_cache"
         val body = when {
+            isEnumType(static.type) -> {
+                val nullCheck = if (static.nullable) {
+                    "    if (jret == nullptr) { env->DeleteLocalRef(companion); return jsi::Value::null(); }\n"
+                } else ""
+                """
+    jobject companion = env->GetStaticObjectField(g_rdmaCache.$cacheVar.clazz, g_rdmaCache.$cacheVar.companionField);
+    jobject jret = env->CallObjectMethod(companion, g_rdmaCache.$cacheVar.static_get_${static.name});
+$nullCheck    auto jname = (jstring)env->CallObjectMethod(jret, g_rdmaCache.enumName);
+    auto cstr = env->GetStringUTFChars(jname, nullptr);
+    auto ret = jsi::String::createFromUtf8(r, cstr);
+    env->ReleaseStringUTFChars(jname, cstr);
+    env->DeleteLocalRef(jname);
+    env->DeleteLocalRef(jret);
+    env->DeleteLocalRef(companion);
+    return ret;
+"""
+            }
             isObjectRef(static.type) -> {
                 val rdma = rdmaClassByName(static.type, allClasses)
                 val nullCheck = if (static.nullable) {
@@ -1205,12 +1368,26 @@ $body}
                 }
             }
             is RdmaType.Ref -> {
-                "    jobject arg_${p.name} = nullptr;\n" +
-                    "    if (!args[$i].isNull()) {\n" +
-                    "        auto argObj_${p.name} = args[$i].asObject(r);\n" +
-                    "        auto argState_${p.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${p.name}.getNativeState(r));\n" +
-                    "        arg_${p.name} = argState_${p.name}->getObject();\n" +
-                    "    }\n"
+                if (isEnumType(t.fqn)) {
+                    // Enum params cross as their name string; validate + materialize
+                    // the kernel-side entry via the enum's `valueOf`.
+                    val enumName = t.fqn.substringAfterLast('.')
+                    "    jobject arg_${p.name} = nullptr;\n" +
+                        "    if (!args[$i].isNull()) {\n" +
+                        "        std::string cpp_${p.name} = args[$i].getString(r).utf8(r);\n" +
+                        "        jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n" +
+                        "        arg_${p.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${p.name});\n" +
+                        "        env->DeleteLocalRef(j_${p.name});\n" +
+                        "        checkAndThrowJs(env, r);\n" +
+                        "    }\n"
+                } else {
+                    "    jobject arg_${p.name} = nullptr;\n" +
+                        "    if (!args[$i].isNull()) {\n" +
+                        "        auto argObj_${p.name} = args[$i].asObject(r);\n" +
+                        "        auto argState_${p.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${p.name}.getNativeState(r));\n" +
+                        "        arg_${p.name} = argState_${p.name}->getObject();\n" +
+                        "    }\n"
+                }
             }
             is RdmaType.ListType -> {
                 val elem = typeName(t.element)
@@ -1292,17 +1469,27 @@ $body}
                 else -> "    return jsi::Value::undefined();\n"
             }
             is RdmaType.Ref -> {
-                val cls = allClasses.find { it.qualifiedName == t.fqn }?.className
-                if (cls == null) {
+                if (isEnumType(t.fqn)) {
+                    // Enum returns cross as their name string.
                     "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
                         "    checkAndThrowJs(env, r);\n" +
                         (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
-                        "    auto ret = wrapAny(r, jvm, jret);\n    env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
+                        "    auto jname = (jstring)env->CallObjectMethod(jret, g_rdmaCache.enumName);\n" +
+                        "    auto cstr = env->GetStringUTFChars(jname, nullptr); auto ret = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jname, cstr); env->DeleteLocalRef(jname);\n" +
+                        "    env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
                 } else {
-                    "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
-                        "    checkAndThrowJs(env, r);\n" +
-                        (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
-                        "    jobject globalRet = env->NewGlobalRef(jret);\n    env->DeleteLocalRef(jret);\n$deleteJStrings    return create${cls}Wrapper(r, jvm, globalRet);\n"
+                    val cls = allClasses.find { it.qualifiedName == t.fqn }?.className
+                    if (cls == null) {
+                        "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                            "    checkAndThrowJs(env, r);\n" +
+                            (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
+                            "    auto ret = wrapAny(r, jvm, jret);\n    env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
+                    } else {
+                        "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                            "    checkAndThrowJs(env, r);\n" +
+                            (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
+                            "    jobject globalRet = env->NewGlobalRef(jret);\n    env->DeleteLocalRef(jret);\n$deleteJStrings    return create${cls}Wrapper(r, jvm, globalRet);\n"
+                    }
                 }
             }
             is RdmaType.ListType -> {

@@ -148,10 +148,14 @@ or return, function parameter or return, and anything nested inside a `List` or
 function signature — must be an allowed type. A non-`@RDMA` class on the
 boundary is a compile error. Concretely, the following are **not** supported:
 
-- composite value types without `@RDMA` (data classes, `enum`, `Array`);
+- composite value types without `@RDMA` (data classes, `Array`);
 - generics other than the `List<T>` / `MutableList<T>` and `Map<K, V>` / `MutableMap<K, V>` special cases;
 - secondary/overloaded constructors, named arguments, default parameter values;
-- overloaded methods, extension functions, `suspend`/coroutine functions.
+- overloaded methods, extension functions.
+
+`suspend`/coroutine functions and `@RDMA enum class` are supported — see
+[types.md](../types.md) for the enum crossing rules (entries cross as name
+strings; `values()` and enum-in-collection element types are not supported yet).
 
 ## UI
 
@@ -281,17 +285,21 @@ app-update-free updates of both plugin logic and UI.
 **Supported** — `@RDMA` classes (incl. `open` + plugin subclasses), properties
 (`val`/`var`), public methods, companion statics, `@RDMA` top-level functions
 and widgets; types `Int`/`Long`/`Float`/`Double`/`Boolean`/`String` (nullable
-allowed), `@RDMA` references (incl. cross-module), `List<T>`/`MutableList<T>`
+allowed), `@RDMA` references (incl. cross-module), `@RDMA` enums (entries cross
+as name strings; `when`/`.name`/`.ordinal`/`valueOf` — see [types.md](../types.md)),
+`List<T>`/`MutableList<T>`
 (`ArrayList`; see [collections.md](design/collections.md)), `Map<K, V>`/`MutableMap<K, V>`
 (`LinkedHashMap`/`HashMap`/`emptyMap`; see [collections.md](design/collections.md)),
-lambdas, `Unit` returns; UI via the base Compose protocol (`remember`/`mutableStateOf`/widgets +
+lambdas, `Unit` returns; `suspend` functions/methods with timers
+(`delay`/`withTimeoutOrNull`); UI via the base Compose protocol
+(`remember`/`mutableStateOf`/widgets +
 content lambdas and callbacks) plus the `SideEffect`, `DisposableEffect` and
 `LaunchedEffect` effects
 and `rememberCoroutineScope` (single-threaded, `Dispatchers.Main`/`.immediate`).
 
-**Not yet** — non-`@RDMA` value types (`enum`, `Array`, data classes),
-generics beyond `List<T>`/`MutableList<T>` and `Map<K, V>`/`MutableMap<K, V>`; secondary constructors, named/default arguments;
-overloaded methods, extension and `suspend` functions; block-body overrides;
+**Not yet** — non-`@RDMA` value types (`Array`, data classes), `enum.values()` and
+enum element types inside `List`/`Map`, generics beyond `List<T>`/`MutableList<T>` and `Map<K, V>`/`MutableMap<K, V>`; secondary constructors, named/default arguments;
+overloaded methods, extension functions; block-body overrides;
 `derivedStateOf`/`snapshotFlow`, animations and anything else outside the
 allowlist; stable identity for object/`@RDMA` effect keys;
 cross-runtime object identity/`equals`, JNI exception propagation,

@@ -20,6 +20,7 @@ import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.PropertyInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.RdmaEnumInfo
 import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
@@ -310,12 +311,48 @@ class CppGeneratorTest {
         )
     )
 
-    private fun generate(classes: List<RdmaClassInfo>): Map<String, String> {
+    private fun generate(classes: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo> = emptyList(), enums: List<RdmaEnumInfo> = emptyList()): Map<String, String> {
         val files = mutableMapOf<String, ByteArrayOutputStream>()
         CppGenerator { fileName, _ ->
             ByteArrayOutputStream().also { files[fileName] = it }
-        }.generate(classes)
+        }.generate(classes, functions, enums)
         return files.mapValues { it.value.use { it.toString("UTF-8") } }
+    }
+
+    @Test
+    fun `enum cache and host functions are generated`() {
+        val enum = RdmaEnumInfo(
+            packageName = "com.example.kernel",
+            enumName = "HttpMethod",
+            qualifiedName = "com.example.kernel.HttpMethod",
+            entries = listOf("GET", "POST"),
+        )
+        val fn = RdmaFunctionInfo(
+            name = "echoMethod",
+            qualifiedName = "com.example.kernel.echoMethod",
+            facadeClass = "com.example.kernel.Kt",
+            composable = false,
+            parameters = listOf(RdmaParameterInfo("method", RdmaTypeRef(RdmaType.Ref("com.example.kernel.HttpMethod")))),
+            returnType = RdmaTypeRef(RdmaType.Ref("com.example.kernel.HttpMethod")),
+        )
+        val generated = generate(emptyList(), listOf(fn), listOf(enum))
+
+        val cacheH = generated["RdmaJniCache.h"] ?: error("RdmaJniCache.h not generated")
+        assertContains(cacheH, "jclass enumClazz")
+        assertContains(cacheH, "jmethodID enumName")
+        assertContains(cacheH, "jmethodID enumOrdinal")
+        assertContains(cacheH, "jclass enum_HttpMethod_clazz")
+        assertContains(cacheH, "jmethodID enum_HttpMethod_valueOf")
+
+        val bridgeCpp = generated["RdmaBridge.cpp"] ?: error("RdmaBridge.cpp not generated")
+        assertContains(bridgeCpp, """rdma.setProperty(rt, "httpMethodOrdinal"""")
+        assertContains(bridgeCpp, """rdma.setProperty(rt, "httpMethodValueOf"""")
+        assertContains(bridgeCpp, "rdma_enum_HttpMethod_ordinal")
+        assertContains(bridgeCpp, "rdma_enum_HttpMethod_valueof")
+
+        val bridgeCppAll = bridgeCpp
+        assertContains(bridgeCppAll, "enum_HttpMethod_valueOf")
+        assertContains(bridgeCppAll, "CallObjectMethod(jret, g_rdmaCache.enumName)")
     }
 
     private fun generate(vararg classes: RdmaClassInfo) = generate(classes.toList())

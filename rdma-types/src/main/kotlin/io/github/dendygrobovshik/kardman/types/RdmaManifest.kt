@@ -96,6 +96,19 @@ data class RdmaFunctionInfo(
     val suspend: Boolean = false,
 )
 
+/**
+ * A public `@RDMA enum class` in the kernel. Entries cross the boundary as their
+ * **name strings** (by copy): the plugin sees `"GET"` where the kernel sees
+ * `HttpMethod.GET`, so `when` in the plugin compiles to plain JS string equality.
+ */
+@Serializable
+data class RdmaEnumInfo(
+    val packageName: String,
+    val enumName: String,
+    val qualifiedName: String,
+    val entries: List<String> = emptyList(),
+)
+
 @Serializable
 data class RdmaParameterInfo(
     val name: String,
@@ -107,4 +120,5 @@ data class RdmaParameterInfo(
 data class RdmaManifest(
     val classes: List<RdmaClassInfo> = emptyList(),
     val functions: List<RdmaFunctionInfo> = emptyList(),
+    val enums: List<RdmaEnumInfo> = emptyList(),
 )

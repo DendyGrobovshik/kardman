@@ -43,4 +43,12 @@ class RdmaStaticBridgeTest {
         assertEquals("alignmentCenter", RdmaPluginTransformState.staticJsName("Alignment", "Center"))
         assertEquals("contentScaleCrop", RdmaPluginTransformState.staticJsName("ContentScale", "Crop"))
     }
+
+    @Test
+    fun `enum member bridge naming matches C++ JSI names`() {
+        assertEquals("rdmaHttpMethodOrdinal", RdmaPluginTransformState.enumOrdinalBridgeName("HttpMethod"))
+        assertEquals("rdmaHttpMethodValueOf", RdmaPluginTransformState.enumValueOfBridgeName("HttpMethod"))
+        assertEquals("httpMethodOrdinal", RdmaPluginTransformState.enumJsName("HttpMethod", "ordinal"))
+        assertEquals("httpMethodValueOf", RdmaPluginTransformState.enumJsName("HttpMethod", "valueOf"))
+    }
 }

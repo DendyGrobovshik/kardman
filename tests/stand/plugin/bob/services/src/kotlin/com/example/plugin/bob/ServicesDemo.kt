@@ -23,11 +23,16 @@ import com.example.kernel.internal.services.echoIntListList
 import com.example.kernel.internal.services.echoIntListMap
 import com.example.kernel.internal.services.echoIntListSuspend
 import com.example.kernel.internal.services.echoIntMapSuspend
+import com.example.kernel.internal.services.echoMethod
+import com.example.kernel.internal.services.echoMethodSuspend
 import com.example.kernel.internal.services.echoStringMap
+import com.example.kernel.internal.services.defaultMethod
+import com.example.kernel.internal.services.EnumConfig
 import com.example.kernel.internal.services.failNestedSuspend
 import com.example.kernel.internal.services.failSuspend
 import com.example.kernel.internal.services.fetchPlatformInfoSuspend
 import com.example.kernel.internal.services.httpGet
+import com.example.kernel.internal.services.HttpMethod
 import com.example.kernel.internal.services.mapValue
 import com.example.kernel.internal.services.maybeNullSuspend
 import com.example.kernel.internal.services.mutateInPlace
@@ -123,6 +128,7 @@ suspend fun runSuspendDemo() {
     }
 
     runTimerDemo()
+    runEnumDemo()
 }
 
 suspend fun runTimerDemo() {
@@ -141,6 +147,41 @@ suspend fun runTimerDemo() {
     job.cancel()
     delay(30)
     println("SUSPEND_CANCEL_OK")
+}
+
+/**
+ * Enum boundary exercises. Entry references compile to string literals, `when`
+ * matches on plain JS string equality against the kernel-returned value, and the
+ * `ordinal`/`valueOf` members go through the RDMA bridges.
+ */
+suspend fun runEnumDemo() {
+    // Entry reference inlines to "GET"; the kernel echoes the entry back as its name.
+    val echoed = echoMethod(HttpMethod.GET)
+    when (echoed) {
+        HttpMethod.GET -> println("ENUM_WHEN: get")
+        HttpMethod.POST -> println("ENUM_WHEN: post")
+        else -> println("ENUM_WHEN: other")
+    }
+
+    // Pattern matching on a suspend-returned enum value.
+    val suspended = echoMethodSuspend(HttpMethod.POST)
+    when (suspended) {
+        HttpMethod.GET -> println("ENUM_SUSPEND_WHEN: get")
+        HttpMethod.POST -> println("ENUM_SUSPEND_WHEN: post")
+        else -> println("ENUM_SUSPEND_WHEN: other")
+    }
+
+    // Enum-typed constructor argument + mutable enum property round-trip.
+    val config = EnumConfig(HttpMethod.GET)
+    config.method = HttpMethod.POST
+    println("ENUM_CONFIG: label=${config.methodLabel()} isGet=${config.method == HttpMethod.GET}")
+
+    // Members: `.name` is identity (the value IS the name); `.ordinal` and
+    // `valueOf` are validated kernel-side through RDMA.
+    println(
+        "ENUM_MEMBERS: name=${HttpMethod.GET.name} ordinal=${HttpMethod.GET.ordinal} " +
+            "valueOf=${HttpMethod.valueOf("POST") == HttpMethod.POST} default=${defaultMethod() == HttpMethod.POST}",
+    )
 }
 
 fun runListMutationDemo() {

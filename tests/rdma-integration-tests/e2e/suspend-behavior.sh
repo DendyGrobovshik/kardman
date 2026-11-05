@@ -160,6 +160,14 @@ step_15_timer_cancel() {
     wait_logcat "RdmaRuntime" "SUSPEND_CANCEL_OK"
 }
 
+step_16_enum_boundary() {
+    step "16: @RDMA enums cross as name strings (when/name/ordinal/valueOf)"
+    wait_logcat "RdmaRuntime" "ENUM_WHEN: get"
+    wait_logcat "RdmaRuntime" "ENUM_SUSPEND_WHEN: post"
+    wait_logcat "RdmaRuntime" "ENUM_CONFIG: label=method=POST isGet=false"
+    wait_logcat "RdmaRuntime" "ENUM_MEMBERS: name=GET ordinal=0 valueOf=true default=true"
+}
+
 main() {
     adb_dev
     mkdir -p "$VERSIONS_DIR"
@@ -181,6 +189,7 @@ main() {
     step_13_timer_delay
     step_14_timer_timeout
     step_15_timer_cancel
+    step_16_enum_boundary
 
     echo
     echo "ALL SUSPEND-BEHAVIOR STEPS PASSED"

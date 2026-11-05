@@ -16,6 +16,7 @@
 package io.github.dendygrobovshik.kardman.kernel
 
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.RdmaEnumInfo
 import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
@@ -38,16 +39,23 @@ class CAbiCppGenerator(
     private val nsOpen: String = if (moduleId.isEmpty()) "" else "namespace $moduleId {\n"
     private val nsClose: String = if (moduleId.isEmpty()) "" else "} // namespace $moduleId\n"
 
-    fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
+    fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>, enums: List<RdmaEnumInfo> = emptyList()) {
         val plainFunctions = functions.filter { !it.composable }
-        if (classInfos.isEmpty() && plainFunctions.isEmpty()) return
-        generateCAbiHeader(classInfos, plainFunctions)
+        if (classInfos.isEmpty() && plainFunctions.isEmpty() && enums.isEmpty()) return
+        enumFqns = enums.map { it.qualifiedName }.toSet()
+        enumInfos = enums
+        generateCAbiHeader(classInfos, plainFunctions, enums)
         for (info in classInfos) {
             generateProxyHeader(info)
             generateProxyCpp(info, classInfos)
         }
-        generateBridge(classInfos, plainFunctions)
+        generateBridge(classInfos, plainFunctions, enums)
     }
+
+    private var enumFqns: Set<String> = emptySet()
+    private var enumInfos: List<RdmaEnumInfo> = emptyList()
+
+    private fun isEnumType(typeName: String): Boolean = typeName in enumFqns
 
     private fun isRdmaClass(typeName: String, allClasses: List<RdmaClassInfo>): Boolean =
         allClasses.any { it.qualifiedName == typeName }
@@ -63,7 +71,8 @@ class CAbiCppGenerator(
     private fun cParamType(p: RdmaParameterInfo): String = when (val ty = p.type.type) {
         is RdmaType.UnitType -> "void"
         is RdmaType.Primitive -> CAbi.forMemberType(ty.fqn).cppType
-        is RdmaType.Ref -> "void*"
+        // Enums cross as name strings.
+        is RdmaType.Ref -> if (isEnumType(ty.fqn)) "const char*" else "void*"
         is RdmaType.ListType -> "void*"
         is RdmaType.MapType -> "void*"
         is RdmaType.FunctionType -> "int64_t"
@@ -72,11 +81,15 @@ class CAbiCppGenerator(
     private fun cRetType(t: RdmaTypeRef): String = when (val ty = t.type) {
         is RdmaType.UnitType -> "void"
         is RdmaType.Primitive -> CAbi.forMemberType(ty.fqn).cppType
-        is RdmaType.Ref -> "void*"
+        is RdmaType.Ref -> if (isEnumType(ty.fqn)) "const char*" else "void*"
         is RdmaType.ListType -> "void*"
         is RdmaType.MapType -> "void*"
         is RdmaType.FunctionType -> "void*"
     }
+
+    /** C type for a class-member type string (enums cross as `const char*`). */
+    private fun memberCppType(typeName: String): String =
+        if (isEnumType(typeName)) "const char*" else CAbi.forMemberType(typeName).cppType
 
     // ------------------------------------------------------------ C ABI header
 
@@ -92,7 +105,7 @@ class CAbiCppGenerator(
         }
     }
 
-    private fun generateCAbiHeader(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
+    private fun generateCAbiHeader(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>, enums: List<RdmaEnumInfo>) {
         val out = output("RdmaCAbi$fileSuffix.h", "RdmaCAbi$fileSuffix.h").bufferedWriter()
         out.write("""#pragma once
 #include <cstdint>
@@ -105,26 +118,26 @@ class CAbiCppGenerator(
 """)
         for (info in infos) {
             for (ctor in info.constructors) {
-                val params = ctor.parameters.map { CAbi.forMemberType(it.type).cppType to it.name }
+                val params = ctor.parameters.map { memberCppType(it.type) to it.name }
                 out.write(cWrapper("void*", cFn(info.className + "_new"), params) + "\n")
             }
             for (method in info.methods.filter { !it.isSuspend }) {
-                val ret = CAbi.forMemberType(method.returnType).cppType
+                val ret = memberCppType(method.returnType)
                 val params = buildList {
                     add("void*" to "handle")
-                    method.parameters.forEach { add(CAbi.forMemberType(it.type).cppType to it.name) }
+                    method.parameters.forEach { add(memberCppType(it.type) to it.name) }
                 }
                 out.write(cWrapper(ret, cFn(info.className + "_" + method.name), params) + "\n")
             }
             for (prop in info.properties) {
-                val ret = CAbi.forMemberType(prop.type).cppType
+                val ret = memberCppType(prop.type)
                 out.write(cWrapper(ret, cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() }), listOf("void*" to "handle")) + "\n")
                 if (prop.isMutable) {
-                    out.write(cWrapper("void", cFn(info.className + "_set" + prop.name.replaceFirstChar { it.uppercase() }), listOf("void*" to "handle", CAbi.forMemberType(prop.type).cppType to "value")) + "\n")
+                    out.write(cWrapper("void", cFn(info.className + "_set" + prop.name.replaceFirstChar { it.uppercase() }), listOf("void*" to "handle", memberCppType(prop.type) to "value")) + "\n")
                 }
             }
             for (static in info.statics) {
-                val ret = CAbi.forMemberType(static.type).cppType
+                val ret = memberCppType(static.type)
                 out.write(cWrapper(ret, cFn(info.className + "_get" + static.name.replaceFirstChar { it.uppercase() }), emptyList()) + "\n")
             }
             out.write(cWrapper("void", cFn(info.className + "_setVtable"), listOf("void*" to "handle", "void*" to "vtable")) + "\n")
@@ -141,9 +154,13 @@ class CAbiCppGenerator(
         for (info in infos) {
             for (method in info.methods.filter { it.isSuspend }) {
                 val params = listOf("int64_t" to "completionId", "void*" to "receiver") +
-                    method.parameters.map { CAbi.forMemberType(it.type).cppType to it.name }
+                    method.parameters.map { memberCppType(it.type) to it.name }
                 out.write(cWrapper("void", cFn(info.className + "_" + method.name + "Async"), params) + "\n")
             }
+        }
+        for (e in enumInfos) {
+            out.write(cWrapper("int32_t", cFn(e.enumName + "_ordinal"), listOf("const char*" to "entryName")) + "\n")
+            out.write(cWrapper("const char*", cFn(e.enumName + "_valueOf"), listOf("const char*" to "entryName")) + "\n")
         }
         out.write(cWrapper("int32_t", cFn("typeIdOf"), listOf("void*" to "handle")) + "\n")
         out.close()
@@ -226,6 +243,7 @@ ${info.className}NativeState::~${info.className}NativeState() {
                         "    return createMapHandle(r, h, \"$key\", \"$value\");\n"
                 }
                 prop.type == "kotlin.String" -> "    const char* s = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n    return jsi::String::createFromUtf8(r, s);\n"
+                isEnumType(prop.type) -> "    const char* s = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n    return jsi::String::createFromUtf8(r, s);\n"
                 prop.type == "kotlin.Int" -> "    return jsi::Value((double)${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
                 prop.type == "kotlin.Boolean" -> "    return jsi::Value(${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
                 prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "    return jsi::Value(${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
@@ -260,6 +278,7 @@ $body}
                         argExpr = "v"
                     }
                     prop.type == "kotlin.String" -> { argBlock = ""; argExpr = "args[0].getString(r).utf8(r).c_str()" }
+                    isEnumType(prop.type) -> { argBlock = ""; argExpr = "args[0].getString(r).utf8(r).c_str()" }
                     prop.type == "kotlin.Int" -> { argBlock = ""; argExpr = "(int32_t)args[0].getNumber()" }
                     prop.type == "kotlin.Boolean" -> { argBlock = ""; argExpr = "args[0].getBool()" }
                     prop.type == "kotlin.Long" -> { argBlock = ""; argExpr = "(int64_t)args[0].getNumber()" }
@@ -305,6 +324,9 @@ $argBlock    $setFn(state->handle(), $argExpr);
                 if (param.type == "kotlin.String") {
                     out.write("    std::string cpp_${param.name} = args[$idx].getString(r).utf8(r);\n")
                     expr = "cpp_${param.name}.c_str()"
+                } else if (isEnumType(param.type)) {
+                    out.write("    std::string cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n")
+                    expr = "cpp_${param.name}.c_str()"
                 } else if (param.isList || isObjectRef(param.type)) {
                     out.write("    void* arg_${param.name} = nullptr;\n")
                     out.write("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
@@ -341,6 +363,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                     method.isList -> "    return createListHandle(r, jret, \"${method.listElementType ?: ""}\");\n"
                     method.isMap -> "    return createMapHandle(r, jret, \"${method.mapKeyType ?: ""}\", \"${method.mapValueType ?: ""}\");\n"
                     method.returnType == "kotlin.String" -> "    return jsi::String::createFromUtf8(r, jret);\n"
+                    isEnumType(method.returnType) -> "    return jsi::String::createFromUtf8(r, jret);\n"
                     method.returnType == "kotlin.Int" -> "    return jsi::Value((double)jret);\n"
                     method.returnType == "kotlin.Boolean" -> "    return jsi::Value(jret);\n"
                     method.returnType == "kotlin.Double" || method.returnType == "kotlin.Float" -> "    return jsi::Value(jret);\n"
@@ -406,6 +429,9 @@ $argBlock    $setFn(state->handle(), $argExpr);
                 val expr: String
                 if (param.type == "kotlin.String") {
                     out.write("    std::string cpp_${param.name} = args[$idx].getString(rt).utf8(rt);\n")
+                    expr = "cpp_${param.name}.c_str()"
+                } else if (isEnumType(param.type)) {
+                    out.write("    std::string cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(rt).utf8(rt);\n")
                     expr = "cpp_${param.name}.c_str()"
                 } else if (param.isList || isObjectRef(param.type)) {
                     out.write("    void* arg_${param.name} = nullptr;\n")
@@ -474,7 +500,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
 
     // ------------------------------------------------------------------ bridge
 
-    private fun generateBridge(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
+    private fun generateBridge(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>, enums: List<RdmaEnumInfo> = emptyList()) {
         val out = output("RdmaBridge$fileSuffix.h", "RdmaBridge$fileSuffix.h").bufferedWriter()
         out.write("""#pragma once
 #include <jsi/jsi.h>
@@ -530,6 +556,28 @@ $nsOpen
                 cpp.write(staticImpl(info, static, infos))
             }
         }
+        // Enum member bridges: validate through the Kotlin/Native `valueOf`, so an
+        // invalid name surfaces as a kernel-side error via checkKotlinError.
+        for (e in enums) {
+            cpp.write("""
+static jsi::Value rdma_enum_${e.enumName}_ordinal(jsi::Runtime& r, const jsi::Value* args, size_t count) {
+    if (count < 1) return jsi::Value::undefined();
+    std::string name = args[0].isNull() ? "" : args[0].getString(r).utf8(r);
+    auto result = ${cFn(e.enumName + "_ordinal")}(name.c_str());
+    checkKotlinError(r);
+    return jsi::Value((double)result);
+}
+
+static jsi::Value rdma_enum_${e.enumName}_valueof(jsi::Runtime& r, const jsi::Value* args, size_t count) {
+    if (count < 1) return jsi::Value::undefined();
+    std::string name = args[0].isNull() ? "" : args[0].getString(r).utf8(r);
+    auto result = ${cFn(e.enumName + "_valueOf")}(name.c_str());
+    checkKotlinError(r);
+    return jsi::String::createFromUtf8(r, result);
+}
+
+""")
+        }
         cpp.write("""void installUserBridge(jsi::Runtime& rt, jsi::Object& rdma) {
     LOGI("Initializing RDMA user bridge (C ABI)...");
 """)
@@ -564,6 +612,21 @@ $nsOpen
         for (info in infos) {
             for (static in info.statics) {
                 cpp.write(staticRegistration(info, static))
+            }
+        }
+        for (e in enumInfos) {
+            val jsBase = e.enumName.replaceFirstChar { it.lowercase() }
+            for (suffix in listOf("Ordinal", "ValueOf")) {
+                cpp.write("""
+    {
+        auto fn = jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "$jsBase$suffix"), 1,
+            [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                return rdma_enum_${e.enumName}_${suffix.lowercase()}(r, args, count);
+            });
+        rdma.setProperty(rt, "$jsBase$suffix", std::move(fn));
+    }
+""")
             }
         }
         cpp.write("    installRdmaWidgetBridge(rt, rdma);\n")
@@ -755,12 +818,17 @@ $nsClose} // namespace rdma
                     }
                 }
                 is RdmaType.Ref -> {
-                    sb.append("    void* arg_${p.name} = nullptr;\n")
-                    sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
-                    sb.append("        auto argState = std::static_pointer_cast<${rdmaClassByName(ty.fqn, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(args[$idx].asObject(r).getNativeState(r));\n")
-                    sb.append("        if (argState) arg_${p.name} = argState->handle();\n")
-                    sb.append("    }\n")
-                    argNames.add("arg_${p.name}")
+                    if (isEnumType(ty.fqn)) {
+                        sb.append("    std::string cpp_${p.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n")
+                        argNames.add("cpp_${p.name}.c_str()")
+                    } else {
+                        sb.append("    void* arg_${p.name} = nullptr;\n")
+                        sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                        sb.append("        auto argState = std::static_pointer_cast<${rdmaClassByName(ty.fqn, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(args[$idx].asObject(r).getNativeState(r));\n")
+                        sb.append("        if (argState) arg_${p.name} = argState->handle();\n")
+                        sb.append("    }\n")
+                        argNames.add("arg_${p.name}")
+                    }
                 }
                 is RdmaType.ListType -> {
                     sb.append("    void* arg_${p.name} = nullptr;\n")
@@ -794,10 +862,15 @@ $nsClose} // namespace rdma
                 sb.append("    return ${primitiveReturn(ty.fqn, "jret")}\n")
             }
             is RdmaType.Ref -> {
-                val rdma = rdmaClassByName(ty.fqn, allClasses)
-                sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
-                if (rdma != null) sb.append("    return create${rdma.className}Wrapper(r, jret);\n")
-                else sb.append("    return wrapUserObject(r, jret);\n")
+                if (isEnumType(ty.fqn)) {
+                    sb.append("    const char* jret = $call;\n    checkKotlinError(r);\n")
+                    sb.append("    return jsi::String::createFromUtf8(r, jret);\n")
+                } else {
+                    val rdma = rdmaClassByName(ty.fqn, allClasses)
+                    sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
+                    if (rdma != null) sb.append("    return create${rdma.className}Wrapper(r, jret);\n")
+                    else sb.append("    return wrapUserObject(r, jret);\n")
+                }
             }
             is RdmaType.ListType -> {
                 sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
@@ -901,12 +974,17 @@ $nsClose} // namespace rdma
                 }
             }
             is RdmaType.Ref -> {
-                sb.append("    void* arg_${p.name} = nullptr;\n")
-                sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
-                sb.append("        auto argState = std::static_pointer_cast<${rdmaClassByName(ty.fqn, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(args[$idx].asObject(r).getNativeState(r));\n")
-                sb.append("        if (argState) arg_${p.name} = argState->handle();\n")
-                sb.append("    }\n")
-                argNames.add("arg_${p.name}")
+                if (isEnumType(ty.fqn)) {
+                    sb.append("    std::string cpp_${p.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n")
+                    argNames.add("cpp_${p.name}.c_str()")
+                } else {
+                    sb.append("    void* arg_${p.name} = nullptr;\n")
+                    sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                    sb.append("        auto argState = std::static_pointer_cast<${rdmaClassByName(ty.fqn, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(args[$idx].asObject(r).getNativeState(r));\n")
+                    sb.append("        if (argState) arg_${p.name} = argState->handle();\n")
+                    sb.append("    }\n")
+                    argNames.add("arg_${p.name}")
+                }
             }
             is RdmaType.ListType -> {
                 sb.append("    void* arg_${p.name} = nullptr;\n")
@@ -936,6 +1014,9 @@ $nsClose} // namespace rdma
         val type = CAbi.forMemberType(p.type)
         if (p.type == "kotlin.String") {
             sb.append("    std::string cpp_${p.name} = args[$idx].getString(r).utf8(r);\n")
+            argNames.add("cpp_${p.name}.c_str()")
+        } else if (isEnumType(p.type)) {
+            sb.append("    std::string cpp_${p.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n")
             argNames.add("cpp_${p.name}.c_str()")
         } else if (CAbi.isPrimitive(p.type)) {
             val expr = when (p.type) {
@@ -1005,6 +1086,7 @@ $nsClose} // namespace rdma
         val call = "${cFn(info.className + "_get" + static.name.replaceFirstChar { it.uppercase() })}()"
         val body = when {
             static.type == "kotlin.String" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::String::createFromUtf8(r, jret);\n"
+            isEnumType(static.type) -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::String::createFromUtf8(r, jret);\n"
             static.type == "kotlin.Int" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value((double)jret);\n"
             static.type == "kotlin.Boolean" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value(jret);\n"
             static.type == "kotlin.Long" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value((double)jret);\n"

@@ -104,12 +104,17 @@ class RdmaKernelGenerationExtension(
         val classInfos = classes.map { it.info }
         val rdmaClassFqns = classInfos.map { it.qualifiedName }.toSet()
 
+        val enums = RdmaClassExtractor.extractEnums(moduleFragment)
+        val rdmaEnumFqns = enums.map { it.qualifiedName }.toSet()
+
         val functions = RdmaFunctionExtractor.extract(moduleFragment)
-        // A type is bridgeable if it is an @RDMA class declared in this module, or an
-        // @RDMA class resolved from a dependency (another kernel module) via the plugin
-        // context. This is what makes cross-module @RDMA references legal.
+        // A type is bridgeable if it is an @RDMA class declared in this module, an
+        // @RDMA enum, or an @RDMA class resolved from a dependency (another kernel
+        // module) via the plugin context. This is what makes cross-module @RDMA
+        // references legal.
         val isRdmaClass: (String) -> Boolean = { fqn ->
             fqn in rdmaClassFqns ||
+                fqn in rdmaEnumFqns ||
                 pluginContext.referenceClass(ClassId.topLevel(FqName(fqn)))?.owner?.hasAnnotation(RDMA_ANNOTATION) == true
         }
         val errors = functions.flatMap { RdmaTypeValidator.validateFunction(it, isRdmaClass) } +
@@ -186,24 +191,24 @@ class RdmaKernelGenerationExtension(
             CAbiWidgetIrGenerator(pluginContext, moduleFragment, modId, pkg).generate(widgets)
         }
 
-        if (classes.isEmpty() && functions.isEmpty()) return
+        if (classes.isEmpty() && functions.isEmpty() && enums.isEmpty()) return
 
         if (isCapi) {
             kotlinOutputDir?.let { dir ->
                 CAbiKotlinGenerator(modId, pkg) { fileName, _ ->
                     File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
-                }.generate(classInfos, functions)
+                }.generate(classInfos, functions, enums)
             }
             cppOutputDir?.let { dir ->
                 CAbiCppGenerator(modId) { fileName, _ ->
                     File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
-                }.generate(classInfos, functions)
+                }.generate(classInfos, functions, enums)
             }
         } else {
             cppOutputDir?.let { dir ->
                 CppGenerator(modId, pkg) { fileName, _ ->
                     File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
-                }.generate(classInfos, functions)
+                }.generate(classInfos, functions, enums)
             }
             // JVM-side async bridge wrappers for @RDMA suspend functions/methods,
             // compiled into the app (the widget-kotlin dir is added as an app source dir).
@@ -215,7 +220,7 @@ class RdmaKernelGenerationExtension(
         }
 
         jsonOutputDir?.let { dir ->
-            val json = Json.encodeToString(RdmaManifest.serializer(), RdmaManifest(classInfos, functions))
+            val json = Json.encodeToString(RdmaManifest.serializer(), RdmaManifest(classInfos, functions, enums))
             File(dir, "rdma_manifest.json").also { it.parentFile.mkdirs() }.writeText(json)
 
             val index = RdmaSymbolIndexer.index(moduleFragment)

@@ -19,6 +19,7 @@ import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.PropertyInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.RdmaEnumInfo
 import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
 import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
@@ -59,9 +60,11 @@ class CAbiKotlinGenerator(
         val nullable: Boolean = false,
     )
 
-    fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
+    fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>, enums: List<RdmaEnumInfo> = emptyList()) {
         val plainFunctions = functions.filter { !it.composable }
-        if (classInfos.isEmpty() && plainFunctions.isEmpty()) return
+        if (classInfos.isEmpty() && plainFunctions.isEmpty() && enums.isEmpty()) return
+        enumFqns = enums.map { it.qualifiedName }.toSet()
+        enumInfos = enums
 
         val registered = mutableListOf<String>()
         val out = output("RdmaCAbi$fileSuffix.kt", "RdmaCAbi$fileSuffix.kt").bufferedWriter()
@@ -103,10 +106,16 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
             if (fn.suspend) writeSuspendFunction(out, fn, registered)
             else writeFunction(out, fn, registered)
         }
+        writeEnumMembers(out, enums, registered)
         writeTypeIdOf(out, classInfos, registered)
         writeRegistration(out, registered)
         out.close()
     }
+
+    private var enumFqns: Set<String> = emptySet()
+    private var enumInfos: List<RdmaEnumInfo> = emptyList()
+
+    private fun isEnumType(typeName: String): Boolean = typeName in enumFqns
 
     // --------------------------------------------------------------- helpers
 
@@ -116,7 +125,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         m.isList -> if (m.nullable) "COpaquePointer?" else "COpaquePointer"
         m.isMap -> if (m.nullable) "COpaquePointer?" else "COpaquePointer"
         m.type.startsWith("kotlin.Function") -> "Long"
-        m.type == "kotlin.String" -> "CPointer<ByteVar>?"
+        m.type == "kotlin.String" || isEnumType(m.type) -> "CPointer<ByteVar>?"
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> CAbi.forMemberType(m.type).kotlinType
         else -> if (m.nullable) "COpaquePointer?" else "COpaquePointer"
     }
@@ -128,7 +137,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         m.isList -> "COpaquePointer?"
         m.isMap -> "COpaquePointer?"
         m.type.startsWith("kotlin.Function") -> "Long"
-        m.type == "kotlin.String" -> "CPointer<ByteVar>?"
+        m.type == "kotlin.String" || isEnumType(m.type) -> "CPointer<ByteVar>?"
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> CAbi.forMemberType(m.type).kotlinType
         else -> "COpaquePointer?"
     }
@@ -145,6 +154,8 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         }
         return when {
             m.type == "kotlin.String" -> "$expr?.toKString() ?: \"\""
+            // Enum params cross as name strings; validate/materialize via `valueOf`.
+            isEnumType(m.type) -> "${m.type}.valueOf($expr?.toKString() ?: \"\")"
             CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> expr
             m.type.startsWith("kotlin.Function") -> expr
             else -> if (m.nullable) "$expr?.obj<${m.type}>()" else "$expr.obj<${m.type}>()"
@@ -186,13 +197,15 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         m.isList -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
         m.isMap -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
         m.type == "kotlin.String" -> "rdmaStringToCStr($expr ?: \"\")"
+        // Enum returns cross as their name string.
+        isEnumType(m.type) -> "rdmaStringToCStr(($expr).name)"
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> expr
         m.type.startsWith("kotlin.Function") -> expr
         else -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
     }
 
     private fun defaultForC(m: MemberType): String = when {
-        m.isList || m.isMap || m.type == "kotlin.String" -> "null"
+        m.isList || m.isMap || m.type == "kotlin.String" || isEnumType(m.type) -> "null"
         m.type == "kotlin.Int" -> "0"
         m.type == "kotlin.Long" -> "0L"
         m.type == "kotlin.Boolean" -> "false"
@@ -286,7 +299,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
     private fun functionParamKotlinType(t: RdmaTypeRef): String = when (val ty = t.type) {
         is RdmaType.UnitType -> "Unit"
         is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "CPointer<ByteVar>?" else CAbi.forMemberType(ty.fqn).kotlinType
-        is RdmaType.Ref -> "COpaquePointer"
+        is RdmaType.Ref -> if (isEnumType(ty.fqn)) "CPointer<ByteVar>?" else "COpaquePointer"
         is RdmaType.ListType -> "COpaquePointer"
         is RdmaType.MapType -> "COpaquePointer"
         is RdmaType.FunctionType -> "Long"
@@ -295,7 +308,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
     private fun functionReturnKotlinType(t: RdmaTypeRef): String = when (val ty = t.type) {
         is RdmaType.UnitType -> "Unit"
         is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "CPointer<ByteVar>?" else CAbi.forMemberType(ty.fqn).kotlinType
-        is RdmaType.Ref -> "COpaquePointer?"
+        is RdmaType.Ref -> if (isEnumType(ty.fqn)) "CPointer<ByteVar>?" else "COpaquePointer?"
         is RdmaType.ListType -> "COpaquePointer?"
         is RdmaType.MapType -> "COpaquePointer?"
         is RdmaType.FunctionType -> "COpaquePointer?"
@@ -304,7 +317,11 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
     private fun functionParamFromC(p: io.github.dendygrobovshik.kardman.types.RdmaParameterInfo): String = when (val ty = p.type.type) {
         is RdmaType.UnitType -> p.name
         is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "${p.name}?.toKString() ?: \"\"" else p.name
-        is RdmaType.Ref -> if (p.type.nullable) "${p.name}?.obj<${ty.fqn}>()" else "${p.name}.obj<${ty.fqn}>()"
+        is RdmaType.Ref -> when {
+            isEnumType(ty.fqn) -> "${ty.fqn}.valueOf(${p.name}?.toKString() ?: \"\")"
+            p.type.nullable -> "${p.name}?.obj<${ty.fqn}>()"
+            else -> "${p.name}.obj<${ty.fqn}>()"
+        }
         is RdmaType.ListType -> if (p.type.nullable) "${p.name}?.obj<List<${listElemKotlin(ty)}>>()" else "${p.name}.obj<List<${listElemKotlin(ty)}>>()"
         is RdmaType.MapType -> if (p.type.nullable) "${p.name}?.obj<Map<${rdmaTypeKotlin(ty.key.type)}, ${rdmaTypeKotlin(ty.value.type)}>>()" else "${p.name}.obj<Map<${rdmaTypeKotlin(ty.key.type)}, ${rdmaTypeKotlin(ty.value.type)}>>()"
         is RdmaType.FunctionType -> "${p.name}_fn"
@@ -313,7 +330,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
     private fun functionReturnToC(t: RdmaTypeRef, expr: String): String = when (val ty = t.type) {
         is RdmaType.UnitType -> ""
         is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "rdmaStringToCStr($expr ?: \"\")" else expr
-        is RdmaType.Ref -> "$expr.handle()"
+        is RdmaType.Ref -> if (isEnumType(ty.fqn)) "rdmaStringToCStr(($expr).name)" else "$expr.handle()"
         is RdmaType.ListType -> "$expr.handle()"
         is RdmaType.MapType -> "$expr.handle()"
         is RdmaType.FunctionType -> "$expr.handle()"
@@ -341,6 +358,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
             "kotlin.Float" -> "0.0f"
             else -> "null"
         }
+        is RdmaType.Ref -> if (isEnumType(ty.fqn)) "null" else "null"
         else -> "null"
     }
 
@@ -387,10 +405,12 @@ $body}
         val declParams = listOf("completionId: Long") + fn.parameters.map { "${it.name}: ${functionParamKotlinType(it.type)}" }
         val args = fn.parameters.joinToString(", ") { functionParamFromC(it) }
         val call = "${fn.qualifiedName}($args)"
+        // Enum results cross back as their name string.
+        val result = if ((fn.returnType.type as? RdmaType.Ref)?.let { isEnumType(it.fqn) } == true) "($call).name" else call
         out.write("""
 fun $name(${declParams.joinToString(", ")}) {
     RdmaSuspend.launch {
-        try { RdmaSuspend.completeResult(completionId, $call) }
+        try { RdmaSuspend.completeResult(completionId, $result) }
         catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
     }
 }
@@ -404,10 +424,11 @@ fun $name(${declParams.joinToString(", ")}) {
             method.parameters.map { "${it.name}: ${kotlinType(it.toMemberType())}" }
         val args = method.parameters.joinToString(", ") { fromC(it.name, it.toMemberType()) }
         val call = "receiver.obj<${info.qualifiedName}>().${method.name}($args)"
+        val result = if (method.returnType in enumFqns) "($call).name" else call
         out.write("""
 fun $name(${declParams.joinToString(", ")}) {
     RdmaSuspend.launch {
-        try { RdmaSuspend.completeResult(completionId, $call) }
+        try { RdmaSuspend.completeResult(completionId, $result) }
         catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
     }
 }
@@ -415,8 +436,32 @@ fun $name(${declParams.joinToString(", ")}) {
         registered += name
     }
 
-    private fun writeTypeIdOf(out: BufferedWriter, infos: List<RdmaClassInfo>, registered: MutableList<String>) {
-        if (infos.isEmpty()) return
+    /**
+     * Kotlin/Native enum member bridges exposed through the function-pointer registry:
+     * `<Enum>_ordinal(entryName)` and `<Enum>_valueOf(entryName)`. Both validate through
+     * `valueOf`, so an invalid name surfaces as a kernel-side error.
+     */
+    private fun writeEnumMembers(out: BufferedWriter, enums: List<RdmaEnumInfo>, registered: MutableList<String>) {
+        for (e in enums) {
+            val fqn = e.qualifiedName
+            val ordinalName = cName(e.enumName + "_ordinal")
+            val valueOfName = cName(e.enumName + "_valueOf")
+            out.write("""
+fun $ordinalName(entryName: CPointer<ByteVar>?): Int {
+    return rdmaCaptureError(0) { $fqn.valueOf(entryName?.toKString() ?: "").ordinal }
+}
+
+fun $valueOfName(entryName: CPointer<ByteVar>?): CPointer<ByteVar>? {
+    return rdmaCaptureError(null) { rdmaStringToCStr($fqn.valueOf(entryName?.toKString() ?: "").name) }
+}
+
+""")
+            registered += ordinalName
+            registered += valueOfName
+        }
+    }
+
+    private fun writeTypeIdOf(out: BufferedWriter, infos: List<RdmaClassInfo>, registered: MutableList<String>) {        if (infos.isEmpty()) return
         val name = cName("typeIdOf")
         val branches = infos.mapIndexed { i, info ->
             "        is ${info.qualifiedName} -> $i"
