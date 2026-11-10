@@ -16,6 +16,7 @@
 package io.github.dendygrobovshik.kardman.kernel
 
 import io.github.dendygrobovshik.kardman.types.RdmaDeclaration
+import io.github.dendygrobovshik.kardman.types.RdmaParameterSignature
 import io.github.dendygrobovshik.kardman.types.RdmaPolyfill
 import io.github.dendygrobovshik.kardman.types.RdmaSourceRange
 import io.github.dendygrobovshik.kardman.types.RdmaSymbolKind
@@ -27,14 +28,21 @@ import org.jetbrains.kotlin.ir.declarations.IrDeclaration
 import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
 import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.declarations.IrProperty
 import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
+import org.jetbrains.kotlin.ir.declarations.IrValueParameter
 import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrClassReference
 import org.jetbrains.kotlin.ir.expressions.IrConstructorCall
 import org.jetbrains.kotlin.ir.expressions.IrGetField
+import org.jetbrains.kotlin.ir.types.IrSimpleType
+import org.jetbrains.kotlin.ir.types.IrType
+import org.jetbrains.kotlin.ir.types.classFqName
+import org.jetbrains.kotlin.ir.types.typeOrNull
 import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
 import org.jetbrains.kotlin.ir.util.hasAnnotation
+import org.jetbrains.kotlin.ir.util.primaryConstructor
 import org.jetbrains.kotlin.ir.visitors.IrVisitorVoid
 import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
 import org.jetbrains.kotlin.name.FqName
@@ -105,6 +113,38 @@ object RdmaSymbolIndexer {
         return POLYFILL_TARGET_REGEX.find(head)?.groupValues?.get(1)
     }
 
+    /** Regular (non-synthetic) value parameters of a callable, in declaration order. */
+    private fun functionParameters(fn: IrSimpleFunction): List<IrValueParameter> =
+        fn.parameters.filter { it.kind == IrParameterKind.Regular && !it.name.asString().startsWith("$") }
+
+    private fun constructorParameters(cls: IrClass): List<IrValueParameter> =
+        cls.primaryConstructor?.parameters?.filter { it.kind == IrParameterKind.Regular } ?: emptyList()
+
+    private fun signatureOf(params: List<IrValueParameter>, sourceText: String?): List<RdmaParameterSignature> =
+        params.map { RdmaParameterSignature(it.name.asString(), signatureType(it.type), it.defaultValue != null, defaultValueText(it, sourceText)) }
+
+    private fun defaultValueText(p: IrValueParameter, sourceText: String?): String? {
+        val d = p.defaultValue ?: return null
+        if (sourceText == null || d.startOffset < 0 || d.endOffset < d.startOffset || d.endOffset > sourceText.length) return null
+        return sourceText.substring(d.startOffset, d.endOffset).trim()
+    }
+
+    /** A stable type descriptor for the signature classifier (primitives by FQN, lists/maps nested). */
+    private fun signatureType(t: IrType): String {
+        val fqn = t.classFqName?.asString()
+        if (fqn == "kotlin.collections.List" || fqn == "kotlin.collections.MutableList") {
+            val elem = (t as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull ?: return "list:kotlin.Any"
+            return "list:" + signatureType(elem)
+        }
+        if (fqn == "kotlin.collections.Map" || fqn == "kotlin.collections.MutableMap") {
+            val args = (t as? IrSimpleType)?.arguments?.mapNotNull { it.typeOrNull } ?: emptyList()
+            val key = args.getOrNull(0) ?: return "map:kotlin.Any:kotlin.Any"
+            val value = args.getOrNull(1) ?: return "map:${signatureType(key)}:kotlin.Any"
+            return "map:" + signatureType(key) + ":" + signatureType(value)
+        }
+        return fqn ?: "kotlin.Any"
+    }
+
     private fun indexDeclaration(
         decl: IrDeclaration,
         text: String,
@@ -133,6 +173,7 @@ object RdmaSymbolIndexer {
                     isRdma = selfRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
+                    signature = signatureOf(constructorParameters(decl), text),
                 )
                 irToNode[decl] = fqn
                 for (member in decl.declarations) {
@@ -163,6 +204,7 @@ object RdmaSymbolIndexer {
                     sourceRange = RdmaSourceRange(path, start, end),
                     emulatable = !decl.hasAnnotation(COMPOSABLE_ANNOTATION),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
+                    signature = signatureOf(functionParameters(decl), text),
                 )
                 irToNode[decl] = fqn
             }
@@ -214,6 +256,7 @@ object RdmaSymbolIndexer {
                     isRdma = selfRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
+                    signature = signatureOf(constructorParameters(decl), text),
                 )
                 irToNode[decl] = fqn
                 for (member in decl.declarations) {
@@ -234,6 +277,7 @@ object RdmaSymbolIndexer {
                     sourceRange = RdmaSourceRange(path, start, end),
                     emulatable = !decl.hasAnnotation(COMPOSABLE_ANNOTATION),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
+                    signature = signatureOf(functionParameters(decl), text),
                 )
                 irToNode[decl] = containerFqn
             }

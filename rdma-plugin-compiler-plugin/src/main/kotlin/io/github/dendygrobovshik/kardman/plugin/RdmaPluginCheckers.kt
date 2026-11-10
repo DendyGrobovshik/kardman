@@ -27,6 +27,7 @@ import org.jetbrains.kotlin.fir.declarations.FirRegularClass
 import org.jetbrains.kotlin.fir.declarations.FirNamedFunction
 import org.jetbrains.kotlin.fir.expressions.FirExpression
 import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
+import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
 import org.jetbrains.kotlin.fir.expressions.FirPropertyAccessExpression
 import org.jetbrains.kotlin.fir.expressions.FirVariableAssignment
 import org.jetbrains.kotlin.fir.references.toResolvedSymbol
@@ -99,6 +100,36 @@ private fun endWithNewline(text: String, end: Int): Int {
         e++
     }
     return e
+}
+
+/**
+ * Reorders call arguments into the declared parameter order, resolving named arguments by
+ * their declared name (`foo(b = 2, a = 1)` -> `[1, 2]`). Positional arguments fill the front
+ * slots in order; omitted trailing (defaulted) parameters are left out entirely. When
+ * [quoteStrings] is true, arguments bound to a `kotlin.String` parameter are re-quoted as JS
+ * string literals (single quotes), matching the positional marshalling of the generated bridge.
+ */
+private fun orderedArgTexts(
+    arguments: List<FirExpression>,
+    constructorParams: List<Pair<String, String>>,
+    text: String,
+    quoteStrings: Boolean,
+): List<String> {
+    val nameToIndex = constructorParams.mapIndexed { i, (name, _) -> name to i }.toMap()
+    val ordered = arrayOfNulls<String>(constructorParams.size)
+    var positional = 0
+    for (arg in arguments) {
+        val named = arg as? FirNamedArgumentExpression
+        val value = named?.expression ?: arg
+        val idx = if (named != null) nameToIndex[named.name.asString()] else positional++
+        if (idx == null || idx !in ordered.indices) continue
+        var argText = argTextOf(value, text)
+        if (quoteStrings && constructorParams[idx].second == "kotlin.String") {
+            argText = "'${argText.removeSurrounding("\"")}'"
+        }
+        ordered[idx] = argText
+    }
+    return ordered.filterNotNull()
 }
 
 object RdmaPluginFileChecker : FirDeclarationChecker<FirFile>(MppCheckerKind.Common) {
@@ -202,14 +233,12 @@ object RdmaPluginFunctionCallChecker : FirExpressionChecker<FirFunctionCall>(Mpp
 
         val type = RdmaPluginTransformState.typeByQualifiedName(fqn) ?: return
         RdmaPluginTransformState.recordUsedSymbol(fqn)
-        val args = argTexts.mapIndexed { i, argText ->
-            val paramType = type.constructorParams.getOrNull(i)?.second
-            if (paramType == "kotlin.String") {
-                "'${argText.removeSurrounding("\"")}'"
-            } else {
-                argText
-            }
-        }.joinToString(", ")
+        val args = orderedArgTexts(
+            expression.argumentList.arguments,
+            type.constructorParams,
+            text,
+            quoteStrings = true,
+        ).joinToString(", ")
 
         val replacement = "js(\"RDMA.create${type.simpleName}(${args.escapeForJs()})\")"
         // The whole-span replacement embeds the raw arg texts, so any nested edits

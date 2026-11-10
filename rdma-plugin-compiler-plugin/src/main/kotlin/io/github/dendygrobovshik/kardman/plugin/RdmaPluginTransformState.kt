@@ -329,13 +329,14 @@ object RdmaPluginTransformState {
             if (fn.composable) continue
             val bridgeName = bridgeNameFor(fn.qualifiedName)
             val params = fn.parameters.map { p ->
-                when (p.kind) {
+                val base = when (p.kind) {
                     RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE, RdmaParamKind.LIST_HANDLE -> "${p.name}: dynamic"
                     else -> {
                         val inner = (0 until (p.lambdaArity ?: 0)).joinToString(", ") { "dynamic" }
                         "${p.name}: ($inner) -> dynamic"
                     }
                 }
+                if (p.hasDefault) "$base = js(\"undefined\")" else base
             }.joinToString(", ")
             val args = fn.parameters.map { p ->
                 when (p.kind) {
@@ -353,13 +354,14 @@ object RdmaPluginTransformState {
         for (fn in suspendFns) {
             val bridgeName = bridgeNameFor(fn.qualifiedName)
             val params = fn.parameters.map { p ->
-                when (p.kind) {
+                val base = when (p.kind) {
                     RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE, RdmaParamKind.LIST_HANDLE -> "${p.name}: dynamic"
                     else -> {
                         val inner = (0 until (p.lambdaArity ?: 0)).joinToString(", ") { "dynamic" }
                         "${p.name}: ($inner) -> dynamic"
                     }
                 }
+                if (p.hasDefault) "$base = js(\"undefined\")" else base
             }.joinToString(", ")
             val args = fn.parameters.map { p ->
                 when (p.kind) {
@@ -409,7 +411,13 @@ object RdmaPluginTransformState {
         for (fn in widgets) {
             if (!fn.composable) continue
             val bridgeName = bridgeNameFor(fn.qualifiedName)
-            val params = fn.parameters.joinToString(", ") { p -> "${p.name}: ${p.kotlinType}" }
+            val params = fn.parameters.joinToString(", ") { p ->
+                if (p.hasDefault && (p.kind == RdmaParamKind.VALUE || p.kind == RdmaParamKind.LIST_VALUE)) {
+                    "${p.name}: dynamic = js(\"undefined\")"
+                } else {
+                    "${p.name}: ${p.kotlinType}"
+                }
+            }
             val args = fn.parameters.joinToString(", ") { p ->
                 when (p.kind) {
                     RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name

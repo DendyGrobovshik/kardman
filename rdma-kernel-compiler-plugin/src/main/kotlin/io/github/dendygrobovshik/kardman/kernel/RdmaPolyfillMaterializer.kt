@@ -76,7 +76,7 @@ object RdmaPolyfillMaterializer {
             val header = extractHeader(text)
             val body = decls.sortedBy { it.sourceRange?.start ?: Int.MAX_VALUE }
                 .joinToString("\n\n") { decl ->
-                    stripPolyfillAnnotation(stripRdmaAnnotation(rewriteRdmaCalls(sliceDeclaration(text, decl), externalFunctions)))
+                    stripPolyfillAnnotation(stripRdmaAnnotation(injectDefaultPrologue(rewriteRdmaCalls(sliceDeclaration(text, decl), externalFunctions), decl)))
                 }
 
             val content = buildString {
@@ -238,6 +238,71 @@ object RdmaPolyfillMaterializer {
             result = regex.replace(result) { "RDMA.$name" }
         }
         return result
+    }
+
+    /**
+     * Injects a default-parameter prologue into a polyfilled top-level function. The plugin calls
+     * `RDMA.<name>(...)` as a raw JS function, so Kotlin/JS's own default-argument machinery (which
+     * only applies through the typed `$default` bridge) never runs. The prologue re-materializes
+     * each omitted trailing defaulted parameter from the raw `arguments` array.
+     *
+     * `fun foo(a: Int, b: Int = 5): Int = a + b` becomes:
+     * ```
+     * fun foo(a: Int, b: Int = 5): Int {
+     *     var b = b
+     *     if (js("arguments[1] === undefined")) b = (5)
+     *     return a + b
+     * }
+     * ```
+     */
+    private fun injectDefaultPrologue(source: String, decl: RdmaDeclaration): String {
+        val sig = decl.signature ?: return source
+        val defaulted = sig.indices.filter { sig[it].hasDefault && sig[it].defaultValue != null }
+        if (defaulted.isEmpty()) return source
+        val funIdx = source.indexOf("fun ")
+        if (funIdx < 0) return source
+        val open = source.indexOf('(', funIdx)
+        if (open < 0) return source
+        val close = matchingParen(source, open) ?: return source
+        val after = source.substring(close + 1)
+        val eqRel = after.indexOf('=')
+        val braceRel = after.indexOf('{')
+
+        val prologue = defaulted.joinToString("") { i ->
+            val name = sig[i].name
+            val d = sig[i].defaultValue
+            "    var $name = $name\n    if (js(\"arguments[$i] === undefined\")) $name = ($d)\n"
+        }
+
+        return if (braceRel >= 0 && (eqRel < 0 || braceRel < eqRel)) {
+            // Block body: insert the prologue right after the opening brace.
+            val braceAbs = close + 1 + braceRel
+            source.substring(0, braceAbs + 1) + "\n" + prologue + source.substring(braceAbs + 1)
+        } else if (eqRel >= 0) {
+            // Expression body: rewrite to a block body with the prologue + `return expr`.
+            val eqAbs = close + 1 + eqRel
+            val head = source.substring(0, eqAbs).trimEnd()
+            val expr = source.substring(eqAbs + 1).trim()
+            "$head {\n$prologue    return $expr\n}"
+        } else {
+            source
+        }
+    }
+
+    private fun matchingParen(source: String, open: Int): Int? {
+        var depth = 0
+        var i = open
+        while (i < source.length) {
+            when (source[i]) {
+                '(' -> depth++
+                ')' -> {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
+            i++
+        }
+        return null
     }
 
     private fun registrationBlock(entries: Set<String>, analysis: RdmaAnalysis): String {

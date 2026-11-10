@@ -25,8 +25,10 @@ import io.github.dendygrobovshik.kardman.types.StaticInfo
 import org.jetbrains.kotlin.descriptors.ClassKind
 import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
 import org.jetbrains.kotlin.descriptors.Modality
+import org.jetbrains.kotlin.ir.PsiIrFileEntry
 import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.declarations.IrEnumEntry
+import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.declarations.IrProperty
@@ -42,6 +44,7 @@ import org.jetbrains.kotlin.ir.util.hasAnnotation
 import org.jetbrains.kotlin.ir.util.primaryConstructor
 import org.jetbrains.kotlin.ir.util.properties
 import org.jetbrains.kotlin.name.FqName
+import java.io.File
 
 private val RDMA_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RDMA")
 
@@ -52,6 +55,7 @@ object RdmaClassExtractor {
     fun extractWithClasses(moduleFragment: IrModuleFragment): List<ExtractedClass> {
         val result = mutableListOf<ExtractedClass>()
         for (file in moduleFragment.files) {
+            val sourceText = readSource(file)
             for (declaration in file.declarations) {
                 val cls = declaration as? IrClass ?: continue
                 if (!cls.hasAnnotation(RDMA_ANNOTATION)) continue
@@ -59,10 +63,26 @@ object RdmaClassExtractor {
                 // strings, not as object handles, so they must not reach the class
                 // machinery (constructor/method/proxy generation).
                 if (cls.kind == ClassKind.ENUM_CLASS) continue
-                result.add(ExtractedClass(cls, extractClass(cls)))
+                result.add(ExtractedClass(cls, extractClass(cls, sourceText)))
             }
         }
         return result
+    }
+
+    private fun readSource(file: IrFile): String? {
+        val psiText = (file.fileEntry as? PsiIrFileEntry)?.psiFile?.text
+        if (psiText != null) return psiText
+        return try {
+            File(file.fileEntry.name).takeIf { it.isFile }?.readText()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun defaultValueText(p: IrValueParameter, sourceText: String?): String? {
+        val d = p.defaultValue ?: return null
+        if (sourceText == null || d.startOffset < 0 || d.endOffset < d.startOffset || d.endOffset > sourceText.length) return null
+        return sourceText.substring(d.startOffset, d.endOffset).trim()
     }
 
     /**
@@ -93,14 +113,14 @@ object RdmaClassExtractor {
         return result
     }
 
-    fun extractClass(cls: IrClass): RdmaClassInfo {
+    fun extractClass(cls: IrClass, sourceText: String? = null): RdmaClassInfo {
         val qualifiedName = cls.fqNameWhenAvailable?.asString() ?: cls.name.asString()
         val packageName = cls.fqNameWhenAvailable?.parent()?.asString() ?: ""
         val className = cls.name.asString()
 
         val constructors = buildList {
             val primary = cls.primaryConstructor ?: return@buildList
-            add(ConstructorInfo(primary.valueParams().map { it.toParameterInfo() }))
+            add(ConstructorInfo(primary.valueParams().map { it.toParameterInfo(sourceText) }))
         }
 
         val methods = cls.functions
@@ -115,7 +135,7 @@ object RdmaClassExtractor {
                 MethodInfo(
                     name = fn.name.asString(),
                     returnType = fn.returnType.toTypeName(),
-                    parameters = fn.valueParams().map { it.toParameterInfo() },
+                    parameters = fn.valueParams().map { it.toParameterInfo(sourceText) },
                     nullableReturn = fn.returnType.isNullable(),
                     isOpen = isOpen,
                     isSuspend = fn.isSuspend,
@@ -179,12 +199,14 @@ object RdmaClassExtractor {
             .toList()
     }
 
-    private fun IrValueParameter.toParameterInfo(): ParameterInfo {
+    private fun IrValueParameter.toParameterInfo(sourceText: String?): ParameterInfo {
         val typeName = type.toTypeName()
         return ParameterInfo(
             name = name.asString(),
             type = typeName,
             nullable = type.isNullable(),
+            hasDefault = defaultValue != null,
+            defaultValue = defaultValueText(this, sourceText),
             isList = type.isList(),
             listElementType = type.listElementType(),
             isMap = type.isMap(),

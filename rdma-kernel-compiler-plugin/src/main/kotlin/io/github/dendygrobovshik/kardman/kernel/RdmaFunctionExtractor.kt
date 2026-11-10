@@ -19,6 +19,8 @@ import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
 import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
+import org.jetbrains.kotlin.ir.PsiIrFileEntry
+import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
@@ -39,6 +41,7 @@ object RdmaFunctionExtractor {
     fun extract(moduleFragment: IrModuleFragment): List<RdmaFunctionInfo> {
         val result = mutableListOf<RdmaFunctionInfo>()
         for (file in moduleFragment.files) {
+            val sourceText = readSource(file)
             for (declaration in file.declarations) {
                 val fn = declaration as? IrSimpleFunction ?: continue
                 if (!fn.hasAnnotation(RDMA_ANNOTATION)) continue
@@ -62,7 +65,7 @@ object RdmaFunctionExtractor {
                 val parameters = fn.parameters
                     .filter { it.kind == IrParameterKind.Regular }
                     .filter { !it.name.asString().startsWith("$") }
-                    .map { p -> toParameterInfo(p) }
+                    .map { p -> toParameterInfo(p, sourceText) }
                 val returnType = if (composable) {
                     RdmaTypeRef(RdmaType.UnitType)
                 } else {
@@ -74,6 +77,22 @@ object RdmaFunctionExtractor {
         return result
     }
 
+    private fun readSource(file: IrFile): String? {
+        val psiText = (file.fileEntry as? PsiIrFileEntry)?.psiFile?.text
+        if (psiText != null) return psiText
+        return try {
+            File(file.fileEntry.name).takeIf { it.isFile }?.readText()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun defaultValueText(p: IrValueParameter, sourceText: String?): String? {
+        val d = p.defaultValue ?: return null
+        if (sourceText == null || d.startOffset < 0 || d.endOffset < d.startOffset || d.endOffset > sourceText.length) return null
+        return sourceText.substring(d.startOffset, d.endOffset).trim()
+    }
+
     /**
      * Classifies a single parameter into VALUE / CONTENT / CALLBACK.
      *
@@ -81,14 +100,16 @@ object RdmaFunctionExtractor {
      * so a function type that contains a `Composer` parameter is a content lambda; a function type
      * without one is a plain callback. We record the logical (un-lowered) function type.
      */
-    private fun toParameterInfo(p: IrValueParameter): RdmaParameterInfo {
-        val simple = p.type as? IrSimpleType ?: return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type))
+    private fun toParameterInfo(p: IrValueParameter, sourceText: String?): RdmaParameterInfo {
+        val hasDefault = p.defaultValue != null
+        val defaultText = defaultValueText(p, sourceText)
+        val simple = p.type as? IrSimpleType ?: return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type), hasDefault = hasDefault, defaultValue = defaultText)
         val fqn = p.type.classFqName?.asString()
         if (fqn == null || !fqn.startsWith("kotlin.Function")) {
-            return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type))
+            return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type), hasDefault = hasDefault, defaultValue = defaultText)
         }
         val args = simple.arguments.mapNotNull { it.typeOrNull }
-        if (args.isEmpty()) return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type))
+        if (args.isEmpty()) return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type), hasDefault = hasDefault, defaultValue = defaultText)
         val composerIdx = args.dropLast(1).indexOfFirst { it.classFqName?.asString() == COMPOSER_FQN }
         return if (composerIdx >= 0) {
             val userParams = args.subList(0, composerIdx).map { RdmaTypeParser.toRdmaTypeRef(it) }
@@ -96,6 +117,8 @@ object RdmaFunctionExtractor {
                 name = p.name.asString(),
                 type = RdmaTypeRef(RdmaType.FunctionType(userParams, RdmaTypeRef(RdmaType.UnitType))),
                 composable = true,
+                hasDefault = hasDefault,
+                defaultValue = defaultText,
             )
         } else {
             val userParams = args.dropLast(1).map { RdmaTypeParser.toRdmaTypeRef(it) }
@@ -104,6 +127,8 @@ object RdmaFunctionExtractor {
                 name = p.name.asString(),
                 type = RdmaTypeRef(RdmaType.FunctionType(userParams, returnType)),
                 composable = false,
+                hasDefault = hasDefault,
+                defaultValue = defaultText,
             )
         }
     }

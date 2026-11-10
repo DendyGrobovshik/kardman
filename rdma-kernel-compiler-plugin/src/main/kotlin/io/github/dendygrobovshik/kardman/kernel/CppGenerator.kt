@@ -141,6 +141,22 @@ struct RdmaJniCache {
             out.write("    jclass fn_${fn.name}_clazz = nullptr;\n")
             out.write("    jmethodID fn_${fn.name}_method = nullptr;\n")
         }
+        val hasDefaulted = functions.any { !it.suspend && it.parameters.any { p -> p.hasDefault } } ||
+            infos.any { c -> c.constructors.any { it.parameters.any { p -> p.hasDefault } } || c.methods.any { m -> !m.isSuspend && m.parameters.any { p -> p.hasDefault } } }
+        if (hasDefaulted) {
+            out.write("    jclass wrappersClazz = nullptr;\n")
+            for (fn in functions.filter { !it.suspend && it.parameters.any { p -> p.hasDefault } }) {
+                out.write("    jmethodID fn_${fn.name}_rdma = nullptr;\n")
+            }
+            for (info in infos) {
+                if (info.constructors.any { it.parameters.any { p -> p.hasDefault } }) {
+                    out.write("    jmethodID ctor_${info.className}_rdma = nullptr;\n")
+                }
+                for (method in info.methods.filter { !it.isSuspend && it.parameters.any { p -> p.hasDefault } }) {
+                    out.write("    jmethodID method_${info.className}_${method.name}_rdma = nullptr;\n")
+                }
+            }
+        }
         for (e in enums) {
             out.write("    jclass enum_${e.enumName}_clazz = nullptr;\n")
             out.write("    jmethodID enum_${e.enumName}_valueOf = nullptr;\n")
@@ -259,6 +275,36 @@ void initJniCache(JNIEnv* env) {
         }
         val suspendFns = functions.filter { it.suspend }
         val suspendMethods = infos.flatMap { cls -> cls.methods.filter { it.isSuspend }.map { cls to it } }
+        val defaultedFns = functions.filter { !it.suspend && it.parameters.any { p -> p.hasDefault } }
+        val defaultedCtorInfos = infos.filter { it.constructors.any { c -> c.parameters.any { p -> p.hasDefault } } }
+        val defaultedMethods = infos.flatMap { cls -> cls.methods.filter { !it.isSuspend && it.parameters.any { p -> p.hasDefault } }.map { cls to it } }
+        if (defaultedFns.isNotEmpty() || defaultedCtorInfos.isNotEmpty() || defaultedMethods.isNotEmpty()) {
+            val wrappersFacade = "$kernelPackage.RdmaDefaultWrappersKt".replace('.', '/')
+            out.write("""
+    {
+        jclass localWrappers = env->FindClass("$wrappersFacade");
+        g_rdmaCache.wrappersClazz = (jclass)env->NewGlobalRef(localWrappers);
+        env->DeleteLocalRef(localWrappers);
+    }
+""")
+            for (fn in defaultedFns) {
+                val paramSig = fn.parameters.joinToString("") { jniSignature(it.type) } + "I"
+                val retSig = jniReturnSignature(fn.returnType)
+                out.write("    g_rdmaCache.fn_${fn.name}_rdma = env->GetStaticMethodID(g_rdmaCache.wrappersClazz, \"${fn.name}_rdma_default\", \"($paramSig)$retSig\");\n")
+            }
+            for (info in defaultedCtorInfos) {
+                val ctor = info.constructors.first { it.parameters.any { p -> p.hasDefault } }
+                val paramSig = ctor.parameters.joinToString("") { JniTypeMapper.jniSignature(it.type) } + "I"
+                val retSig = "L${info.qualifiedName.replace('.', '/')};"
+                out.write("    g_rdmaCache.ctor_${info.className}_rdma = env->GetStaticMethodID(g_rdmaCache.wrappersClazz, \"${info.className}_new_rdma_default\", \"($paramSig)$retSig\");\n")
+            }
+            for ((cls, m) in defaultedMethods) {
+                val receiverSig = "L${cls.qualifiedName.replace('.', '/')};"
+                val paramSig = receiverSig + m.parameters.joinToString("") { JniTypeMapper.jniSignature(it.type) } + "I"
+                val retSig = JniTypeMapper.jniSignature(m.returnType)
+                out.write("    g_rdmaCache.method_${cls.className}_${m.name}_rdma = env->GetStaticMethodID(g_rdmaCache.wrappersClazz, \"${cls.className}_${m.name}_rdma_default\", \"($paramSig)$retSig\");\n")
+            }
+        }
         if (suspendFns.isNotEmpty() || suspendMethods.isNotEmpty()) {
             suspendFacade(infos, functions)?.let { facade ->
                 val facadePath = facade.replace('.', '/')
@@ -458,6 +504,7 @@ static jsi::Value ${info.className}_${setterName}(jsi::Runtime& r, JavaVM* jvm, 
             val paramCount = method.parameters.size
             val returnType = JniTypeMapper.forType(method.returnType)
             val isVoid = JniTypeMapper.isVoid(method.returnType)
+            val hasDefaults = method.parameters.any { it.hasDefault }
 
             out.write("""
 static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value& thisVal, const jsi::Value* args, size_t count) {
@@ -476,11 +523,24 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
             }
             out.write("""
 """)
+            if (hasDefaults) {
+                out.write("    int mask = 0;\n")
+            }
             for (param in method.parameters) {
                 val type = JniTypeMapper.forType(param.type)
                 val idx = method.parameters.indexOf(param)
+                val guarded = param.hasDefault
                 if (type != null) {
-                    if (param.nullable) {
+                    if (guarded) {
+                        val zero = when (param.type) {
+                            "kotlin.Int" -> "0"
+                            "kotlin.Long" -> "0"
+                            "kotlin.Boolean" -> "false"
+                            else -> "0.0"
+                        }
+                        out.write("    ${type.cppType} cpp_${param.name} = $zero;\n")
+                        out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = ${type.fromJsi.replace("%d", idx.toString())}; } else { mask |= (1 << $idx); }\n")
+                    } else if (param.nullable) {
                         out.write("    ${type.cppType} cpp_${param.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.fromJsi.replace("%d", idx.toString())});\n")
                     } else {
                         val extractExpr = type.fromJsi.replace("%d", idx.toString())
@@ -488,7 +548,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     }
                 } else if (param.isList) {
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto listObj = args[$idx].asObject(r);\n")
                     out.write("        if (listObj.hasNativeState(r)) {\n")
                     out.write("            auto ns = listObj.getNativeState(r);\n")
@@ -497,9 +557,10 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     out.write("            arg_${param.name} = materializeArray(env, r, jvm, listObj, \"${param.listElementType ?: ""}\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (param.isMap) {
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto mapObj = args[$idx].asObject(r);\n")
                     out.write("        if (mapObj.hasNativeState(r)) {\n")
                     out.write("            auto ns = mapObj.getNativeState(r);\n")
@@ -508,28 +569,35 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     out.write("            arg_${param.name} = materializeMap(env, r, jvm, mapObj, \"${param.mapKeyType ?: ""}\", \"${param.mapValueType ?: ""}\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (isEnumType(param.type)) {
                     val enumName = param.type.substringAfterLast('.')
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        std::string cpp_${param.name} = args[$idx].getString(r).utf8(r);\n")
                     out.write("        jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
                     out.write("        arg_${param.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${param.name});\n")
                     out.write("        env->DeleteLocalRef(j_${param.name});\n")
                     out.write("        checkAndThrowJs(env, r);\n")
                     out.write("    }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
-                        out.write("    if (!args[$idx].isNull()) {\n")
+                        out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                         out.write("        auto argObj_${param.name} = args[$idx].asObject(r);\n")
                         out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(r));\n")
                         out.write("        arg_${param.name} = argState_${param.name}->getObject();\n")
                         out.write("    }\n")
+                        if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     } else {
-                        out.write("    auto argObj_${param.name} = args[$idx].asObject(r);\n")
-                        out.write("    auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(r));\n")
-                        out.write("    jobject arg_${param.name} = argState_${param.name}->getObject();\n")
+                        out.write("    jobject arg_${param.name} = nullptr;\n")
+                        out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                        out.write("        auto argObj_${param.name} = args[$idx].asObject(r);\n")
+                        out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(r));\n")
+                        out.write("        arg_${param.name} = argState_${param.name}->getObject();\n")
+                        out.write("    }\n")
+                        if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     }
                 }
             }
@@ -558,10 +626,21 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     }
                 }
             }
-            val paramsCall = if (paramsStr.isNotEmpty()) ", $paramsStr" else ""
+            // For a defaulted method the C++ calls the generated static wrapper
+            // `<Class>_<method>_rdma_default(self, params..., mask)` instead of the instance method.
+            val paramsCall = if (hasDefaults) {
+                val base = if (paramsStr.isNotEmpty()) "$paramsStr, " else ""
+                ", ${base}mask"
+            } else if (paramsStr.isNotEmpty()) ", $paramsStr" else ""
+            val methodField = if (hasDefaults) "method_${info.className}_${method.name}_rdma" else "method_${method.name}"
 
             if (isVoid) {
-                out.write("    env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});\n")
+                val call = if (hasDefaults) {
+                    "env->CallStaticVoidMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);"
+                } else {
+                    "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
+                }
+                out.write("    $call\n")
                 out.write("    checkAndThrowJs(env, r);\n")
                 for (param in method.parameters) {
                     if (param.type == "kotlin.String") {
@@ -571,13 +650,13 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                 out.write("    return jsi::Value::undefined();\n")
             } else {
                 val callExpr = when (method.returnType) {
-                    "kotlin.String" -> "auto jret = (jstring)env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
-                    "kotlin.Int" -> "auto result = env->CallIntMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
-                    "kotlin.Boolean" -> "auto result = env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
-                    "kotlin.Double", "kotlin.Float" -> "auto result = env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
-                    "kotlin.Long" -> "auto result = env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
+                    "kotlin.String" -> if (hasDefaults) "auto jret = (jstring)env->CallStaticObjectMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto jret = (jstring)env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
+                    "kotlin.Int" -> if (hasDefaults) "auto result = env->CallStaticIntMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto result = env->CallIntMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
+                    "kotlin.Boolean" -> if (hasDefaults) "auto result = env->CallStaticBooleanMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto result = env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
+                    "kotlin.Double", "kotlin.Float" -> if (hasDefaults) "auto result = env->CallStaticDoubleMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto result = env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
+                    "kotlin.Long" -> if (hasDefaults) "auto result = env->CallStaticLongMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto result = env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
                     else -> if (isObjectRef(method.returnType) || method.isList || method.isMap) {
-                        "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.method_${method.name}${paramsCall});"
+                        if (hasDefaults) "auto jret = env->CallStaticObjectMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
                     } else ""
                 }
                 out.write("    $callExpr\n")
@@ -688,16 +767,31 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
 
 """)
         for (ctor in info.constructors) {
+            val hasDefaults = ctor.parameters.any { it.hasDefault }
+            if (hasDefaults) out.write("    int mask = 0;\n")
             var idx = 0
             for (param in ctor.parameters) {
                 val type = JniTypeMapper.forType(param.type)
+                val guarded = param.hasDefault
                 if (type != null) {
-                    val extract = type.fromJsi.replace("%d", idx.toString())
-                    out.write("    ${type.cppType} cpp_${param.name} = $extract;\n")
+                    if (guarded) {
+                        val zero = when (param.type) {
+                            "kotlin.Int" -> "0"
+                            "kotlin.Long" -> "0"
+                            "kotlin.Boolean" -> "false"
+                            else -> "0.0"
+                        }
+                        val extract = type.fromJsi.replace("%d", idx.toString())
+                        out.write("    ${type.cppType} cpp_${param.name} = $zero;\n")
+                        out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = $extract; } else { mask |= (1 << $idx); }\n")
+                    } else {
+                        val extract = type.fromJsi.replace("%d", idx.toString())
+                        out.write("    ${type.cppType} cpp_${param.name} = $extract;\n")
+                    }
                 } else if (param.isList) {
                     val elemType = param.listElementType ?: "kotlin.Any"
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto listObj_${param.name} = args[$idx].asObject(rt);\n")
                     out.write("        if (listObj_${param.name}.hasNativeState(rt)) {\n")
                     out.write("            auto ns_${param.name} = listObj_${param.name}.getNativeState(rt);\n")
@@ -706,11 +800,12 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     out.write("            arg_${param.name} = materializeArray(env, rt, jvm, listObj_${param.name}, \"$elemType\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (param.isMap) {
                     val keyType = param.mapKeyType ?: "kotlin.Any"
                     val valueType = param.mapValueType ?: "kotlin.Any"
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto mapObj_${param.name} = args[$idx].asObject(rt);\n")
                     out.write("        if (mapObj_${param.name}.hasNativeState(rt)) {\n")
                     out.write("            auto ns_${param.name} = mapObj_${param.name}.getNativeState(rt);\n")
@@ -719,28 +814,35 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     out.write("            arg_${param.name} = materializeMap(env, rt, jvm, mapObj_${param.name}, \"$keyType\", \"$valueType\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (isEnumType(param.type)) {
                     val enumName = param.type.substringAfterLast('.')
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isNull() && args[$idx].isString()) {\n")
+                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull() && args[$idx].isString()) {\n")
                     out.write("        std::string cpp_${param.name} = args[$idx].getString(rt).utf8(rt);\n")
                     out.write("        jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
                     out.write("        arg_${param.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${param.name});\n")
                     out.write("        env->DeleteLocalRef(j_${param.name});\n")
                     out.write("        checkAndThrowJs(env, rt);\n")
                     out.write("    }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
-                        out.write("    if (!args[$idx].isNull() && args[$idx].isObject() && args[$idx].asObject(rt).hasNativeState(rt)) {\n")
+                        out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull() && args[$idx].isObject() && args[$idx].asObject(rt).hasNativeState(rt)) {\n")
                         out.write("        auto argObj_${param.name} = args[$idx].asObject(rt);\n")
                         out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(rt));\n")
                         out.write("        if (argState_${param.name}) arg_${param.name} = argState_${param.name}->getObject();\n")
                         out.write("    }\n")
+                        if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     } else {
-                        out.write("    auto argObj_${param.name} = args[$idx].asObject(rt);\n")
-                        out.write("    auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(rt));\n")
-                        out.write("    jobject arg_${param.name} = argState_${param.name}->getObject();\n")
+                        out.write("    jobject arg_${param.name} = nullptr;\n")
+                        out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                        out.write("        auto argObj_${param.name} = args[$idx].asObject(rt);\n")
+                        out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(rt));\n")
+                        out.write("        arg_${param.name} = argState_${param.name}->getObject();\n")
+                        out.write("    }\n")
+                        if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     }
                 }
                 idx++
@@ -765,7 +867,12 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     }
                 }
             }
-            out.write("    jobject localObj = env->NewObject(g_rdmaCache.${cacheVar}.clazz, g_rdmaCache.${cacheVar}.constructor${if (params.isNotEmpty()) ", $params" else ""});\n")
+            if (hasDefaults) {
+                val callArgs = if (params.isEmpty()) "mask" else "$params, mask"
+                out.write("    jobject localObj = env->CallStaticObjectMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.ctor_${info.className}_rdma, $callArgs);\n")
+            } else {
+                out.write("    jobject localObj = env->NewObject(g_rdmaCache.${cacheVar}.clazz, g_rdmaCache.${cacheVar}.constructor${if (params.isNotEmpty()) ", $params" else ""});\n")
+            }
             for (param in ctor.parameters) {
                 if (param.type == "kotlin.String") {
                     out.write("    env->DeleteLocalRef(j_${param.name});\n")
@@ -1027,18 +1134,25 @@ $nsClose} // namespace rdma
 
     private fun functionImpl(fn: RdmaFunctionInfo, allClasses: List<RdmaClassInfo>): String {
         val sb = StringBuilder()
+        val hasDefaults = fn.parameters.any { it.hasDefault }
         sb.append("""
 static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
     if (!env) return jsi::Value::undefined();
 """)
+        if (hasDefaults) sb.append("    int mask = 0;\n")
         fn.parameters.forEachIndexed { i, p ->
-            sb.append(functionParamExtraction(p, i, allClasses))
+            sb.append(functionParamExtraction(p, i, allClasses, p.hasDefault))
         }
         val argsStr = fn.parameters.joinToString(", ") { callArg(it) }
-        val callSuffix = if (argsStr.isEmpty()) "" else ", $argsStr"
-        sb.append(functionReturnMarshaling(fn, allClasses, callSuffix))
+        val parts = mutableListOf<String>()
+        if (argsStr.isNotEmpty()) parts.add(argsStr)
+        if (hasDefaults) parts.add("mask")
+        val callSuffix = if (parts.isEmpty()) "" else ", " + parts.joinToString(", ")
+        val marshaling = functionReturnMarshaling(fn, allClasses, callSuffix)
+            .let { if (hasDefaults) it.replace("fn_${fn.name}_method", "fn_${fn.name}_rdma") else it }
+        sb.append(marshaling)
         sb.append("}\n\n")
         return sb.toString()
     }
@@ -1072,7 +1186,7 @@ static jsi::Value rdma_suspend_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const js
     rdmaRegisterSuspendResultType(completionId, "$typeDesc");
 """)
         fn.parameters.forEachIndexed { i, p ->
-            sb.append(functionParamExtraction(p, i + 1, allClasses))
+            sb.append(functionParamExtraction(p, i + 1, allClasses, guarded = false))
         }
         val argsStr = fn.parameters.joinToString(", ") { callArg(it) }
         val callSuffix = if (argsStr.isEmpty()) "" else ", $argsStr"
@@ -1353,46 +1467,63 @@ $body}
     }
 """
 
-    private fun functionParamExtraction(p: RdmaParameterInfo, i: Int, allClasses: List<RdmaClassInfo>): String =
-        when (val t = p.type.type) {
+    private fun functionParamExtraction(p: RdmaParameterInfo, i: Int, allClasses: List<RdmaClassInfo>, guarded: Boolean): String {
+        fun maskLine(): String = if (guarded) "    if (args[$i].isUndefined()) mask |= (1 << $i);\n" else ""
+        fun notUndef() = if (guarded) "!args[$i].isUndefined() && " else ""
+        return when (val t = p.type.type) {
             is RdmaType.Primitive -> {
                 if (t.fqn == "kotlin.String") {
-                    if (p.type.nullable) {
+                    if (guarded) {
+                        "    std::string cpp_${p.name};\n" +
+                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = args[$i].isNull() ? \"\" : args[$i].getString(r).utf8(r); } else { mask |= (1 << $i); }\n" +
+                            "    jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n"
+                    } else if (p.type.nullable) {
                         "    std::string cpp_${p.name} = args[$i].isNull() ? \"\" : args[$i].getString(r).utf8(r);\n    jstring j_${p.name} = args[$i].isNull() ? nullptr : env->NewStringUTF(cpp_${p.name}.c_str());\n"
                     } else {
                         "    std::string cpp_${p.name} = args[$i].getString(r).utf8(r);\n    jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n"
                     }
                 } else {
                     val jt = JniTypeMapper.forType(t.fqn) ?: return ""
-                    "    ${jt.cppType} cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())};\n"
+                    if (guarded) {
+                        val zero = when (t.fqn) {
+                            "kotlin.Int" -> "0"
+                            "kotlin.Long" -> "0"
+                            "kotlin.Boolean" -> "false"
+                            else -> "0.0"
+                        }
+                        "    ${jt.cppType} cpp_${p.name} = $zero;\n" +
+                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())}; } else { mask |= (1 << $i); }\n"
+                    } else {
+                        "    ${jt.cppType} cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())};\n"
+                    }
                 }
             }
             is RdmaType.Ref -> {
                 if (isEnumType(t.fqn)) {
-                    // Enum params cross as their name string; validate + materialize
-                    // the kernel-side entry via the enum's `valueOf`.
                     val enumName = t.fqn.substringAfterLast('.')
                     "    jobject arg_${p.name} = nullptr;\n" +
-                        "    if (!args[$i].isNull()) {\n" +
+                        "    if (${notUndef()}!args[$i].isNull()) {\n" +
                         "        std::string cpp_${p.name} = args[$i].getString(r).utf8(r);\n" +
                         "        jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n" +
                         "        arg_${p.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${p.name});\n" +
                         "        env->DeleteLocalRef(j_${p.name});\n" +
                         "        checkAndThrowJs(env, r);\n" +
-                        "    }\n"
+                        "    }\n" +
+                        maskLine()
                 } else {
                     "    jobject arg_${p.name} = nullptr;\n" +
-                        "    if (!args[$i].isNull()) {\n" +
+                        "    if (${notUndef()}!args[$i].isNull()) {\n" +
                         "        auto argObj_${p.name} = args[$i].asObject(r);\n" +
                         "        auto argState_${p.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${p.name}.getNativeState(r));\n" +
                         "        arg_${p.name} = argState_${p.name}->getObject();\n" +
-                        "    }\n"
+                        "    }\n" +
+                        maskLine()
                 }
             }
             is RdmaType.ListType -> {
                 val elem = typeName(t.element)
                 "    jobject arg_${p.name} = nullptr;\n" +
-                    "    if (!args[$i].isNull()) {\n" +
+                    "    if (${notUndef()}!args[$i].isNull()) {\n" +
                     "        auto listObj_${p.name} = args[$i].asObject(r);\n" +
                     "        if (listObj_${p.name}.hasNativeState(r)) {\n" +
                     "            auto ns_${p.name} = listObj_${p.name}.getNativeState(r);\n" +
@@ -1400,13 +1531,14 @@ $body}
                     "        } else {\n" +
                     "            arg_${p.name} = materializeArray(env, r, jvm, listObj_${p.name}, \"$elem\");\n" +
                     "        }\n" +
-                    "    }\n"
+                    "    }\n" +
+                    maskLine()
             }
             is RdmaType.MapType -> {
                 val key = typeName(t.key)
                 val value = typeName(t.value)
                 "    jobject arg_${p.name} = nullptr;\n" +
-                    "    if (!args[$i].isNull()) {\n" +
+                    "    if (${notUndef()}!args[$i].isNull()) {\n" +
                     "        auto mapObj_${p.name} = args[$i].asObject(r);\n" +
                     "        if (mapObj_${p.name}.hasNativeState(r)) {\n" +
                     "            auto ns_${p.name} = mapObj_${p.name}.getNativeState(r);\n" +
@@ -1414,15 +1546,23 @@ $body}
                     "        } else {\n" +
                     "            arg_${p.name} = materializeMap(env, r, jvm, mapObj_${p.name}, \"$key\", \"$value\");\n" +
                     "        }\n" +
-                    "    }\n"
+                    "    }\n" +
+                    maskLine()
             }
             is RdmaType.FunctionType -> {
                 val arity = t.parameters.size
-                "    jlong id_${p.name} = (jlong)args[$i].getNumber();\n" +
-                    "    jobject arg_${p.name} = createRdmaFunction(env, $arity, id_${p.name});\n"
+                if (guarded) {
+                    "    jlong id_${p.name} = 0;\n" +
+                        "    if (!args[$i].isUndefined()) { id_${p.name} = (jlong)args[$i].getNumber(); } else { mask |= (1 << $i); }\n" +
+                        "    jobject arg_${p.name} = createRdmaFunction(env, $arity, id_${p.name});\n"
+                } else {
+                    "    jlong id_${p.name} = (jlong)args[$i].getNumber();\n" +
+                        "    jobject arg_${p.name} = createRdmaFunction(env, $arity, id_${p.name});\n"
+                }
             }
             is RdmaType.UnitType -> ""
         }
+    }
 
     private fun callArg(p: RdmaParameterInfo): String = when (val t = p.type.type) {
         is RdmaType.Primitive -> when (t.fqn) {

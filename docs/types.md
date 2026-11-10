@@ -77,10 +77,28 @@ type. A violation is a compile error.
 
 - Composite value types: data classes without `@RDMA`, `Array`.
 - Generics, except the `List<T>` / `MutableList<T>` and `Map<K, V>` / `MutableMap<K, V>` special cases.
-- `suspend` / async functions, overloaded functions/constructors, default parameter values.
+- Overloaded functions/constructors.
 
 `suspend` functions, `enum` classes, and `List`/`Map` collections are supported now;
 see the boundary table above.
+
+## Default parameter values
+
+`@RDMA` functions, methods and constructors may declare default parameter values
+(`fun foo(a: Int, b: Int = 5)`), with two rules:
+
+- **Trailing only** — once a parameter has a default, every later parameter must
+  have one too. This is enforced at compile time, because it is what makes adding a
+  defaulted parameter a purely *appending* operation.
+- **Evaluated on the receiving side** — the plugin forwards only the arguments the
+  caller actually wrote; a missing (or `undefined`) trailing argument is filled with
+  the default by the native bridge (via a mask) or the dynamic polyfill (via a
+  prologue). The default expression must compile in both the native kernel and the
+  JS polyfill.
+
+Adding a new trailing defaulted parameter is **forward- and backward-compatible**;
+reordering, removing, renaming, retyping, or inserting a parameter anywhere else is
+a release-time error (see [compatibility.md](design/compatibility.md)).
 
 ## Base Compose protocol (plugin)
 

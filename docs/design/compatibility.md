@@ -152,6 +152,29 @@ The compiler does not distinguish level 2 from level 3 (the materializer just fa
 - A non-emulatable `S` can be removed only by: honest removal after migration (no users left) or a manual polyfill (→ emulatable, in `R`). We **monitor and prevent** such situations: before removing a non-emulatable symbol we force the plugin authors to update (see §7.4), and we remove only when we are sure nobody is harmed.
 - A removed FQN is **tombstoned** (§2.1): it never reappears, so an old plugin cannot get "a new symbol with the same name but different semantics".
 
+### 5.6 Parameter-level compatibility (default parameters)
+
+The changelog's compatibility signal is a whole-declaration hash, which cannot tell a
+*compatible* parameter-list change from a *breaking* one. The release pipeline therefore
+runs a structural **signature check** on every `@RDMA` callable (function, method,
+constructor), diffing the ordered parameter list `(name, type, hasDefault)` against the
+committed baseline:
+
+| Change | Verdict |
+|---|---|
+| identical list (body / default *value* changed) | ✅ compatible — normal `modify` → `F` / bake |
+| appended one or more **trailing defaulted** parameters | ✅ compatible — old callers pass fewer arguments; the runtime fills the default |
+| reorder / remove / rename / retype a parameter | ❌ release rejected |
+| insert a parameter before the end | ❌ release rejected |
+| add a **required** (non-defaulted) parameter | ❌ release rejected |
+
+The only *compatible* signature change is appending trailing defaulted parameters, which is
+why defaulted parameters are constrained to be trailing (§ "Default parameter values" in
+[types.md](../types.md)). A defaulted parameter added this way is filled on the **receiving**
+side — the native bridge fills it via a bitmask, the dynamic polyfill via a prologue that
+checks `arguments.length` — so both an old plugin (forward) and a new plugin that does not
+use the new parameter (backward) keep working.
+
 ## 6. Polyfills
 
 ### 6.1 What goes into a polyfill (dirty subgraph)

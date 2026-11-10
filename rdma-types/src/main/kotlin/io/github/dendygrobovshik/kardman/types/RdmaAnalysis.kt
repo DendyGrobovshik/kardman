@@ -57,6 +57,11 @@ data class RdmaSourceRange(
  *
  * [isMutable] is `true` for `var` properties; used by shared-state detection (§6.5) to decide
  * whether a polyfill can be cut into delta pieces.
+ *
+ * [signature] is the ordered parameter list (name, type, hasDefault) of a callable boundary
+ * symbol (top-level function, class method, or a class's primary constructor). It is what the
+ * release-time [RdmaSignatureClassifier] diffs to reject incompatible signature changes
+ * (reorder / remove / rename / type change / non-trailing insertion / adding a required param).
  */
 @Serializable
 data class RdmaDeclaration(
@@ -68,6 +73,17 @@ data class RdmaDeclaration(
     val emulatable: Boolean = true,
     val deprecated: Boolean = false,
     val isMutable: Boolean = false,
+    val signature: List<RdmaParameterSignature>? = null,
+)
+
+/** A single callable parameter as seen by the release-time signature classifier. */
+@Serializable
+data class RdmaParameterSignature(
+    val name: String,
+    val type: String,
+    val hasDefault: Boolean = false,
+    /** Source text of the default expression (used to fill a masked parameter in a polyfill). */
+    val defaultValue: String? = null,
 )
 
 /** A directed "uses" edge: `from` references `to`. Both are collapsed polyfill-node fqns. */
@@ -106,4 +122,11 @@ data class RdmaAnalysis(
 data class RdmaHashesFile(
     val moduleId: String,
     val hashes: Map<String, String> = emptyMap(),
+)
+
+/** The committed signature baseline in `versions/<moduleId>/rdma_signatures.json`. */
+@Serializable
+data class RdmaSignaturesFile(
+    val moduleId: String,
+    val signatures: Map<String, List<RdmaParameterSignature>> = emptyMap(),
 )

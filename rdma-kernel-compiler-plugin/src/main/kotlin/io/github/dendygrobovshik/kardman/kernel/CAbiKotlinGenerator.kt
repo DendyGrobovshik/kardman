@@ -219,11 +219,28 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
     private fun writeCtor(out: BufferedWriter, info: RdmaClassInfo, registered: MutableList<String>) {
         for (ctor in info.constructors) {
             val name = cName(info.className + "_new")
-            val params = ctor.parameters.joinToString(", ") { "${it.name}: ${kotlinType(it.toMemberType())}" }
-            val args = ctor.parameters.joinToString(", ") { fromC(it.name, it.toMemberType()) }
+            val hasDefaults = ctor.parameters.any { it.hasDefault }
+            val params = buildString {
+                append(ctor.parameters.joinToString(", ") { "${it.name}: ${kotlinType(it.toMemberType())}" })
+                if (hasDefaults) {
+                    if (ctor.parameters.isNotEmpty()) append(", ")
+                    append("mask: Int")
+                }
+            }
+            val resolutions = StringBuilder()
+            val args = ctor.parameters.mapIndexed { i, p ->
+                val converted = fromC(p.name, p.toMemberType())
+                if (p.hasDefault && p.defaultValue != null) {
+                    val rn = "${p.name}_rdma"
+                    resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
+                    rn
+                } else {
+                    converted
+                }
+            }.joinToString(", ")
             out.write("""
 fun $name($params): COpaquePointer {
-    return ${info.qualifiedName}($args).handle()
+$resolutions    return ${info.qualifiedName}($args).handle()
 }
 """)
             registered += name
@@ -233,16 +250,28 @@ fun $name($params): COpaquePointer {
     private fun writeMethod(out: BufferedWriter, info: RdmaClassInfo, method: MethodInfo, registered: MutableList<String>) {
         val retM = MemberType(method.returnType, method.isList, method.listElementType, method.isMap, method.mapKeyType, method.mapValueType, method.nullableReturn)
         val name = cName(info.className + "_" + method.name)
+        val hasDefaults = method.parameters.any { it.hasDefault }
         val params = buildList {
             add("handle: COpaquePointer")
             method.parameters.forEach { add("${it.name}: ${kotlinType(it.toMemberType())}") }
+            if (hasDefaults) add("mask: Int")
         }.joinToString(", ")
-        val args = method.parameters.joinToString(", ") { fromC(it.name, it.toMemberType()) }
+        val resolutions = StringBuilder()
+        val args = method.parameters.mapIndexed { i, p ->
+            val converted = fromC(p.name, p.toMemberType())
+            if (p.hasDefault && p.defaultValue != null) {
+                val rn = "${p.name}_rdma"
+                resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
+                rn
+            } else {
+                converted
+            }
+        }.joinToString(", ")
         val call = "handle.obj<${info.qualifiedName}>().${method.name}($args)"
         val body = if (CAbi.isVoid(method.returnType)) {
-            "    rdmaCaptureError(Unit) {\n        $call\n    }\n"
+            "$resolutions    rdmaCaptureError(Unit) {\n        $call\n    }\n"
         } else {
-            "    return rdmaCaptureError(${defaultForC(retM)}) { ${toC(call, retM)} }\n"
+            "$resolutions    return rdmaCaptureError(${defaultForC(retM)}) { ${toC(call, retM)} }\n"
         }
         out.write("""
 fun $name($params): ${kotlinReturnType(retM)} {
@@ -370,7 +399,14 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
 
     private fun writeFunction(out: BufferedWriter, fn: RdmaFunctionInfo, registered: MutableList<String>) {
         val name = cName(fn.name)
-        val params = fn.parameters.joinToString(", ") { "${it.name}: ${functionParamKotlinType(it.type)}" }
+        val hasDefaults = fn.parameters.any { it.hasDefault }
+        val params = buildString {
+            append(fn.parameters.joinToString(", ") { "${it.name}: ${functionParamKotlinType(it.type)}" })
+            if (hasDefaults) {
+                if (fn.parameters.isNotEmpty()) append(", ")
+                append("mask: Int")
+            }
+        }
 
         val lambdaDecls = StringBuilder()
         for (p in fn.parameters) {
@@ -383,13 +419,23 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
                 "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda(${p.name}, $argsArray); Unit }\n")
         }
 
-        val args = fn.parameters.joinToString(", ") { functionParamFromC(it) }
+        val resolutions = StringBuilder()
+        val args = fn.parameters.mapIndexed { i, p ->
+            val converted = functionParamFromC(p)
+            if (p.hasDefault && p.defaultValue != null) {
+                val rn = "${p.name}_rdma"
+                resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
+                rn
+            } else {
+                converted
+            }
+        }.joinToString(", ")
         val retK = functionReturnKotlinType(fn.returnType)
         val invokeCall = "${fn.qualifiedName}" + (if (args.isEmpty()) "()" else "($args)")
         val body = if (fn.returnType.type is RdmaType.UnitType) {
-            "$lambdaDecls    rdmaCaptureError(Unit) { $invokeCall }\n"
+            "$lambdaDecls$resolutions    rdmaCaptureError(Unit) { $invokeCall }\n"
         } else {
-            "$lambdaDecls    return rdmaCaptureError(${functionDefault(fn.returnType)}) { ${functionReturnToC(fn.returnType, invokeCall)} }\n"
+            "$lambdaDecls$resolutions    return rdmaCaptureError(${functionDefault(fn.returnType)}) { ${functionReturnToC(fn.returnType, invokeCall)} }\n"
         }
         out.write("""
 fun $name($params): $retK {
@@ -402,15 +448,30 @@ $body}
 
     private fun writeSuspendFunction(out: BufferedWriter, fn: RdmaFunctionInfo, registered: MutableList<String>) {
         val name = cName(fn.name + "Async")
-        val declParams = listOf("completionId: Long") + fn.parameters.map { "${it.name}: ${functionParamKotlinType(it.type)}" }
-        val args = fn.parameters.joinToString(", ") { functionParamFromC(it) }
+        val hasDefaults = fn.parameters.any { it.hasDefault }
+        val declParams = buildList {
+            add("completionId: Long")
+            fn.parameters.forEach { add("${it.name}: ${functionParamKotlinType(it.type)}") }
+            if (hasDefaults) add("mask: Int")
+        }
+        val resolutions = StringBuilder()
+        val args = fn.parameters.mapIndexed { i, p ->
+            val converted = functionParamFromC(p)
+            if (p.hasDefault && p.defaultValue != null) {
+                val rn = "${p.name}_rdma"
+                resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
+                rn
+            } else {
+                converted
+            }
+        }.joinToString(", ")
         val call = "${fn.qualifiedName}($args)"
         // Enum results cross back as their name string.
         val result = if ((fn.returnType.type as? RdmaType.Ref)?.let { isEnumType(it.fqn) } == true) "($call).name" else call
         out.write("""
 fun $name(${declParams.joinToString(", ")}) {
     RdmaSuspend.launch {
-        try { RdmaSuspend.completeResult(completionId, $result) }
+$resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
         catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
     }
 }
@@ -420,15 +481,30 @@ fun $name(${declParams.joinToString(", ")}) {
 
     private fun writeSuspendMethod(out: BufferedWriter, info: RdmaClassInfo, method: MethodInfo, registered: MutableList<String>) {
         val name = cName(info.className + "_" + method.name + "Async")
-        val declParams = listOf("completionId: Long", "receiver: COpaquePointer") +
-            method.parameters.map { "${it.name}: ${kotlinType(it.toMemberType())}" }
-        val args = method.parameters.joinToString(", ") { fromC(it.name, it.toMemberType()) }
+        val hasDefaults = method.parameters.any { it.hasDefault }
+        val declParams = buildList {
+            add("completionId: Long")
+            add("receiver: COpaquePointer")
+            method.parameters.forEach { add("${it.name}: ${kotlinType(it.toMemberType())}") }
+            if (hasDefaults) add("mask: Int")
+        }
+        val resolutions = StringBuilder()
+        val args = method.parameters.mapIndexed { i, p ->
+            val converted = fromC(p.name, p.toMemberType())
+            if (p.hasDefault && p.defaultValue != null) {
+                val rn = "${p.name}_rdma"
+                resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
+                rn
+            } else {
+                converted
+            }
+        }.joinToString(", ")
         val call = "receiver.obj<${info.qualifiedName}>().${method.name}($args)"
         val result = if (method.returnType in enumFqns) "($call).name" else call
         out.write("""
 fun $name(${declParams.joinToString(", ")}) {
     RdmaSuspend.launch {
-        try { RdmaSuspend.completeResult(completionId, $result) }
+$resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
         catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
     }
 }

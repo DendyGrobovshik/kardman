@@ -106,6 +106,7 @@ object RdmaReleaseCli {
                     return
                 }
                 checkRemoval(changelog, analysis, changes, internalModules, polyfillOutDir, versionsDir)
+                checkSignature(analysis, versionsDir)
                 val updated = RdmaChangelog.append(changelog, analysis.moduleId, changes, bumpH = true)
                 gate(updated, analysis, hostVersions, hotfix = false, minHostBefore = RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)), oldestActiveKernel = oldestActiveKernel)
                 RdmaChangelog.write(changelogFile, updated)
@@ -116,6 +117,9 @@ object RdmaReleaseCli {
             }
 
             "dynamic-release", "hotfix-release" -> {
+                // 0. Reject incompatible signature changes up front (before any polyfill work).
+                checkSignature(analysis, versionsDir)
+
                 // 1. Compute + materialize the F polyfill (everything after H).
                 val native = RdmaChangelog.nativeState(changelog, analysis.moduleId)
                 val dirty = RdmaHashDiff.diff(analysis.declarations, native)
@@ -407,6 +411,22 @@ object RdmaReleaseCli {
         RdmaFloor.write(analysis.moduleId, floors, versionsDir)
         val sources = RdmaSourceSnapshot.write(analysis, versionsDir)
         println("Wrote floor map + source snapshot: ${sources.path}")
+        RdmaBaseline.writeSignatures(analysis, versionsDir)
+    }
+
+    /**
+     * Structural signature gate: rejects reorder / remove / rename / type-change / non-trailing
+     * insertion / adding a required parameter on any `@RDMA` callable. Only appending trailing
+     * defaulted parameters is compatible.
+     */
+    private fun checkSignature(analysis: RdmaAnalysis, versionsDir: File) {
+        val oldSignatures = RdmaBaseline.readSignatures(analysis.moduleId, versionsDir)
+        val report = RdmaSignatureClassifier.classify(oldSignatures, analysis.declarations)
+        for (e in report.errors) System.err.println("ERROR: $e")
+        if (report.hasErrors) {
+            System.err.println("Release rejected: incompatible @RDMA signature change (only trailing defaulted parameters may be appended).")
+            kotlin.system.exitProcess(1)
+        }
     }
 
     private fun readHostVersions(file: File): List<Int> =

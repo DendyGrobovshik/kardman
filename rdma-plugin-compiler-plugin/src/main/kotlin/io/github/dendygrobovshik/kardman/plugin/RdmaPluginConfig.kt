@@ -47,6 +47,8 @@ data class RdmaPluginParameter(
     val kotlinType: String,
     /** Number of lambda parameters for CALLBACK/CONTENT; null for VALUE. */
     val lambdaArity: Int? = null,
+    /** True when this parameter has a default value (and is therefore optional at the call site). */
+    val hasDefault: Boolean = false,
 )
 
 data class RdmaPluginManifest(
@@ -94,12 +96,12 @@ object RdmaPluginConfig {
                         } else {
                             "@Composable (" + paramTypes.joinToString(", ") + ") -> Unit"
                         }
-                        RdmaPluginParameter(p.name, RdmaParamKind.CONTENT, ktType, fnType.parameters.size)
+                        RdmaPluginParameter(p.name, RdmaParamKind.CONTENT, ktType, fnType.parameters.size, hasDefault = p.hasDefault)
                     }
                     fnType != null -> {
                         val paramTypes = fnType.parameters.map { kotlinTypeFor(fqnOf(it.type)) }
                         val ktType = "(" + paramTypes.joinToString(", ") + ") -> Unit"
-                        RdmaPluginParameter(p.name, RdmaParamKind.CALLBACK, ktType, paramTypes.size)
+                        RdmaPluginParameter(p.name, RdmaParamKind.CALLBACK, ktType, paramTypes.size, hasDefault = p.hasDefault)
                     }
                     listType != null -> {
                         val elemFn = listType.element.type as? RdmaType.FunctionType
@@ -112,18 +114,19 @@ object RdmaPluginConfig {
                             } else {
                                 "List<(" + paramTypes.joinToString(", ") + ") -> Unit>"
                             }
-                            RdmaPluginParameter(p.name, RdmaParamKind.LIST_HANDLE, ktType, paramTypes.size)
+                            RdmaPluginParameter(p.name, RdmaParamKind.LIST_HANDLE, ktType, paramTypes.size, hasDefault = p.hasDefault)
                         } else {
                             RdmaPluginParameter(
                                 p.name,
                                 RdmaParamKind.LIST_VALUE,
                                 "List<${kotlinTypeFor(fqnOf(listType.element.type))}>",
                                 null,
+                                hasDefault = p.hasDefault,
                             )
                         }
                     }
                     else ->
-                        RdmaPluginParameter(p.name, RdmaParamKind.VALUE, kotlinTypeFor(fqnOf(p.type.type)))
+                        RdmaPluginParameter(p.name, RdmaParamKind.VALUE, kotlinTypeFor(fqnOf(p.type.type)), hasDefault = p.hasDefault)
                 }
             }
             RdmaPluginFunction(fn.name, fn.qualifiedName, fn.composable, parameters, fn.suspend)

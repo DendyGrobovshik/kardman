@@ -150,12 +150,17 @@ boundary is a compile error. Concretely, the following are **not** supported:
 
 - composite value types without `@RDMA` (data classes, `Array`);
 - generics other than the `List<T>` / `MutableList<T>` and `Map<K, V>` / `MutableMap<K, V>` special cases;
-- secondary/overloaded constructors, named arguments, default parameter values;
+- secondary/overloaded constructors;
 - overloaded methods, extension functions.
 
 `suspend`/coroutine functions and `@RDMA enum class` are supported — see
 [types.md](../types.md) for the enum crossing rules (entries cross as name
 strings; `values()` and enum-in-collection element types are not supported yet).
+
+Named arguments and default parameter values are supported. Default parameters
+must be **trailing** (a defaulted parameter cannot precede a required one), and
+adding a new defaulted parameter at the end is forward/backward compatible.
+See [types.md](../types.md#default-parameter-values).
 
 ## UI
 
@@ -298,7 +303,7 @@ content lambdas and callbacks) plus the `SideEffect`, `DisposableEffect` and
 and `rememberCoroutineScope` (single-threaded, `Dispatchers.Main`/`.immediate`).
 
 **Not yet** — non-`@RDMA` value types (`Array`, data classes), `enum.values()` and
-enum element types inside `List`/`Map`, generics beyond `List<T>`/`MutableList<T>` and `Map<K, V>`/`MutableMap<K, V>`; secondary constructors, named/default arguments;
+enum element types inside `List`/`Map`, generics beyond `List<T>`/`MutableList<T>` and `Map<K, V>`/`MutableMap<K, V>`; secondary constructors;
 overloaded methods, extension functions; block-body overrides;
 `derivedStateOf`/`snapshotFlow`, animations and anything else outside the
 allowlist; stable identity for object/`@RDMA` effect keys;

@@ -217,6 +217,14 @@ class RdmaKernelGenerationExtension(
                     File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
                 }.generate(classInfos, functions)
             }
+            // JVM-side default-parameter wrappers, compiled into the app: the C++ JNI bridge
+            // computes a bitmask of omitted trailing parameters and calls these wrappers, which
+            // evaluate the defaults natively before delegating to the original declaration.
+            kotlinOutputDir?.let { dir ->
+                RdmaDefaultWrapperGenerator(pkg) { fileName, _ ->
+                    File(dir, fileName).also { it.parentFile.mkdirs() }.outputStream()
+                }.generate(classInfos, functions)
+            }
         }
 
         jsonOutputDir?.let { dir ->

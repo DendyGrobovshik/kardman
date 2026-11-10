@@ -107,6 +107,25 @@ object RdmaTypeValidator {
             errors += validate(p.type, isRdmaClass).map { "function ${function.qualifiedName}: parameter '${p.name}' $it" }
         }
         errors += validate(function.returnType, isRdmaClass).map { "function ${function.qualifiedName}: $it" }
+        errors += trailingErrors(function.parameters.map { it.name to it.hasDefault }, "function ${function.qualifiedName}")
+        return errors
+    }
+
+    /**
+     * Defaulted parameters must be trailing: once a parameter has a default, every later
+     * parameter must too. This is what makes adding a defaulted parameter a purely *appending*
+     * operation, which the runtime can fill without disturbing the order of existing parameters.
+     */
+    private fun trailingErrors(params: List<Pair<String, Boolean>>, path: String): List<String> {
+        val errors = mutableListOf<String>()
+        var seenDefault = false
+        for ((name, hasDefault) in params) {
+            if (hasDefault) {
+                seenDefault = true
+            } else if (seenDefault) {
+                errors += "$path: parameter '$name' has no default but follows a defaulted parameter; defaulted parameters must be trailing"
+            }
+        }
         return errors
     }
 
@@ -206,6 +225,7 @@ object RdmaTypeValidator {
 
         val prefix = "class ${classInfo.qualifiedName}"
         classInfo.constructors.forEachIndexed { i, c ->
+            errors += trailingErrors(c.parameters.map { it.name to it.hasDefault }, "$prefix: constructor[$i]")
             c.parameters.forEachIndexed { j, p -> checkParameter(p, "$prefix: constructor[$i] parameter '${p.name}'") }
         }
         classInfo.properties.forEach { p -> checkProperty(p, "$prefix: property '${p.name}'") }
@@ -213,6 +233,7 @@ object RdmaTypeValidator {
             if (m.isSuspend && m.isOpen) {
                 errors += "$prefix: method '${m.name}': overriding a suspend method from the plugin is not supported"
             }
+            errors += trailingErrors(m.parameters.map { it.name to it.hasDefault }, "$prefix: method '${m.name}'")
             m.parameters.forEachIndexed { i, p -> checkParameter(p, "$prefix: method '${m.name}' parameter '${p.name}'") }
             checkMethodReturn(m, "$prefix: method '${m.name}' return")
         }

@@ -119,7 +119,8 @@ class CAbiCppGenerator(
         for (info in infos) {
             for (ctor in info.constructors) {
                 val params = ctor.parameters.map { memberCppType(it.type) to it.name }
-                out.write(cWrapper("void*", cFn(info.className + "_new"), params) + "\n")
+                val withMask = if (ctor.parameters.any { it.hasDefault }) params + ("int32_t" to "mask") else params
+                out.write(cWrapper("void*", cFn(info.className + "_new"), withMask) + "\n")
             }
             for (method in info.methods.filter { !it.isSuspend }) {
                 val ret = memberCppType(method.returnType)
@@ -127,7 +128,8 @@ class CAbiCppGenerator(
                     add("void*" to "handle")
                     method.parameters.forEach { add(memberCppType(it.type) to it.name) }
                 }
-                out.write(cWrapper(ret, cFn(info.className + "_" + method.name), params) + "\n")
+                val withMask = if (method.parameters.any { it.hasDefault }) params + ("int32_t" to "mask") else params
+                out.write(cWrapper(ret, cFn(info.className + "_" + method.name), withMask) + "\n")
             }
             for (prop in info.properties) {
                 val ret = memberCppType(prop.type)
@@ -145,17 +147,20 @@ class CAbiCppGenerator(
         for (fn in functions) {
             val ret = cRetType(fn.returnType)
             val params = fn.parameters.map { cParamType(it) to it.name }
-            out.write(cWrapper(ret, cFn(fn.name), params) + "\n")
+            val withMask = if (fn.parameters.any { it.hasDefault }) params + ("int32_t" to "mask") else params
+            out.write(cWrapper(ret, cFn(fn.name), withMask) + "\n")
         }
         for (fn in functions.filter { it.suspend }) {
             val params = listOf("int64_t" to "completionId") + fn.parameters.map { cParamType(it) to it.name }
-            out.write(cWrapper("void", cFn(fn.name + "Async"), params) + "\n")
+            val withMask = if (fn.parameters.any { it.hasDefault }) params + ("int32_t" to "mask") else params
+            out.write(cWrapper("void", cFn(fn.name + "Async"), withMask) + "\n")
         }
         for (info in infos) {
             for (method in info.methods.filter { it.isSuspend }) {
                 val params = listOf("int64_t" to "completionId", "void*" to "receiver") +
                     method.parameters.map { memberCppType(it.type) to it.name }
-                out.write(cWrapper("void", cFn(info.className + "_" + method.name + "Async"), params) + "\n")
+                val withMask = if (method.parameters.any { it.hasDefault }) params + ("int32_t" to "mask") else params
+                out.write(cWrapper("void", cFn(info.className + "_" + method.name + "Async"), withMask) + "\n")
             }
         }
         for (e in enumInfos) {
@@ -318,18 +323,25 @@ $argBlock    $setFn(state->handle(), $argExpr);
 """)
             }
             // Extract params into C types
+            val hasDefaults = method.parameters.any { it.hasDefault }
+            if (hasDefaults) out.write("    int32_t mask = 0;\n")
             val argNames = mutableListOf<String>()
             for ((idx, param) in method.parameters.withIndex()) {
+                val guarded = param.hasDefault
                 val expr: String
                 if (param.type == "kotlin.String") {
-                    out.write("    std::string cpp_${param.name} = args[$idx].getString(r).utf8(r);\n")
+                    out.write("    std::string cpp_${param.name};\n")
+                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(r).utf8(r); }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
                 } else if (isEnumType(param.type)) {
-                    out.write("    std::string cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n")
+                    out.write("    std::string cpp_${param.name};\n")
+                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r); }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
                 } else if (param.isList || isObjectRef(param.type)) {
                     out.write("    void* arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                    out.write("    if (!args[$idx].isUndefined() && !args[$idx].isNull() && args[$idx].isObject()) {\n")
                     out.write("        auto argObj = args[$idx].asObject(r);\n")
                     if (param.isList) {
                         out.write("        arg_${param.name} = materializeList(r, argObj, \"${param.listElementType ?: ""}\");\n")
@@ -340,19 +352,41 @@ $argBlock    $setFn(state->handle(), $argExpr);
                         out.write("        if (argState) arg_${param.name} = argState->handle();\n")
                     }
                     out.write("    }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "arg_${param.name}"
                 } else {
-                    expr = when (param.type) {
-                        "kotlin.Int" -> "(int32_t)args[$idx].getNumber()"
-                        "kotlin.Boolean" -> "args[$idx].getBool()"
-                        "kotlin.Long" -> "(int64_t)args[$idx].getNumber()"
-                        "kotlin.Double", "kotlin.Float" -> "args[$idx].getNumber()"
-                        else -> "nullptr"
+                    val cType = when (param.type) {
+                        "kotlin.Int" -> "int32_t"
+                        "kotlin.Boolean" -> "bool"
+                        "kotlin.Long" -> "int64_t"
+                        "kotlin.Double", "kotlin.Float" -> "double"
+                        else -> "void*"
                     }
+                    val zero = when (param.type) {
+                        "kotlin.Int" -> "0"
+                        "kotlin.Boolean" -> "false"
+                        "kotlin.Long" -> "0"
+                        else -> "0.0"
+                    }
+                    out.write("    $cType cpp_${param.name} = $zero;\n")
+                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = " +
+                        when (param.type) {
+                            "kotlin.Int" -> "(int32_t)args[$idx].getNumber();"
+                            "kotlin.Boolean" -> "args[$idx].getBool();"
+                            "kotlin.Long" -> "(int64_t)args[$idx].getNumber();"
+                            "kotlin.Double", "kotlin.Float" -> "args[$idx].getNumber();"
+                            else -> "nullptr;"
+                        } + " }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    expr = "cpp_${param.name}"
                 }
                 argNames.add(expr)
             }
-            val callArgs = buildList { add("state->handle()"); addAll(argNames) }.joinToString(", ")
+            val callArgs = buildList {
+                add("state->handle()")
+                addAll(argNames)
+                if (hasDefaults) add("mask")
+            }.joinToString(", ")
             val call = "${cFn(info.className + "_" + method.name)}($callArgs)"
 
             if (isVoid) {
@@ -423,19 +457,28 @@ $argBlock    $setFn(state->handle(), $argExpr);
         out.write("""jsi::Object create${info.className}Instance(jsi::Runtime& rt, const jsi::Value* args, size_t count) {
     void* handle = nullptr;
 """)
+        if (info.constructors.any { it.parameters.any { p -> p.hasDefault } }) {
+            out.write("    int32_t mask = 0;\n")
+        }
         for (ctor in info.constructors) {
+            val hasDefaults = ctor.parameters.any { it.hasDefault }
             val argNames = mutableListOf<String>()
             for ((idx, param) in ctor.parameters.withIndex()) {
+                val guarded = param.hasDefault
                 val expr: String
                 if (param.type == "kotlin.String") {
-                    out.write("    std::string cpp_${param.name} = args[$idx].getString(rt).utf8(rt);\n")
+                    out.write("    std::string cpp_${param.name};\n")
+                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(rt).utf8(rt); }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
                 } else if (isEnumType(param.type)) {
-                    out.write("    std::string cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(rt).utf8(rt);\n")
+                    out.write("    std::string cpp_${param.name};\n")
+                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(rt).utf8(rt); }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
                 } else if (param.isList || isObjectRef(param.type)) {
                     out.write("    void* arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                    out.write("    if (!args[$idx].isUndefined() && !args[$idx].isNull() && args[$idx].isObject()) {\n")
                     out.write("        auto argObj = args[$idx].asObject(rt);\n")
                     if (param.isList) {
                         out.write("        arg_${param.name} = materializeList(rt, argObj, \"${param.listElementType ?: ""}\");\n")
@@ -446,19 +489,40 @@ $argBlock    $setFn(state->handle(), $argExpr);
                         out.write("        if (argState) arg_${param.name} = argState->handle();\n")
                     }
                     out.write("    }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "arg_${param.name}"
                 } else {
-                    expr = when (param.type) {
-                        "kotlin.Int" -> "(int32_t)args[$idx].getNumber()"
-                        "kotlin.Boolean" -> "args[$idx].getBool()"
-                        "kotlin.Long" -> "(int64_t)args[$idx].getNumber()"
-                        "kotlin.Double", "kotlin.Float" -> "args[$idx].getNumber()"
-                        else -> "nullptr"
+                    val cType = when (param.type) {
+                        "kotlin.Int" -> "int32_t"
+                        "kotlin.Boolean" -> "bool"
+                        "kotlin.Long" -> "int64_t"
+                        "kotlin.Double", "kotlin.Float" -> "double"
+                        else -> "void*"
                     }
+                    val zero = when (param.type) {
+                        "kotlin.Int" -> "0"
+                        "kotlin.Boolean" -> "false"
+                        "kotlin.Long" -> "0"
+                        else -> "0.0"
+                    }
+                    out.write("    $cType cpp_${param.name} = $zero;\n")
+                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = " +
+                        when (param.type) {
+                            "kotlin.Int" -> "(int32_t)args[$idx].getNumber();"
+                            "kotlin.Boolean" -> "args[$idx].getBool();"
+                            "kotlin.Long" -> "(int64_t)args[$idx].getNumber();"
+                            "kotlin.Double", "kotlin.Float" -> "args[$idx].getNumber();"
+                            else -> "nullptr;"
+                        } + " }\n")
+                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    expr = "cpp_${param.name}"
                 }
                 argNames.add(expr)
             }
-            val callArgs = argNames.joinToString(", ")
+            val callArgs = buildList {
+                addAll(argNames)
+                if (hasDefaults) add("mask")
+            }.joinToString(", ")
             out.write("    handle = ${cFn(info.className + "_new")}($callArgs);\n")
         }
         out.write("""
@@ -798,62 +862,85 @@ $nsClose} // namespace rdma
         val sb = StringBuilder()
         sb.append("""static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, const jsi::Value* args, size_t count) {
 """)
+        val hasDefaults = fn.parameters.any { it.hasDefault }
+        if (hasDefaults) sb.append("    int32_t mask = 0;\n")
         val argNames = mutableListOf<String>()
         for ((idx, p) in fn.parameters.withIndex()) {
+            val guarded = p.hasDefault
             when (val ty = p.type.type) {
                 is RdmaType.Primitive -> {
                     if (ty.fqn == "kotlin.String") {
-                        sb.append("    std::string cpp_${p.name} = args[$idx].getString(r).utf8(r);\n")
+                        val decl = "std::string cpp_${p.name}"
+                        val extract = "cpp_${p.name} = args[$idx].getString(r).utf8(r);"
+                        emitParam(sb, idx, "$decl;", extract, guarded, "std::string cpp_${p.name};")
                         argNames.add("cpp_${p.name}.c_str()")
                     } else {
                         val cType = CAbi.forMemberType(ty.fqn).cppType
+                        val zero = when (ty.fqn) {
+                            "kotlin.Int" -> "0"
+                            "kotlin.Long" -> "0"
+                            "kotlin.Boolean" -> "false"
+                            else -> "0.0"
+                        }
                         val expr = when (ty.fqn) {
                             "kotlin.Int" -> "(int32_t)args[$idx].getNumber()"
                             "kotlin.Boolean" -> "args[$idx].getBool()"
                             "kotlin.Long" -> "(int64_t)args[$idx].getNumber()"
                             else -> "args[$idx].getNumber()"
                         }
-                        sb.append("    $cType cpp_${p.name} = $expr;\n")
+                        val decl = "$cType cpp_${p.name}"
+                        val extract = "cpp_${p.name} = $expr;"
+                        emitParam(sb, idx, "$decl = $zero;", extract, guarded, "$decl = $zero;")
                         argNames.add("cpp_${p.name}")
                     }
                 }
                 is RdmaType.Ref -> {
                     if (isEnumType(ty.fqn)) {
-                        sb.append("    std::string cpp_${p.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n")
+                        val decl = "std::string cpp_${p.name}"
+                        val extract = "cpp_${p.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);"
+                        emitParam(sb, idx, "$decl;", extract, guarded, "$decl;")
                         argNames.add("cpp_${p.name}.c_str()")
                     } else {
                         sb.append("    void* arg_${p.name} = nullptr;\n")
-                        sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                        sb.append("    if (!args[$idx].isUndefined() && !args[$idx].isNull() && args[$idx].isObject()) {\n")
                         sb.append("        auto argState = std::static_pointer_cast<${rdmaClassByName(ty.fqn, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(args[$idx].asObject(r).getNativeState(r));\n")
                         sb.append("        if (argState) arg_${p.name} = argState->handle();\n")
                         sb.append("    }\n")
+                        if (guarded) sb.append("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                         argNames.add("arg_${p.name}")
                     }
                 }
                 is RdmaType.ListType -> {
                     sb.append("    void* arg_${p.name} = nullptr;\n")
-                    sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                    sb.append("    if (!args[$idx].isUndefined() && !args[$idx].isNull() && args[$idx].isObject()) {\n")
                     sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
                     sb.append("        arg_${p.name} = materializeList(r, argObj_${p.name}, \"${typeName(ty.element)}\");\n")
                     sb.append("    }\n")
+                    if (guarded) sb.append("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     argNames.add("arg_${p.name}")
                 }
                 is RdmaType.MapType -> {
                     sb.append("    void* arg_${p.name} = nullptr;\n")
-                    sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
+                    sb.append("    if (!args[$idx].isUndefined() && !args[$idx].isNull() && args[$idx].isObject()) {\n")
                     sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
                     sb.append("        arg_${p.name} = materializeMap(r, argObj_${p.name}, \"${typeName(ty.key)}\", \"${typeName(ty.value)}\");\n")
                     sb.append("    }\n")
+                    if (guarded) sb.append("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     argNames.add("arg_${p.name}")
                 }
                 is RdmaType.FunctionType -> {
-                    sb.append("    int64_t cpp_${p.name} = (int64_t)args[$idx].getNumber();\n")
+                    val decl = "int64_t cpp_${p.name}"
+                    val extract = "cpp_${p.name} = (int64_t)args[$idx].getNumber();"
+                    emitParam(sb, idx, "$decl = 0;", extract, guarded, "$decl = 0;")
                     argNames.add("cpp_${p.name}")
                 }
                 is RdmaType.UnitType -> {}
             }
         }
-        val callArgs = argNames.joinToString(", ")
+        val callArgs = buildList {
+            addAll(argNames)
+            if (hasDefaults) add("mask")
+        }.joinToString(", ")
         val call = "${cFn(fn.name)}($callArgs)"
         when (val ty = fn.returnType.type) {
             is RdmaType.UnitType -> sb.append("    $call;\n    checkKotlinError(r);\n    return jsi::Value::undefined();\n")
@@ -884,6 +971,24 @@ $nsClose} // namespace rdma
         }
         sb.append("}\n\n")
         return sb.toString()
+    }
+
+    /**
+     * Emits a scalar parameter extraction, guarded by `isUndefined()` when [guarded]. For a
+     * guarded parameter the declaration is emitted with a zero placeholder and the extraction
+     * only runs when the argument is present; otherwise the mask bit is set.
+     */
+    private fun emitParam(sb: StringBuilder, idx: Int, decl: String, extract: String, guarded: Boolean, guardedDecl: String) {
+        if (guarded) {
+            sb.append("    $guardedDecl\n")
+            sb.append("    if (!args[$idx].isUndefined()) {\n")
+            sb.append("        $extract\n")
+            sb.append("    } else {\n")
+            sb.append("        mask |= (1 << $idx);\n")
+            sb.append("    }\n")
+        } else {
+            sb.append("    $decl\n")
+        }
     }
 
     private fun primitiveReturn(fqn: String, expr: String): String = when (fqn) {
@@ -918,16 +1023,21 @@ $nsClose} // namespace rdma
 
     private fun suspendFunctionImpl(fn: RdmaFunctionInfo, allClasses: List<RdmaClassInfo>): String {
         val sb = StringBuilder()
+        val hasDefaults = fn.parameters.any { it.hasDefault }
         sb.append("""static jsi::Value rdma_suspend_${fn.name}(jsi::Runtime& r, const jsi::Value* args, size_t count) {
     int64_t completionId = (int64_t)args[0].getNumber();
     rdmaRegisterSuspendResultType(completionId, "${typeName(fn.returnType)}");
 """)
+        if (hasDefaults) sb.append("    int32_t mask = 0;\n")
         val argNames = mutableListOf<String>()
         fn.parameters.forEachIndexed { i, p ->
-            suspendFunctionParamExtraction(sb, p, i + 1, allClasses, argNames)
+            suspendFunctionParamExtraction(sb, p, i + 1, i, allClasses, argNames)
         }
-        val callArgs = argNames.joinToString(", ")
-        val suffix = if (callArgs.isEmpty()) "completionId" else "completionId, $callArgs"
+        val callArgs = buildList {
+            addAll(argNames)
+            if (hasDefaults) add("mask")
+        }
+        val suffix = if (callArgs.isEmpty()) "completionId" else "completionId, ${callArgs.joinToString(", ")}"
         sb.append("    ${cFn(fn.name + "Async")}($suffix);\n")
         sb.append("    return jsi::Value::undefined();\n}\n\n")
         return sb.toString()
@@ -935,6 +1045,7 @@ $nsClose} // namespace rdma
 
     private fun suspendMethodImpl(cls: RdmaClassInfo, m: MethodInfo, allClasses: List<RdmaClassInfo>): String {
         val sb = StringBuilder()
+        val hasDefaults = m.parameters.any { it.hasDefault }
         sb.append("""static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, const jsi::Value* args, size_t count) {
     int64_t completionId = (int64_t)args[0].getNumber();
     rdmaRegisterSuspendResultType(completionId, "${methodTypeDesc(m)}");
@@ -944,109 +1055,149 @@ $nsClose} // namespace rdma
         if (recvState) receiver = recvState->handle();
     }
 """)
+        if (hasDefaults) sb.append("    int32_t mask = 0;\n")
         val argNames = mutableListOf<String>()
         m.parameters.forEachIndexed { i, p ->
-            suspendMethodParamExtraction(sb, p, i + 2, allClasses, argNames)
+            suspendMethodParamExtraction(sb, p, i + 2, i, allClasses, argNames)
         }
-        val callArgs = argNames.joinToString(", ")
-        val suffix = if (callArgs.isEmpty()) "completionId, receiver" else "completionId, receiver, $callArgs"
+        val callArgs = buildList {
+            addAll(argNames)
+            if (hasDefaults) add("mask")
+        }
+        val suffix = if (callArgs.isEmpty()) "completionId, receiver" else "completionId, receiver, ${callArgs.joinToString(", ")}"
         sb.append("    ${cFn(cls.className + "_" + m.name + "Async")}($suffix);\n")
         sb.append("    return jsi::Value::undefined();\n}\n\n")
         return sb.toString()
     }
 
-    private fun suspendFunctionParamExtraction(sb: StringBuilder, p: RdmaParameterInfo, idx: Int, allClasses: List<RdmaClassInfo>, argNames: MutableList<String>) {
+    private fun suspendFunctionParamExtraction(sb: StringBuilder, p: RdmaParameterInfo, argIdx: Int, maskBit: Int, allClasses: List<RdmaClassInfo>, argNames: MutableList<String>) {
+        val guarded = p.hasDefault
+        fun guard() { if (guarded) sb.append("    if (args[$argIdx].isUndefined()) mask |= (1 << $maskBit);\n") }
         when (val ty = p.type.type) {
             is RdmaType.Primitive -> {
                 if (ty.fqn == "kotlin.String") {
-                    sb.append("    std::string cpp_${p.name} = args[$idx].getString(r).utf8(r);\n")
+                    sb.append("    std::string cpp_${p.name};\n")
+                    sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = args[$argIdx].getString(r).utf8(r);\n")
+                    guard()
                     argNames.add("cpp_${p.name}.c_str()")
                 } else {
                     val cType = CAbi.forMemberType(ty.fqn).cppType
-                    val expr = when (ty.fqn) {
-                        "kotlin.Int" -> "(int32_t)args[$idx].getNumber()"
-                        "kotlin.Boolean" -> "args[$idx].getBool()"
-                        "kotlin.Long" -> "(int64_t)args[$idx].getNumber()"
-                        else -> "args[$idx].getNumber()"
+                    val zero = when (ty.fqn) {
+                        "kotlin.Int" -> "0"
+                        "kotlin.Long" -> "0"
+                        "kotlin.Boolean" -> "false"
+                        else -> "0.0"
                     }
-                    sb.append("    $cType cpp_${p.name} = $expr;\n")
+                    val expr = when (ty.fqn) {
+                        "kotlin.Int" -> "(int32_t)args[$argIdx].getNumber()"
+                        "kotlin.Boolean" -> "args[$argIdx].getBool()"
+                        "kotlin.Long" -> "(int64_t)args[$argIdx].getNumber()"
+                        else -> "args[$argIdx].getNumber()"
+                    }
+                    sb.append("    $cType cpp_${p.name} = $zero;\n")
+                    sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = $expr;\n")
+                    guard()
                     argNames.add("cpp_${p.name}")
                 }
             }
             is RdmaType.Ref -> {
                 if (isEnumType(ty.fqn)) {
-                    sb.append("    std::string cpp_${p.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n")
+                    sb.append("    std::string cpp_${p.name};\n")
+                    sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = args[$argIdx].isNull() ? \"\" : args[$argIdx].getString(r).utf8(r);\n")
+                    guard()
                     argNames.add("cpp_${p.name}.c_str()")
                 } else {
                     sb.append("    void* arg_${p.name} = nullptr;\n")
-                    sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
-                    sb.append("        auto argState = std::static_pointer_cast<${rdmaClassByName(ty.fqn, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(args[$idx].asObject(r).getNativeState(r));\n")
+                    sb.append("    if (!args[$argIdx].isUndefined() && !args[$argIdx].isNull() && args[$argIdx].isObject()) {\n")
+                    sb.append("        auto argState = std::static_pointer_cast<${rdmaClassByName(ty.fqn, allClasses)?.className?.let { it + "NativeState" } ?: "RdmaObjectNativeStateCAbi"}>(args[$argIdx].asObject(r).getNativeState(r));\n")
                     sb.append("        if (argState) arg_${p.name} = argState->handle();\n")
                     sb.append("    }\n")
+                    guard()
                     argNames.add("arg_${p.name}")
                 }
             }
             is RdmaType.ListType -> {
                 sb.append("    void* arg_${p.name} = nullptr;\n")
-                sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
-                sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+                sb.append("    if (!args[$argIdx].isUndefined() && !args[$argIdx].isNull() && args[$argIdx].isObject()) {\n")
+                sb.append("        auto argObj_${p.name} = args[$argIdx].asObject(r);\n")
                 sb.append("        arg_${p.name} = materializeList(r, argObj_${p.name}, \"${typeName(ty.element)}\");\n")
                 sb.append("    }\n")
+                guard()
                 argNames.add("arg_${p.name}")
             }
             is RdmaType.MapType -> {
                 sb.append("    void* arg_${p.name} = nullptr;\n")
-                sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
-                sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+                sb.append("    if (!args[$argIdx].isUndefined() && !args[$argIdx].isNull() && args[$argIdx].isObject()) {\n")
+                sb.append("        auto argObj_${p.name} = args[$argIdx].asObject(r);\n")
                 sb.append("        arg_${p.name} = materializeMap(r, argObj_${p.name}, \"${typeName(ty.key)}\", \"${typeName(ty.value)}\");\n")
                 sb.append("    }\n")
+                guard()
                 argNames.add("arg_${p.name}")
             }
             is RdmaType.FunctionType -> {
-                sb.append("    int64_t cpp_${p.name} = (int64_t)args[$idx].getNumber();\n")
+                sb.append("    int64_t cpp_${p.name} = 0;\n")
+                sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = (int64_t)args[$argIdx].getNumber();\n")
+                guard()
                 argNames.add("cpp_${p.name}")
             }
             is RdmaType.UnitType -> {}
         }
     }
 
-    private fun suspendMethodParamExtraction(sb: StringBuilder, p: ParameterInfo, idx: Int, allClasses: List<RdmaClassInfo>, argNames: MutableList<String>) {
-        val type = CAbi.forMemberType(p.type)
+    private fun suspendMethodParamExtraction(sb: StringBuilder, p: ParameterInfo, argIdx: Int, maskBit: Int, allClasses: List<RdmaClassInfo>, argNames: MutableList<String>) {
+        val guarded = p.hasDefault
+        fun guard() { if (guarded) sb.append("    if (args[$argIdx].isUndefined()) mask |= (1 << $maskBit);\n") }
         if (p.type == "kotlin.String") {
-            sb.append("    std::string cpp_${p.name} = args[$idx].getString(r).utf8(r);\n")
+            sb.append("    std::string cpp_${p.name};\n")
+            sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = args[$argIdx].getString(r).utf8(r);\n")
+            guard()
             argNames.add("cpp_${p.name}.c_str()")
         } else if (isEnumType(p.type)) {
-            sb.append("    std::string cpp_${p.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n")
+            sb.append("    std::string cpp_${p.name};\n")
+            sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = args[$argIdx].isNull() ? \"\" : args[$argIdx].getString(r).utf8(r);\n")
+            guard()
             argNames.add("cpp_${p.name}.c_str()")
         } else if (CAbi.isPrimitive(p.type)) {
-            val expr = when (p.type) {
-                "kotlin.Int" -> "(int32_t)args[$idx].getNumber()"
-                "kotlin.Boolean" -> "args[$idx].getBool()"
-                "kotlin.Long" -> "(int64_t)args[$idx].getNumber()"
-                else -> "args[$idx].getNumber()"
+            val cType = CAbi.forMemberType(p.type).cppType
+            val zero = when (p.type) {
+                "kotlin.Int" -> "0"
+                "kotlin.Long" -> "0"
+                "kotlin.Boolean" -> "false"
+                else -> "0.0"
             }
-            sb.append("    ${type.cppType} cpp_${p.name} = $expr;\n")
+            val expr = when (p.type) {
+                "kotlin.Int" -> "(int32_t)args[$argIdx].getNumber()"
+                "kotlin.Boolean" -> "args[$argIdx].getBool()"
+                "kotlin.Long" -> "(int64_t)args[$argIdx].getNumber()"
+                else -> "args[$argIdx].getNumber()"
+            }
+            sb.append("    $cType cpp_${p.name} = $zero;\n")
+            sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = $expr;\n")
+            guard()
             argNames.add("cpp_${p.name}")
         } else if (p.isList) {
             sb.append("    void* arg_${p.name} = nullptr;\n")
-            sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
-            sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+            sb.append("    if (!args[$argIdx].isUndefined() && !args[$argIdx].isNull() && args[$argIdx].isObject()) {\n")
+            sb.append("        auto argObj_${p.name} = args[$argIdx].asObject(r);\n")
             sb.append("        arg_${p.name} = materializeList(r, argObj_${p.name}, \"${p.listElementType ?: "kotlin.Any"}\");\n")
             sb.append("    }\n")
+            guard()
             argNames.add("arg_${p.name}")
         } else if (p.isMap) {
             sb.append("    void* arg_${p.name} = nullptr;\n")
-            sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
-            sb.append("        auto argObj_${p.name} = args[$idx].asObject(r);\n")
+            sb.append("    if (!args[$argIdx].isUndefined() && !args[$argIdx].isNull() && args[$argIdx].isObject()) {\n")
+            sb.append("        auto argObj_${p.name} = args[$argIdx].asObject(r);\n")
             sb.append("        arg_${p.name} = materializeMap(r, argObj_${p.name}, \"${p.mapKeyType ?: "kotlin.Any"}\", \"${p.mapValueType ?: "kotlin.Any"}\");\n")
             sb.append("    }\n")
+            guard()
             argNames.add("arg_${p.name}")
         } else {
             sb.append("    void* arg_${p.name} = nullptr;\n")
-            sb.append("    if (!args[$idx].isNull() && args[$idx].isObject()) {\n")
-            sb.append("        auto argState = std::static_pointer_cast<RdmaObjectNativeStateCAbi>(args[$idx].asObject(r).getNativeState(r));\n")
+            sb.append("    if (!args[$argIdx].isUndefined() && !args[$argIdx].isNull() && args[$argIdx].isObject()) {\n")
+            sb.append("        auto argState = std::static_pointer_cast<RdmaObjectNativeStateCAbi>(args[$argIdx].asObject(r).getNativeState(r));\n")
             sb.append("        if (argState) arg_${p.name} = argState->handle();\n")
             sb.append("    }\n")
+            guard()
             argNames.add("arg_${p.name}")
         }
     }

@@ -78,6 +78,9 @@ data class ParameterInfo(
     val name: String,
     val type: String,
     val nullable: Boolean = false,
+    val hasDefault: Boolean = false,
+    /** Source text of the default expression (evaluated natively to fill a masked parameter). */
+    val defaultValue: String? = null,
     val isList: Boolean = false,
     val listElementType: String? = null,
     val isMap: Boolean = false,
@@ -114,6 +117,9 @@ data class RdmaParameterInfo(
     val name: String,
     val type: RdmaTypeRef,
     val composable: Boolean = false,
+    val hasDefault: Boolean = false,
+    /** Source text of the default expression (evaluated natively to fill a masked parameter). */
+    val defaultValue: String? = null,
 )
 
 @Serializable
