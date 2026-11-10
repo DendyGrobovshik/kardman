@@ -28,7 +28,7 @@ data class RdmaPluginType(
     val suspendMethods: List<RdmaPluginMethod> = emptyList(),
 )
 
-data class RdmaPluginMethod(val name: String, val paramCount: Int)
+data class RdmaPluginMethod(val name: String, val paramCount: Int, val defaulted: List<Boolean> = emptyList())
 
 data class RdmaPluginFunction(
     val name: String,
@@ -80,7 +80,7 @@ object RdmaPluginConfig {
                 ?: emptyList()
             val properties = cls.properties.map { it.name to it.isMutable }
             val statics = cls.statics.map { it.name }
-            val suspendMethods = cls.methods.filter { it.isSuspend }.map { RdmaPluginMethod(it.name, it.parameters.size) }
+            val suspendMethods = cls.methods.filter { it.isSuspend }.map { RdmaPluginMethod(it.name, it.parameters.size, it.parameters.map { p -> p.hasDefault }) }
             RdmaPluginType(cls.className, cls.qualifiedName, constructorParams, properties, statics, suspendMethods)
         }
 

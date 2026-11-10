@@ -237,6 +237,8 @@ fun foo_polyfill(...): ... = { /* emulatable implementation via @RDMA primitives
 
 The source Kotlin contains a function call; it compiles to a function call in JS. What actually gets invoked — native via JSI/JNI or the polyfill in JS — is determined **at bundle load time**. Mechanically this is just putting a function on a JS object; the caller doesn't care. **The polyfill takes priority over the native** (this is exactly a hotfix); the priority is remembered at load time, with no per-call dynamic checks.
 
+A polyfill overrides only the **JS-visible boundary** — what plugin code calls through `RDMA.*`. Native kernel code that calls another `@RDMA` symbol directly keeps calling the baked-in native implementation; it does not route through `global.RDMA`, so a polyfill that replaces a symbol does not redirect those internal native call sites.
+
 ### 6.5 Shared-state detection (deferred optimization)
 
 To safely cut a polyfill into delta pieces, the materializer must know whether the module has **shared mutable non-`@RDMA` state** (one variable reachable from two or more `@RDMA` symbols): no — we cut into pieces; yes — we keep it monolithic. **Marked as an optimization that is not implemented yet**: without it the polyfill bundle is monolithic and correct. This optimization may be used to shrink the downloaded polyfill when only a little logic changed.

@@ -64,20 +64,49 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaSuspend
 
     private fun wrapperForFunction(fn: RdmaFunctionInfo): String {
         val wrapper = suspendWrapperName(fn.name)
-        val params = fn.parameters.joinToString(", ") { "${it.name}: ${renderType(it.type)}" }
+        val hasDefaults = fn.parameters.any { it.hasDefault }
+        val declParams = buildList {
+            add("completionId: Long")
+            fn.parameters.forEachIndexed { i, p -> add("${RdmaDefaultSupport.raw(i)}: ${renderType(p.type)}") }
+            if (hasDefaults) add("mask: Int")
+        }
+        val resolutions = StringBuilder()
+        fn.parameters.forEachIndexed { i, p ->
+            val d = p.defaultValue
+            val resolved = if (p.hasDefault && d != null) {
+                "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else ${RdmaDefaultSupport.raw(i)}"
+            } else {
+                RdmaDefaultSupport.raw(i)
+            }
+            resolutions.append("        val ${p.name} = $resolved\n")
+        }
         val callArgs = fn.parameters.joinToString(", ") { it.name }
         val body = tryCatchBlock("${fn.qualifiedName}($callArgs)")
-        val declParams = listOf("completionId: Long") + fn.parameters.map { "${it.name}: ${renderType(it.type)}" }
-        return "fun $wrapper(${declParams.joinToString(", ")}) {\n    RdmaSuspend.launch {\n$body    }\n}\n"
+        return "fun $wrapper(${declParams.joinToString(", ")}) {\n    RdmaSuspend.launch {\n$resolutions$body    }\n}\n"
     }
 
     private fun wrapperForMethod(cls: RdmaClassInfo, m: MethodInfo): String {
         val wrapper = suspendWrapperName(cls, m)
+        val hasDefaults = m.parameters.any { it.hasDefault }
+        val declParams = buildList {
+            add("completionId: Long")
+            add("self: ${cls.qualifiedName}")
+            m.parameters.forEachIndexed { i, p -> add("${RdmaDefaultSupport.raw(i)}: ${renderParamType(p)}") }
+            if (hasDefaults) add("mask: Int")
+        }
+        val resolutions = StringBuilder()
+        m.parameters.forEachIndexed { i, p ->
+            val d = p.defaultValue
+            val resolved = if (p.hasDefault && d != null) {
+                "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else ${RdmaDefaultSupport.raw(i)}"
+            } else {
+                RdmaDefaultSupport.raw(i)
+            }
+            resolutions.append("        val ${p.name} = $resolved\n")
+        }
         val callArgs = m.parameters.joinToString(", ") { it.name }
-        val body = tryCatchBlock("receiver.${m.name}($callArgs)")
-        val declParams = listOf("completionId: Long", "receiver: ${cls.qualifiedName}") +
-            m.parameters.map { "${it.name}: ${renderParamType(it)}" }
-        return "fun $wrapper(${declParams.joinToString(", ")}) {\n    RdmaSuspend.launch {\n$body    }\n}\n"
+        val body = tryCatchBlock("self.${m.name}($callArgs)")
+        return "fun $wrapper(${declParams.joinToString(", ")}) {\n    RdmaSuspend.launch {\n$resolutions$body    }\n}\n"
     }
 
     private fun tryCatchBlock(call: String): String =

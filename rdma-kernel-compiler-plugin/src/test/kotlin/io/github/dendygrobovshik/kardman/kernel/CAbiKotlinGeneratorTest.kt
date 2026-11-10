@@ -81,7 +81,7 @@ class CAbiKotlinGeneratorTest {
             suspend = true,
         )
         val kotlin = generate(emptyList(), listOf(fn))
-        assertContains(kotlin, "fun rdma_computeSumAsync(completionId: Long, a: Int, b: Int)")
+        assertContains(kotlin, "fun rdma_computeSumAsync(completionId: Long, _p0: Int, _p1: Int)")
         assertContains(kotlin, "RdmaSuspend.completeResult(completionId, com.example.kernel.computeSum(a, b))")
         assertContains(kotlin, "RdmaSuspend.completeError(completionId, t)")
         assertContains(kotlin, "rdmaRegisterFunction(\"rdma_computeSumAsync\"")
@@ -99,8 +99,9 @@ class CAbiKotlinGeneratorTest {
             properties = emptyList(),
         )
         val kotlin = generate(listOf(cls))
-        assertContains(kotlin, "fun rdma_SuspendService_fetchAsync(completionId: Long, receiver: COpaquePointer, id: Int)")
-        assertContains(kotlin, "receiver.obj<com.example.kernel.SuspendService>().fetch(id)")
+        assertContains(kotlin, "fun rdma_SuspendService_fetchAsync(completionId: Long, receiver: COpaquePointer, _p0: Int)")
+        assertContains(kotlin, "val self = receiver.obj<com.example.kernel.SuspendService>()")
+        assertContains(kotlin, "self.fetch(id)")
         assertContains(kotlin, "rdmaRegisterFunction(\"rdma_SuspendService_fetchAsync\"")
         assertFalse(kotlin.contains("fun rdma_SuspendService_fetch("))
     }

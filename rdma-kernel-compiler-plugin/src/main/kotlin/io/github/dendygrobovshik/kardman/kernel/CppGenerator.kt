@@ -317,12 +317,14 @@ void initJniCache(JNIEnv* env) {
 """)
                 for (fn in suspendFns) {
                     val paramSig = fn.parameters.joinToString("") { jniSignature(it.type) }
-                    out.write("    g_rdmaCache.suspend_fn_${fn.name}Async = env->GetStaticMethodID(g_rdmaCache.suspendClazz, \"_${fn.name}Async\", \"(J$paramSig)V\");\n")
+                    val maskSig = if (fn.parameters.any { it.hasDefault }) "I" else ""
+                    out.write("    g_rdmaCache.suspend_fn_${fn.name}Async = env->GetStaticMethodID(g_rdmaCache.suspendClazz, \"_${fn.name}Async\", \"(J$paramSig$maskSig)V\");\n")
                 }
                 for ((cls, m) in suspendMethods) {
                     val receiverSig = "L${cls.qualifiedName.replace('.', '/')};"
                     val paramSig = m.parameters.joinToString("") { JniTypeMapper.jniSignature(it.type) }
-                    out.write("    g_rdmaCache.suspend_${cls.className}_${m.name}Async = env->GetStaticMethodID(g_rdmaCache.suspendClazz, \"_${cls.className}_${m.name}Async\", \"(J$receiverSig$paramSig)V\");\n")
+                    val maskSig = if (m.parameters.any { it.hasDefault }) "I" else ""
+                    out.write("    g_rdmaCache.suspend_${cls.className}_${m.name}Async = env->GetStaticMethodID(g_rdmaCache.suspendClazz, \"_${cls.className}_${m.name}Async\", \"(J$receiverSig$paramSig$maskSig)V\");\n")
                 }
             }
         }
@@ -531,7 +533,17 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                 val idx = method.parameters.indexOf(param)
                 val guarded = param.hasDefault
                 if (type != null) {
-                    if (guarded) {
+                    if (param.type == "kotlin.String") {
+                        // String crosses as std::string; the method body uses `r` (not `rt`).
+                        if (guarded) {
+                            out.write("    std::string cpp_${param.name};\n")
+                            out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r); } else { mask |= (1 << $idx); }\n")
+                        } else if (param.nullable) {
+                            out.write("    std::string cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n")
+                        } else {
+                            out.write("    std::string cpp_${param.name} = args[$idx].getString(r).utf8(r);\n")
+                        }
+                    } else if (guarded) {
                         val zero = when (param.type) {
                             "kotlin.Int" -> "0"
                             "kotlin.Long" -> "0"
@@ -539,7 +551,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                             else -> "0.0"
                         }
                         out.write("    ${type.cppType} cpp_${param.name} = $zero;\n")
-                        out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = ${type.fromJsi.replace("%d", idx.toString())}; } else { mask |= (1 << $idx); }\n")
+                        out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = ${type.fromJsi.replace("%d", idx.toString())}; } else { mask |= (1 << $idx); }\n")
                     } else if (param.nullable) {
                         out.write("    ${type.cppType} cpp_${param.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.fromJsi.replace("%d", idx.toString())});\n")
                     } else {
@@ -548,7 +560,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     }
                 } else if (param.isList) {
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto listObj = args[$idx].asObject(r);\n")
                     out.write("        if (listObj.hasNativeState(r)) {\n")
                     out.write("            auto ns = listObj.getNativeState(r);\n")
@@ -557,10 +569,10 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     out.write("            arg_${param.name} = materializeArray(env, r, jvm, listObj, \"${param.listElementType ?: ""}\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (param.isMap) {
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto mapObj = args[$idx].asObject(r);\n")
                     out.write("        if (mapObj.hasNativeState(r)) {\n")
                     out.write("            auto ns = mapObj.getNativeState(r);\n")
@@ -569,35 +581,35 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     out.write("            arg_${param.name} = materializeMap(env, r, jvm, mapObj, \"${param.mapKeyType ?: ""}\", \"${param.mapValueType ?: ""}\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (isEnumType(param.type)) {
                     val enumName = param.type.substringAfterLast('.')
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        std::string cpp_${param.name} = args[$idx].getString(r).utf8(r);\n")
                     out.write("        jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
                     out.write("        arg_${param.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${param.name});\n")
                     out.write("        env->DeleteLocalRef(j_${param.name});\n")
                     out.write("        checkAndThrowJs(env, r);\n")
                     out.write("    }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
-                        out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                        out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                         out.write("        auto argObj_${param.name} = args[$idx].asObject(r);\n")
                         out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(r));\n")
                         out.write("        arg_${param.name} = argState_${param.name}->getObject();\n")
                         out.write("    }\n")
-                        if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                        if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     } else {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
-                        out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                        out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                         out.write("        auto argObj_${param.name} = args[$idx].asObject(r);\n")
                         out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(r));\n")
                         out.write("        arg_${param.name} = argState_${param.name}->getObject();\n")
                         out.write("    }\n")
-                        if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                        if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     }
                 }
             }
@@ -783,7 +795,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                         }
                         val extract = type.fromJsi.replace("%d", idx.toString())
                         out.write("    ${type.cppType} cpp_${param.name} = $zero;\n")
-                        out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = $extract; } else { mask |= (1 << $idx); }\n")
+                        out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = $extract; } else { mask |= (1 << $idx); }\n")
                     } else {
                         val extract = type.fromJsi.replace("%d", idx.toString())
                         out.write("    ${type.cppType} cpp_${param.name} = $extract;\n")
@@ -791,7 +803,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                 } else if (param.isList) {
                     val elemType = param.listElementType ?: "kotlin.Any"
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto listObj_${param.name} = args[$idx].asObject(rt);\n")
                     out.write("        if (listObj_${param.name}.hasNativeState(rt)) {\n")
                     out.write("            auto ns_${param.name} = listObj_${param.name}.getNativeState(rt);\n")
@@ -800,12 +812,12 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     out.write("            arg_${param.name} = materializeArray(env, rt, jvm, listObj_${param.name}, \"$elemType\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (param.isMap) {
                     val keyType = param.mapKeyType ?: "kotlin.Any"
                     val valueType = param.mapValueType ?: "kotlin.Any"
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                    out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto mapObj_${param.name} = args[$idx].asObject(rt);\n")
                     out.write("        if (mapObj_${param.name}.hasNativeState(rt)) {\n")
                     out.write("            auto ns_${param.name} = mapObj_${param.name}.getNativeState(rt);\n")
@@ -814,35 +826,35 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     out.write("            arg_${param.name} = materializeMap(env, rt, jvm, mapObj_${param.name}, \"$keyType\", \"$valueType\");\n")
                     out.write("        }\n")
                     out.write("    }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (isEnumType(param.type)) {
                     val enumName = param.type.substringAfterLast('.')
                     out.write("    jobject arg_${param.name} = nullptr;\n")
-                    out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull() && args[$idx].isString()) {\n")
+                    out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull() && args[$idx].isString()) {\n")
                     out.write("        std::string cpp_${param.name} = args[$idx].getString(rt).utf8(rt);\n")
                     out.write("        jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
                     out.write("        arg_${param.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${param.name});\n")
                     out.write("        env->DeleteLocalRef(j_${param.name});\n")
                     out.write("        checkAndThrowJs(env, rt);\n")
                     out.write("    }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (isObjectRef(param.type)) {
                     if (param.nullable) {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
-                        out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull() && args[$idx].isObject() && args[$idx].asObject(rt).hasNativeState(rt)) {\n")
+                        out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull() && args[$idx].isObject() && args[$idx].asObject(rt).hasNativeState(rt)) {\n")
                         out.write("        auto argObj_${param.name} = args[$idx].asObject(rt);\n")
                         out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(rt));\n")
                         out.write("        if (argState_${param.name}) arg_${param.name} = argState_${param.name}->getObject();\n")
                         out.write("    }\n")
-                        if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                        if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     } else {
                         out.write("    jobject arg_${param.name} = nullptr;\n")
-                        out.write("    if (${if (guarded) "!args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
+                        out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                         out.write("        auto argObj_${param.name} = args[$idx].asObject(rt);\n")
                         out.write("        auto argState_${param.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${param.name}.getNativeState(rt));\n")
                         out.write("        arg_${param.name} = argState_${param.name}->getObject();\n")
                         out.write("    }\n")
-                        if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                        if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     }
                 }
                 idx++
@@ -1151,7 +1163,14 @@ static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Va
         if (hasDefaults) parts.add("mask")
         val callSuffix = if (parts.isEmpty()) "" else ", " + parts.joinToString(", ")
         val marshaling = functionReturnMarshaling(fn, allClasses, callSuffix)
-            .let { if (hasDefaults) it.replace("fn_${fn.name}_method", "fn_${fn.name}_rdma") else it }
+            .let {
+                if (hasDefaults) {
+                    it.replace("fn_${fn.name}_method", "fn_${fn.name}_rdma")
+                        .replace("fn_${fn.name}_clazz", "wrappersClazz")
+                } else {
+                    it
+                }
+            }
         sb.append(marshaling)
         sb.append("}\n\n")
         return sb.toString()
@@ -1177,6 +1196,7 @@ static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Va
     private fun suspendFunctionImpl(fn: RdmaFunctionInfo, allClasses: List<RdmaClassInfo>): String {
         val sb = StringBuilder()
         val typeDesc = typeName(fn.returnType)
+        val hasDefaults = fn.parameters.any { it.hasDefault }
         sb.append("""
 static jsi::Value rdma_suspend_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
@@ -1185,11 +1205,15 @@ static jsi::Value rdma_suspend_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const js
     jlong completionId = (jlong)args[0].getNumber();
     rdmaRegisterSuspendResultType(completionId, "$typeDesc");
 """)
+        if (hasDefaults) sb.append("    int mask = 0;\n")
         fn.parameters.forEachIndexed { i, p ->
-            sb.append(functionParamExtraction(p, i + 1, allClasses, guarded = false))
+            sb.append(functionParamExtraction(p, i + 1, allClasses, guarded = p.hasDefault, maskBit = i))
         }
         val argsStr = fn.parameters.joinToString(", ") { callArg(it) }
-        val callSuffix = if (argsStr.isEmpty()) "" else ", $argsStr"
+        val parts = mutableListOf<String>()
+        if (argsStr.isNotEmpty()) parts.add(argsStr)
+        if (hasDefaults) parts.add("mask")
+        val callSuffix = if (parts.isEmpty()) "" else ", " + parts.joinToString(", ")
         sb.append("    env->CallStaticVoidMethod(g_rdmaCache.suspendClazz, g_rdmaCache.suspend_fn_${fn.name}Async, completionId$callSuffix);\n")
         sb.append("    checkAndThrowJs(env, r);\n")
         fn.parameters.filter { (it.type.type as? RdmaType.Primitive)?.fqn == "kotlin.String" }
@@ -1201,6 +1225,7 @@ static jsi::Value rdma_suspend_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const js
     private fun suspendMethodImpl(cls: RdmaClassInfo, m: MethodInfo, allClasses: List<RdmaClassInfo>): String {
         val sb = StringBuilder()
         val typeDesc = methodTypeDesc(m)
+        val hasDefaults = m.parameters.any { it.hasDefault }
         sb.append("""
 static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
@@ -1212,14 +1237,18 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
     auto recvState = std::static_pointer_cast<RdmaObjectNativeState>(recvObj.getNativeState(r));
     jobject receiver = recvState->getObject();
 """)
+        if (hasDefaults) sb.append("    int mask = 0;\n")
         m.parameters.forEachIndexed { i, p ->
-            sb.append(suspendMethodParamExtraction(p, i + 2))
+            sb.append(suspendMethodParamExtraction(p, i + 2, p.hasDefault, i))
         }
         m.parameters.filter { it.type == "kotlin.String" }.forEachIndexed { i, p ->
             sb.append("    jstring j_${p.name} = args[${i + 2}].isNull() ? nullptr : env->NewStringUTF(cpp_${p.name}.c_str());\n")
         }
         val paramsCall = m.parameters.joinToString(", ") { callArgMethodParam(it) }
-        val callSuffix = if (paramsCall.isEmpty()) "" else ", $paramsCall"
+        val parts = mutableListOf<String>()
+        if (paramsCall.isNotEmpty()) parts.add(paramsCall)
+        if (hasDefaults) parts.add("mask")
+        val callSuffix = if (parts.isEmpty()) "" else ", " + parts.joinToString(", ")
         sb.append("    env->CallStaticVoidMethod(g_rdmaCache.suspendClazz, g_rdmaCache.suspend_${cls.className}_${m.name}Async, completionId, receiver$callSuffix);\n")
         sb.append("    checkAndThrowJs(env, r);\n")
         m.parameters.filter { it.type == "kotlin.String" }.forEach { sb.append("    env->DeleteLocalRef(j_${it.name});\n") }
@@ -1251,9 +1280,34 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
     }
 """
 
-    private fun suspendMethodParamExtraction(p: ParameterInfo, idx: Int): String {
+    private fun suspendMethodParamExtraction(p: ParameterInfo, idx: Int, guarded: Boolean = false, maskBit: Int = idx): String {
+        fun maskLine(): String = if (guarded) "    if (args[$idx].isUndefined()) mask |= (1 << $maskBit);\n" else ""
+        fun notUndef() = if (guarded) "!args[$idx].isUndefined() && " else ""
         val type = JniTypeMapper.forType(p.type)
         if (type != null) {
+            if (p.type == "kotlin.String") {
+                // String crosses as std::string; the suspend method body uses `r` (not `rt`).
+                if (guarded) {
+                    return "    std::string cpp_${p.name};\n" +
+                        "    if (!args[$idx].isUndefined()) { cpp_${p.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r); } else { mask |= (1 << $maskBit); }\n"
+                }
+                if (p.nullable) {
+                    return "    std::string cpp_${p.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r);\n"
+                }
+                return "    std::string cpp_${p.name} = args[$idx].getString(r).utf8(r);\n"
+            }
+            if (guarded) {
+                val decl = when (type.cppType) {
+                    "bool" -> "    bool cpp_${p.name} = false;\n"
+                    "int" -> "    int cpp_${p.name} = 0;\n"
+                    "long" -> "    long cpp_${p.name} = 0;\n"
+                    "double" -> "    double cpp_${p.name} = 0.0;\n"
+                    "float" -> "    float cpp_${p.name} = 0.0f;\n"
+                    else -> "    ${type.cppType} cpp_${p.name} = ${type.cppType}();\n"
+                }
+                return decl +
+                    "    if (!args[$idx].isUndefined()) { cpp_${p.name} = ${type.fromJsi.replace("%d", idx.toString())}; } else { mask |= (1 << $maskBit); }\n"
+            }
             if (p.nullable) {
                 return "    ${type.cppType} cpp_${p.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.fromJsi.replace("%d", idx.toString())});\n"
             }
@@ -1262,17 +1316,18 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
         if (isEnumType(p.type)) {
             val enumName = p.type.substringAfterLast('.')
             return "    jobject arg_${p.name} = nullptr;\n" +
-                "    if (!args[$idx].isNull()) {\n" +
+                "    if (${notUndef()}!args[$idx].isNull()) {\n" +
                 "        std::string cpp_${p.name} = args[$idx].getString(r).utf8(r);\n" +
                 "        jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n" +
                 "        arg_${p.name} = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, j_${p.name});\n" +
                 "        env->DeleteLocalRef(j_${p.name});\n" +
                 "        checkAndThrowJs(env, r);\n" +
-                "    }\n"
+                "    }\n" +
+                maskLine()
         }
         if (p.isList) {
             return "    jobject arg_${p.name} = nullptr;\n" +
-                "    if (!args[$idx].isNull()) {\n" +
+                "    if (${notUndef()}!args[$idx].isNull()) {\n" +
                 "        auto listObj = args[$idx].asObject(r);\n" +
                 "        if (listObj.hasNativeState(r)) {\n" +
                 "            auto ns = listObj.getNativeState(r);\n" +
@@ -1280,11 +1335,12 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
                 "        } else {\n" +
                 "            arg_${p.name} = materializeArray(env, r, jvm, listObj, \"${p.listElementType ?: ""}\");\n" +
                 "        }\n" +
-                "    }\n"
+                "    }\n" +
+                maskLine()
         }
         if (p.isMap) {
             return "    jobject arg_${p.name} = nullptr;\n" +
-                "    if (!args[$idx].isNull()) {\n" +
+                "    if (${notUndef()}!args[$idx].isNull()) {\n" +
                 "        auto mapObj = args[$idx].asObject(r);\n" +
                 "        if (mapObj.hasNativeState(r)) {\n" +
                 "            auto ns = mapObj.getNativeState(r);\n" +
@@ -1292,15 +1348,26 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
                 "        } else {\n" +
                 "            arg_${p.name} = materializeMap(env, r, jvm, mapObj, \"${p.mapKeyType ?: ""}\", \"${p.mapValueType ?: ""}\");\n" +
                 "        }\n" +
-                "    }\n"
+                "    }\n" +
+                maskLine()
         }
         if (p.nullable) {
             return "    jobject arg_${p.name} = nullptr;\n" +
-                "    if (!args[$idx].isNull()) {\n" +
+                "    if (${notUndef()}!args[$idx].isNull()) {\n" +
                 "        auto argObj = args[$idx].asObject(r);\n" +
                 "        auto argState = std::static_pointer_cast<RdmaObjectNativeState>(argObj.getNativeState(r));\n" +
                 "        arg_${p.name} = argState->getObject();\n" +
-                "    }\n"
+                "    }\n" +
+                maskLine()
+        }
+        if (guarded) {
+            return "    jobject arg_${p.name} = nullptr;\n" +
+                "    if (!args[$idx].isUndefined() && !args[$idx].isNull()) {\n" +
+                "        auto argObj_${p.name} = args[$idx].asObject(r);\n" +
+                "        auto argState_${p.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${p.name}.getNativeState(r));\n" +
+                "        arg_${p.name} = argState_${p.name}->getObject();\n" +
+                "    }\n" +
+                "    if (args[$idx].isUndefined()) mask |= (1 << $maskBit);\n"
         }
         return "    auto argObj_${p.name} = args[$idx].asObject(r);\n" +
             "    auto argState_${p.name} = std::static_pointer_cast<RdmaObjectNativeState>(argObj_${p.name}.getNativeState(r));\n" +
@@ -1467,15 +1534,15 @@ $body}
     }
 """
 
-    private fun functionParamExtraction(p: RdmaParameterInfo, i: Int, allClasses: List<RdmaClassInfo>, guarded: Boolean): String {
-        fun maskLine(): String = if (guarded) "    if (args[$i].isUndefined()) mask |= (1 << $i);\n" else ""
+    private fun functionParamExtraction(p: RdmaParameterInfo, i: Int, allClasses: List<RdmaClassInfo>, guarded: Boolean, maskBit: Int = i): String {
+        fun maskLine(): String = if (guarded) "    if (args[$i].isUndefined()) mask |= (1 << $maskBit);\n" else ""
         fun notUndef() = if (guarded) "!args[$i].isUndefined() && " else ""
         return when (val t = p.type.type) {
             is RdmaType.Primitive -> {
                 if (t.fqn == "kotlin.String") {
                     if (guarded) {
                         "    std::string cpp_${p.name};\n" +
-                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = args[$i].isNull() ? \"\" : args[$i].getString(r).utf8(r); } else { mask |= (1 << $i); }\n" +
+                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = args[$i].isNull() ? \"\" : args[$i].getString(r).utf8(r); } else { mask |= (1 << $maskBit); }\n" +
                             "    jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n"
                     } else if (p.type.nullable) {
                         "    std::string cpp_${p.name} = args[$i].isNull() ? \"\" : args[$i].getString(r).utf8(r);\n    jstring j_${p.name} = args[$i].isNull() ? nullptr : env->NewStringUTF(cpp_${p.name}.c_str());\n"
@@ -1492,7 +1559,7 @@ $body}
                             else -> "0.0"
                         }
                         "    ${jt.cppType} cpp_${p.name} = $zero;\n" +
-                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())}; } else { mask |= (1 << $i); }\n"
+                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())}; } else { mask |= (1 << $maskBit); }\n"
                     } else {
                         "    ${jt.cppType} cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())};\n"
                     }

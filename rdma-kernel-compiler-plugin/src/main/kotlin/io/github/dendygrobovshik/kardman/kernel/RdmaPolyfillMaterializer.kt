@@ -181,8 +181,8 @@ object RdmaPolyfillMaterializer {
         val open = after.indexOf('(')
         if (open < 0) return null
 
-        // Walk the parameter list tracking nested (), <> and [] so commas inside generics or
-        // lambda types don't split the list.
+        // Walk the parameter list tracking nested (), <> and [] (and `->` arrows) so commas inside
+        // generics or lambda types don't split the list.
         val params = mutableListOf<String>()
         val current = StringBuilder()
         var depth = 0
@@ -192,15 +192,16 @@ object RdmaPolyfillMaterializer {
         while (i < after.length) {
             val c = after[i]
             when {
+                c == '-' && i + 1 < after.length && after[i + 1] == '>' -> { current.append(c).append('>'); i++ }
                 c == '(' -> { depth++; current.append(c) }
                 c == ')' -> {
                     if (depth == 0) { if (current.isNotBlank()) params.add(current.toString().trim()); break }
                     depth--; current.append(c)
                 }
                 c == '<' -> { angle++; current.append(c) }
-                c == '>' -> { angle--; current.append(c) }
+                c == '>' -> { if (angle > 0) angle--; current.append(c) }
                 c == '[' -> { bracket++; current.append(c) }
-                c == ']' -> { bracket--; current.append(c) }
+                c == ']' -> { if (bracket > 0) bracket--; current.append(c) }
                 c == ',' && depth == 0 && angle == 0 && bracket == 0 -> { params.add(current.toString().trim()); current.clear() }
                 else -> current.append(c)
             }
@@ -248,46 +249,77 @@ object RdmaPolyfillMaterializer {
      *
      * `fun foo(a: Int, b: Int = 5): Int = a + b` becomes:
      * ```
-     * fun foo(a: Int, b: Int = 5): Int {
-     *     var b = b
-     *     if (js("arguments[1] === undefined")) b = (5)
+     * fun foo(_p0: Int, _p1: Int = 5): Int {
+     *     val a = _p0
+     *     val b = if (js("arguments[1] === undefined")) (5) else _p1
      *     return a + b
      * }
      * ```
+     *
+     * Parameters are renamed `_p0.._pN` so the ordered `val <name>` declarations can re-materialize
+     * the resolved values without redeclaring a parameter (which would be a compile error). The
+     * ordered declarations also make cross-parameter defaults (`b = a * 2`) resolve correctly.
      */
     private fun injectDefaultPrologue(source: String, decl: RdmaDeclaration): String {
+        if (decl.kind != RdmaSymbolKind.TOP_LEVEL_FUNCTION) return source
         val sig = decl.signature ?: return source
         val defaulted = sig.indices.filter { sig[it].hasDefault && sig[it].defaultValue != null }
         if (defaulted.isEmpty()) return source
+        // Defensive: a default without its source text cannot be re-materialized.
+        if (sig.any { it.hasDefault && it.defaultValue == null }) return source
+
         val funIdx = source.indexOf("fun ")
         if (funIdx < 0) return source
         val open = source.indexOf('(', funIdx)
         if (open < 0) return source
         val close = matchingParen(source, open) ?: return source
-        val after = source.substring(close + 1)
+
+        val renamed = renameParamsAt(source, open, close, sig) ?: return source
+        val close2 = matchingParen(renamed, open) ?: return source
+        val after = renamed.substring(close2 + 1)
         val eqRel = after.indexOf('=')
         val braceRel = after.indexOf('{')
 
-        val prologue = defaulted.joinToString("") { i ->
+        val prologue = sig.indices.joinToString("") { i ->
             val name = sig[i].name
             val d = sig[i].defaultValue
-            "    var $name = $name\n    if (js(\"arguments[$i] === undefined\")) $name = ($d)\n"
+            if (sig[i].hasDefault && d != null) {
+                "    val $name = if (js(\"arguments[$i] === undefined\")) (${d}) else _p$i\n"
+            } else {
+                "    val $name = _p$i\n"
+            }
         }
 
         return if (braceRel >= 0 && (eqRel < 0 || braceRel < eqRel)) {
             // Block body: insert the prologue right after the opening brace.
-            val braceAbs = close + 1 + braceRel
-            source.substring(0, braceAbs + 1) + "\n" + prologue + source.substring(braceAbs + 1)
+            val braceAbs = close2 + 1 + braceRel
+            renamed.substring(0, braceAbs + 1) + "\n" + prologue + renamed.substring(braceAbs + 1)
         } else if (eqRel >= 0) {
             // Expression body: rewrite to a block body with the prologue + `return expr`.
-            val eqAbs = close + 1 + eqRel
-            val head = source.substring(0, eqAbs).trimEnd()
-            val expr = source.substring(eqAbs + 1).trim()
+            val eqAbs = close2 + 1 + eqRel
+            val head = renamed.substring(0, eqAbs).trimEnd()
+            val expr = renamed.substring(eqAbs + 1).trim()
             "$head {\n$prologue    return $expr\n}"
         } else {
-            source
+            renamed
         }
     }
+
+    /** Renames each parameter in the `(…)` list `[open, close)` to `_p0.._pN`, or null on mismatch. */
+    private fun renameParamsAt(source: String, open: Int, close: Int, sig: List<io.github.dendygrobovshik.kardman.types.RdmaParameterSignature>): String? {
+        val params = RdmaDefaultSupport.splitParams(source.substring(open + 1, close))
+        if (params.size != sig.size) return null
+        val renamed = params.mapIndexed { i, p -> renameParam(p, "_p$i") }.joinToString(", ")
+        return source.substring(0, open + 1) + renamed + source.substring(close)
+    }
+
+    /** Replaces the name (everything before the top-level `:`) of a single parameter. */
+    private fun renameParam(param: String, newName: String): String {
+        val colon = topLevelColon(param)
+        return if (colon < 0) param else newName + param.substring(colon)
+    }
+
+    private fun topLevelColon(s: String): Int = RdmaDefaultSupport.topLevelIndex(s, ':')
 
     private fun matchingParen(source: String, open: Int): Int? {
         var depth = 0

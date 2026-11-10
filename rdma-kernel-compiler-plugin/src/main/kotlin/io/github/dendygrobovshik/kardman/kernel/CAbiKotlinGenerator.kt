@@ -221,23 +221,24 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
             val name = cName(info.className + "_new")
             val hasDefaults = ctor.parameters.any { it.hasDefault }
             val params = buildString {
-                append(ctor.parameters.joinToString(", ") { "${it.name}: ${kotlinType(it.toMemberType())}" })
+                append(ctor.parameters.mapIndexed { i, p -> "${RdmaDefaultSupport.raw(i)}: ${kotlinType(p.toMemberType())}" }.joinToString(", "))
                 if (hasDefaults) {
                     if (ctor.parameters.isNotEmpty()) append(", ")
                     append("mask: Int")
                 }
             }
             val resolutions = StringBuilder()
-            val args = ctor.parameters.mapIndexed { i, p ->
-                val converted = fromC(p.name, p.toMemberType())
-                if (p.hasDefault && p.defaultValue != null) {
-                    val rn = "${p.name}_rdma"
-                    resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
-                    rn
+            ctor.parameters.forEachIndexed { i, p ->
+                val converted = fromC(RdmaDefaultSupport.raw(i), p.toMemberType())
+                val d = p.defaultValue
+                val resolved = if (p.hasDefault && d != null) {
+                    "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else $converted"
                 } else {
                     converted
                 }
-            }.joinToString(", ")
+                resolutions.append("    val ${p.name} = $resolved\n")
+            }
+            val args = ctor.parameters.joinToString(", ") { it.name }
             out.write("""
 fun $name($params): COpaquePointer {
 $resolutions    return ${info.qualifiedName}($args).handle()
@@ -253,21 +254,23 @@ $resolutions    return ${info.qualifiedName}($args).handle()
         val hasDefaults = method.parameters.any { it.hasDefault }
         val params = buildList {
             add("handle: COpaquePointer")
-            method.parameters.forEach { add("${it.name}: ${kotlinType(it.toMemberType())}") }
+            method.parameters.forEachIndexed { i, p -> add("${RdmaDefaultSupport.raw(i)}: ${kotlinType(p.toMemberType())}") }
             if (hasDefaults) add("mask: Int")
         }.joinToString(", ")
         val resolutions = StringBuilder()
-        val args = method.parameters.mapIndexed { i, p ->
-            val converted = fromC(p.name, p.toMemberType())
-            if (p.hasDefault && p.defaultValue != null) {
-                val rn = "${p.name}_rdma"
-                resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
-                rn
+        resolutions.append("    val self = handle.obj<${info.qualifiedName}>()\n")
+        method.parameters.forEachIndexed { i, p ->
+            val converted = fromC(RdmaDefaultSupport.raw(i), p.toMemberType())
+            val d = p.defaultValue
+            val resolved = if (p.hasDefault && d != null) {
+                "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else $converted"
             } else {
                 converted
             }
-        }.joinToString(", ")
-        val call = "handle.obj<${info.qualifiedName}>().${method.name}($args)"
+            resolutions.append("    val ${p.name} = $resolved\n")
+        }
+        val args = method.parameters.joinToString(", ") { it.name }
+        val call = "self.${method.name}($args)"
         val body = if (CAbi.isVoid(method.returnType)) {
             "$resolutions    rdmaCaptureError(Unit) {\n        $call\n    }\n"
         } else {
@@ -343,17 +346,17 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         is RdmaType.FunctionType -> "COpaquePointer?"
     }
 
-    private fun functionParamFromC(p: io.github.dendygrobovshik.kardman.types.RdmaParameterInfo): String = when (val ty = p.type.type) {
-        is RdmaType.UnitType -> p.name
-        is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "${p.name}?.toKString() ?: \"\"" else p.name
+    private fun functionParamFromC(p: io.github.dendygrobovshik.kardman.types.RdmaParameterInfo, raw: String): String = when (val ty = p.type.type) {
+        is RdmaType.UnitType -> raw
+        is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "$raw?.toKString() ?: \"\"" else raw
         is RdmaType.Ref -> when {
-            isEnumType(ty.fqn) -> "${ty.fqn}.valueOf(${p.name}?.toKString() ?: \"\")"
-            p.type.nullable -> "${p.name}?.obj<${ty.fqn}>()"
-            else -> "${p.name}.obj<${ty.fqn}>()"
+            isEnumType(ty.fqn) -> "${ty.fqn}.valueOf($raw?.toKString() ?: \"\")"
+            p.type.nullable -> "$raw?.obj<${ty.fqn}>()"
+            else -> "$raw.obj<${ty.fqn}>()"
         }
-        is RdmaType.ListType -> if (p.type.nullable) "${p.name}?.obj<List<${listElemKotlin(ty)}>>()" else "${p.name}.obj<List<${listElemKotlin(ty)}>>()"
-        is RdmaType.MapType -> if (p.type.nullable) "${p.name}?.obj<Map<${rdmaTypeKotlin(ty.key.type)}, ${rdmaTypeKotlin(ty.value.type)}>>()" else "${p.name}.obj<Map<${rdmaTypeKotlin(ty.key.type)}, ${rdmaTypeKotlin(ty.value.type)}>>()"
-        is RdmaType.FunctionType -> "${p.name}_fn"
+        is RdmaType.ListType -> if (p.type.nullable) "$raw?.obj<List<${listElemKotlin(ty)}>>()" else "$raw.obj<List<${listElemKotlin(ty)}>>()"
+        is RdmaType.MapType -> if (p.type.nullable) "$raw?.obj<Map<${rdmaTypeKotlin(ty.key.type)}, ${rdmaTypeKotlin(ty.value.type)}>>()" else "$raw.obj<Map<${rdmaTypeKotlin(ty.key.type)}, ${rdmaTypeKotlin(ty.value.type)}>>()"
+        is RdmaType.FunctionType -> "${raw}_fn"
     }
 
     private fun functionReturnToC(t: RdmaTypeRef, expr: String): String = when (val ty = t.type) {
@@ -401,7 +404,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         val name = cName(fn.name)
         val hasDefaults = fn.parameters.any { it.hasDefault }
         val params = buildString {
-            append(fn.parameters.joinToString(", ") { "${it.name}: ${functionParamKotlinType(it.type)}" })
+            append(fn.parameters.mapIndexed { i, p -> "${RdmaDefaultSupport.raw(i)}: ${functionParamKotlinType(p.type)}" }.joinToString(", "))
             if (hasDefaults) {
                 if (fn.parameters.isNotEmpty()) append(", ")
                 append("mask: Int")
@@ -409,28 +412,30 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
         }
 
         val lambdaDecls = StringBuilder()
-        for (p in fn.parameters) {
-            val ty = p.type.type as? RdmaType.FunctionType ?: continue
+        fn.parameters.forEachIndexed { i, p ->
+            val ty = p.type.type as? RdmaType.FunctionType ?: return@forEachIndexed
+            val raw = RdmaDefaultSupport.raw(i)
             val n = ty.parameters.size
             val argNames = (0 until n).joinToString(", ") { "p$it" }
             val argsArray = if (n == 0) "emptyArray<Any?>()"
             else (0 until n).joinToString(", ", "arrayOf<Any?>(", ")") { "p$it" }
-            lambdaDecls.append("    val ${p.name}_fn: ${functionParamKotlinFnType(ty)} = " +
-                "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda(${p.name}, $argsArray); Unit }\n")
+            lambdaDecls.append("    val ${raw}_fn: ${functionParamKotlinFnType(ty)} = " +
+                "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda($raw, $argsArray); Unit }\n")
         }
 
         val resolutions = StringBuilder()
-        val args = fn.parameters.mapIndexed { i, p ->
-            val converted = functionParamFromC(p)
-            if (p.hasDefault && p.defaultValue != null) {
-                val rn = "${p.name}_rdma"
-                resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
-                rn
+        fn.parameters.forEachIndexed { i, p ->
+            val converted = functionParamFromC(p, RdmaDefaultSupport.raw(i))
+            val d = p.defaultValue
+            val resolved = if (p.hasDefault && d != null) {
+                "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else $converted"
             } else {
                 converted
             }
-        }.joinToString(", ")
+            resolutions.append("    val ${p.name} = $resolved\n")
+        }
         val retK = functionReturnKotlinType(fn.returnType)
+        val args = fn.parameters.joinToString(", ") { it.name }
         val invokeCall = "${fn.qualifiedName}" + (if (args.isEmpty()) "()" else "($args)")
         val body = if (fn.returnType.type is RdmaType.UnitType) {
             "$lambdaDecls$resolutions    rdmaCaptureError(Unit) { $invokeCall }\n"
@@ -451,27 +456,39 @@ $body}
         val hasDefaults = fn.parameters.any { it.hasDefault }
         val declParams = buildList {
             add("completionId: Long")
-            fn.parameters.forEach { add("${it.name}: ${functionParamKotlinType(it.type)}") }
+            fn.parameters.forEachIndexed { i, p -> add("${RdmaDefaultSupport.raw(i)}: ${functionParamKotlinType(p.type)}") }
             if (hasDefaults) add("mask: Int")
         }
+        val lambdaDecls = StringBuilder()
+        fn.parameters.forEachIndexed { i, p ->
+            val ty = p.type.type as? RdmaType.FunctionType ?: return@forEachIndexed
+            val raw = RdmaDefaultSupport.raw(i)
+            val n = ty.parameters.size
+            val argNames = (0 until n).joinToString(", ") { "p$it" }
+            val argsArray = if (n == 0) "emptyArray<Any?>()"
+            else (0 until n).joinToString(", ", "arrayOf<Any?>(", ")") { "p$it" }
+            lambdaDecls.append("        val ${raw}_fn: ${functionParamKotlinFnType(ty)} = " +
+                "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda($raw, $argsArray); Unit }\n")
+        }
         val resolutions = StringBuilder()
-        val args = fn.parameters.mapIndexed { i, p ->
-            val converted = functionParamFromC(p)
-            if (p.hasDefault && p.defaultValue != null) {
-                val rn = "${p.name}_rdma"
-                resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
-                rn
+        fn.parameters.forEachIndexed { i, p ->
+            val converted = functionParamFromC(p, RdmaDefaultSupport.raw(i))
+            val d = p.defaultValue
+            val resolved = if (p.hasDefault && d != null) {
+                "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else $converted"
             } else {
                 converted
             }
-        }.joinToString(", ")
+            resolutions.append("        val ${p.name} = $resolved\n")
+        }
+        val args = fn.parameters.joinToString(", ") { it.name }
         val call = "${fn.qualifiedName}($args)"
         // Enum results cross back as their name string.
         val result = if ((fn.returnType.type as? RdmaType.Ref)?.let { isEnumType(it.fqn) } == true) "($call).name" else call
         out.write("""
 fun $name(${declParams.joinToString(", ")}) {
     RdmaSuspend.launch {
-$resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
+$lambdaDecls$resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
         catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
     }
 }
@@ -485,21 +502,23 @@ $resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
         val declParams = buildList {
             add("completionId: Long")
             add("receiver: COpaquePointer")
-            method.parameters.forEach { add("${it.name}: ${kotlinType(it.toMemberType())}") }
+            method.parameters.forEachIndexed { i, p -> add("${RdmaDefaultSupport.raw(i)}: ${kotlinType(p.toMemberType())}") }
             if (hasDefaults) add("mask: Int")
         }
         val resolutions = StringBuilder()
-        val args = method.parameters.mapIndexed { i, p ->
-            val converted = fromC(p.name, p.toMemberType())
-            if (p.hasDefault && p.defaultValue != null) {
-                val rn = "${p.name}_rdma"
-                resolutions.append("    val $rn = if (mask and ${1 shl i} != 0) (${p.defaultValue}) else $converted\n")
-                rn
+        resolutions.append("        val self = receiver.obj<${info.qualifiedName}>()\n")
+        method.parameters.forEachIndexed { i, p ->
+            val converted = fromC(RdmaDefaultSupport.raw(i), p.toMemberType())
+            val d = p.defaultValue
+            val resolved = if (p.hasDefault && d != null) {
+                "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else $converted"
             } else {
                 converted
             }
-        }.joinToString(", ")
-        val call = "receiver.obj<${info.qualifiedName}>().${method.name}($args)"
+            resolutions.append("        val ${p.name} = $resolved\n")
+        }
+        val args = method.parameters.joinToString(", ") { it.name }
+        val call = "self.${method.name}($args)"
         val result = if (method.returnType in enumFqns) "($call).name" else call
         out.write("""
 fun $name(${declParams.joinToString(", ")}) {

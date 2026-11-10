@@ -96,13 +96,19 @@ class CAbiWidgetIrGenerator(
 
         for (fn in widgets) {
             val stubName = prefix + "compose" + fn.name
-            val stub = byName[stubName] ?: continue // generated source not yet compiled this pass
             val widget = byFqn[fn.qualifiedName] ?: continue
 
-            val params = classify(fn)
-            val helpers = resolveHelpers(fn, params, byName) ?: continue // helpers not yet resolvable
-
-            injectBody(stub, widget.symbol, params, helpers, getComposer, toKString)
+            if (fn.parameters.any { it.hasDefault }) {
+                // The entry stub already resolved defaults in source and delegates to the `_impl`
+                // function; inject the widget call (params already Kotlin-typed) into `_impl`.
+                val impl = byName[stubName + "_impl"] ?: continue
+                injectImplBody(impl, widget.symbol, getComposer)
+            } else {
+                val stub = byName[stubName] ?: continue
+                val params = classify(fn)
+                val helpers = resolveHelpers(fn, params, byName) ?: continue
+                injectBody(stub, widget.symbol, params, helpers, getComposer, toKString)
+            }
         }
     }
 
@@ -173,6 +179,34 @@ class CAbiWidgetIrGenerator(
         }
 
         stub.body = builder.irBlockBody {
+            +call
+        }
+    }
+
+    /**
+     * Injects the widget call into a generated `_impl` function whose parameters are already the
+     * resolved Kotlin values (defaults applied in source by [CAbiWidgetGenerator]). Each parameter
+     * maps directly to the widget's user parameter; only the composer and changed params are added.
+     */
+    private fun injectImplBody(
+        impl: IrSimpleFunction,
+        widget: IrSimpleFunctionSymbol,
+        getComposer: IrSimpleFunctionSymbol,
+    ) {
+        val builder = DeclarationIrBuilder(pluginContext, impl.symbol)
+        val implParams = impl.parameters.filter { it.kind == IrParameterKind.Regular }
+        val composer = builder.irAs(builder.irCall(getComposer), composerType)
+
+        val call = builder.irCall(widget)
+        implParams.forEachIndexed { i, p -> call.arguments[i] = builder.irGet(p) }
+        val widgetValueParams = widget.owner.parameters.filter { it.kind == IrParameterKind.Regular }
+        var argIdx = implParams.size
+        for (j in implParams.size until widgetValueParams.size) {
+            call.arguments[argIdx] = if (j == implParams.size) composer else builder.irInt(0)
+            argIdx++
+        }
+
+        impl.body = builder.irBlockBody {
             +call
         }
     }

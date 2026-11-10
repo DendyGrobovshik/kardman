@@ -61,11 +61,14 @@ object RdmaFunctionExtractor {
                 }
                 // The compose compiler injects synthetic `$composer`/`$changed` params and
                 // rewrites `@Composable () -> Unit` types to `Function2<Composer, Int, Unit>`;
-                // strip both so the manifest records the logical widget signature.
+                // strip both so the manifest records the logical widget signature. The compose
+                // compiler also nulls `IrValueParameter.defaultValue`, and offset-based default text
+                // drops receiver/qualifier prefixes, so default text is re-parsed from the source.
+                val defaultsByIndex = RdmaDefaultSupport.defaultValuesFromFunctionSource(sourceText ?: "", fn.startOffset, fn.endOffset)
                 val parameters = fn.parameters
                     .filter { it.kind == IrParameterKind.Regular }
                     .filter { !it.name.asString().startsWith("$") }
-                    .map { p -> toParameterInfo(p, sourceText) }
+                    .mapIndexed { i, p -> toParameterInfo(p, sourceText, defaultsByIndex[i]) }
                 val returnType = if (composable) {
                     RdmaTypeRef(RdmaType.UnitType)
                 } else {
@@ -100,9 +103,9 @@ object RdmaFunctionExtractor {
      * so a function type that contains a `Composer` parameter is a content lambda; a function type
      * without one is a plain callback. We record the logical (un-lowered) function type.
      */
-    private fun toParameterInfo(p: IrValueParameter, sourceText: String?): RdmaParameterInfo {
-        val hasDefault = p.defaultValue != null
-        val defaultText = defaultValueText(p, sourceText)
+    private fun toParameterInfo(p: IrValueParameter, sourceText: String?, defaultOverride: String? = null): RdmaParameterInfo {
+        val hasDefault = p.defaultValue != null || defaultOverride != null
+        val defaultText = defaultOverride ?: defaultValueText(p, sourceText)
         val simple = p.type as? IrSimpleType ?: return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type), hasDefault = hasDefault, defaultValue = defaultText)
         val fqn = p.type.classFqName?.asString()
         if (fqn == null || !fqn.startsWith("kotlin.Function")) {

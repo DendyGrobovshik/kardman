@@ -15,6 +15,11 @@
  */
 package com.example.plugin.bob
 
+import com.example.kernel.internal.addWithDefaults
+import com.example.kernel.internal.computeSumDefault
+import com.example.kernel.internal.Counter
+import com.example.kernel.internal.describeDefault
+import com.example.kernel.internal.greet
 import com.example.kernel.internal.services.appendToList
 import com.example.kernel.internal.services.computeSum
 import com.example.kernel.internal.services.describeInfoSuspend
@@ -66,13 +71,38 @@ fun runServicesDemo() {
     runMapMutationDemo()
     runMapNestingDemo()
     runMapCrossRuntimeDemo()
+    runDefaultParamsDemo()
 
     CoroutineScope(Dispatchers.Main).launch { runSuspendDemo() }
+}
+
+fun runDefaultParamsDemo() {
+    // Cross-parameter default: `b` defaults to `a * 2`.
+    val add = addWithDefaults(5)
+    println("DEFAULT_FN: add=$add")
+
+    // All-defaulted call.
+    println("DEFAULT_FN2: greet=${greet()}")
+
+    // Nullable return with a defaulted trailing parameter.
+    println("DEFAULT_NULL: ${describeDefault(true)}")
+
+    // Defaulted constructor + method default referencing `this`.
+    val counter = Counter()
+    println("DEFAULT_CTOR: tag=${counter.tag()}")
+
+    // Defaulted method where `times` defaults to `this.step`.
+    val bumped = counter.bump(5)
+    println("DEFAULT_METHOD: bump=$bumped")
 }
 
 suspend fun runSuspendDemo() {
     val sum = computeSum(2, 3)
     println("SUSPEND_FN: sum=$sum")
+
+    // Defaulted suspend function: `b` defaults to 10.
+    val defaultedSum = computeSumDefault(5)
+    println("SUSPEND_DEFAULT: sum=$defaultedSum")
 
     val list = echoIntListSuspend(listOf(1, 2, 3))
     println("SUSPEND_LIST: size=${list.size} first=${list.get(0)}")

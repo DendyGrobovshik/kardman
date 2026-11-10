@@ -31,6 +31,12 @@ import java.io.OutputStream
  * arguments, computes a bitmask of the omitted trailing parameters, and calls the wrapper here.
  * The wrapper evaluates the default *natively* for each masked parameter and delegates to the
  * original declaration.
+ *
+ * The wrapper uses the "resolved-vals" scheme so cross-parameter defaults and `this` references
+ * resolve correctly: raw parameters are renamed `_p0.._pN`, then ordered `val <name>` declarations
+ * re-materialize each value (the default expression is inlined verbatim, with `this` rewritten to
+ * `self` for methods), so a default that references an earlier parameter sees its already-resolved
+ * value.
  */
 class RdmaDefaultWrapperGenerator(
     private val kernelPackage: String,
@@ -38,7 +44,7 @@ class RdmaDefaultWrapperGenerator(
 ) {
 
     fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>) {
-        val fns = functions.filter { !it.suspend && it.parameters.any { p -> p.hasDefault } }
+        val fns = functions.filter { !it.suspend && !it.composable && it.parameters.any { p -> p.hasDefault } }
         val methods = classInfos.flatMap { cls ->
             cls.methods.filter { !it.isSuspend && it.parameters.any { p -> p.hasDefault } }.map { cls to it }
         }
@@ -63,23 +69,20 @@ class RdmaDefaultWrapperGenerator(
         out.close()
     }
 
-    /** `mask and (1 shl i) != 0` — true when parameter [i] was omitted. */
-    private fun omitted(i: Int) = "mask and ${1 shl i} != 0"
-
-    private fun resolve(name: String, defaultValue: String, converted: String, i: Int): String =
-        "if (${omitted(i)}) ($defaultValue) else $converted"
-
     private fun writeFunction(fn: RdmaFunctionInfo): String {
         val sb = StringBuilder()
         val params = fn.parameters.mapIndexed { i, p ->
-            "${p.name}: ${kotlinType(p.type)}"
+            "${RdmaDefaultSupport.raw(i)}: ${kotlinType(p.type)}"
         }.toMutableList()
         params.add("mask: Int")
-        val args = fn.parameters.mapIndexed { i, p ->
-            if (p.hasDefault && p.defaultValue != null) resolve(p.name, p.defaultValue!!, p.name, i) else p.name
-        }.joinToString(", ")
         val ret = kotlinType(fn.returnType)
-        sb.append("fun ${fn.name}_rdma_default(${params.joinToString(", ")}): $ret = ${fn.qualifiedName}($args)\n\n")
+        sb.append("fun ${fn.name}_rdma_default(${params.joinToString(", ")}): $ret {\n")
+        fn.parameters.forEachIndexed { i, p ->
+            sb.append("    val ${p.name} = ${resolveValue(p, i)}\n")
+        }
+        val args = fn.parameters.joinToString(", ") { it.name }
+        sb.append("    return ${fn.qualifiedName}($args)\n")
+        sb.append("}\n\n")
         return sb.toString()
     }
 
@@ -87,38 +90,65 @@ class RdmaDefaultWrapperGenerator(
         val sb = StringBuilder()
         val params = buildList {
             add("self: ${cls.qualifiedName}")
-            m.parameters.forEach { add("${it.name}: ${memberKotlinType(it)}") }
+            m.parameters.forEachIndexed { i, p -> add("${RdmaDefaultSupport.raw(i)}: ${memberKotlinType(p)}") }
             add("mask: Int")
         }
-        val args = m.parameters.mapIndexed { i, p ->
-            if (p.hasDefault && p.defaultValue != null) resolve(p.name, p.defaultValue!!, p.name, i) else p.name
-        }.joinToString(", ")
         val ret = memberKotlinType(m)
-        val call = "self.${m.name}($args)"
-        sb.append("fun ${cls.className}_${m.name}_rdma_default(${params.joinToString(", ")}): $ret = $call\n\n")
+        sb.append("fun ${cls.className}_${m.name}_rdma_default(${params.joinToString(", ")}): $ret {\n")
+        m.parameters.forEachIndexed { i, p ->
+            sb.append("    val ${p.name} = ${resolveValue(p, i)}\n")
+        }
+        val args = m.parameters.joinToString(", ") { it.name }
+        sb.append("    return self.${m.name}($args)\n")
+        sb.append("}\n\n")
         return sb.toString()
     }
 
     private fun writeConstructor(cls: RdmaClassInfo, ctor: io.github.dendygrobovshik.kardman.types.ConstructorInfo): String {
         val sb = StringBuilder()
         val params = buildList {
-            ctor.parameters.forEach { add("${it.name}: ${memberKotlinType(it)}") }
+            ctor.parameters.forEachIndexed { i, p -> add("${RdmaDefaultSupport.raw(i)}: ${memberKotlinType(p)}") }
             add("mask: Int")
         }
-        val args = ctor.parameters.mapIndexed { i, p ->
-            if (p.hasDefault && p.defaultValue != null) resolve(p.name, p.defaultValue!!, p.name, i) else p.name
-        }.joinToString(", ")
-        sb.append("fun ${cls.className}_new_rdma_default(${params.joinToString(", ")}): ${cls.qualifiedName} = ${cls.qualifiedName}($args)\n\n")
+        sb.append("fun ${cls.className}_new_rdma_default(${params.joinToString(", ")}): ${cls.qualifiedName} {\n")
+        ctor.parameters.forEachIndexed { i, p ->
+            sb.append("    val ${p.name} = ${resolveValue(p, i)}\n")
+        }
+        val args = ctor.parameters.joinToString(", ") { it.name }
+        sb.append("    return ${cls.qualifiedName}($args)\n")
+        sb.append("}\n\n")
         return sb.toString()
     }
 
-    private fun kotlinType(t: RdmaTypeRef): String = when (val ty = t.type) {
-        is RdmaType.UnitType -> "Unit"
-        is RdmaType.Primitive -> primitiveKotlin(ty.fqn)
-        is RdmaType.Ref -> ty.fqn
-        is RdmaType.ListType -> "List<${kotlinType(ty.element)}>"
-        is RdmaType.MapType -> "Map<${kotlinType(ty.key)}, ${kotlinType(ty.value)}>"
-        is RdmaType.FunctionType -> "kotlin.Function${ty.parameters.size}"
+    /** A parameter's resolved value: default (with `this`→`self`) when masked, else the raw value. */
+    private fun resolveValue(p: RdmaParameterInfo, i: Int): String {
+        val d = p.defaultValue
+        return if (p.hasDefault && d != null) {
+            "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else ${RdmaDefaultSupport.raw(i)}"
+        } else {
+            RdmaDefaultSupport.raw(i)
+        }
+    }
+
+    private fun resolveValue(p: ParameterInfo, i: Int): String {
+        val d = p.defaultValue
+        return if (p.hasDefault && d != null) {
+            "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else ${RdmaDefaultSupport.raw(i)}"
+        } else {
+            RdmaDefaultSupport.raw(i)
+        }
+    }
+
+    private fun kotlinType(t: RdmaTypeRef): String {
+        val base = when (val ty = t.type) {
+            is RdmaType.UnitType -> "Unit"
+            is RdmaType.Primitive -> primitiveKotlin(ty.fqn)
+            is RdmaType.Ref -> ty.fqn
+            is RdmaType.ListType -> "List<${kotlinType(ty.element)}>"
+            is RdmaType.MapType -> "Map<${kotlinType(ty.key)}, ${kotlinType(ty.value)}>"
+            is RdmaType.FunctionType -> "kotlin.Function${ty.parameters.size}"
+        }
+        return if (t.nullable && base != "Unit") "$base?" else base
     }
 
     private fun primitiveKotlin(fqn: String): String = when (fqn) {
@@ -131,16 +161,22 @@ class RdmaDefaultWrapperGenerator(
         else -> "Any"
     }
 
-    private fun memberKotlinType(p: ParameterInfo): String = when {
-        p.isList -> "List<${descriptorKotlin(p.listElementType ?: "kotlin.Any")}>"
-        p.isMap -> "Map<${descriptorKotlin(p.mapKeyType ?: "kotlin.Any")}, ${descriptorKotlin(p.mapValueType ?: "kotlin.Any")}>"
-        else -> primitiveKotlin(p.type).takeIf { it != "Any" } ?: p.type
+    private fun memberKotlinType(p: ParameterInfo): String {
+        val base = when {
+            p.isList -> "List<${descriptorKotlin(p.listElementType ?: "kotlin.Any")}>"
+            p.isMap -> "Map<${descriptorKotlin(p.mapKeyType ?: "kotlin.Any")}, ${descriptorKotlin(p.mapValueType ?: "kotlin.Any")}>"
+            else -> primitiveKotlin(p.type).takeIf { it != "Any" } ?: p.type
+        }
+        return if (p.nullable && base != "Unit") "$base?" else base
     }
 
-    private fun memberKotlinType(m: io.github.dendygrobovshik.kardman.types.MethodInfo): String = when {
-        m.isList -> "List<${descriptorKotlin(m.listElementType ?: "kotlin.Any")}>"
-        m.isMap -> "Map<${descriptorKotlin(m.mapKeyType ?: "kotlin.Any")}, ${descriptorKotlin(m.mapValueType ?: "kotlin.Any")}>"
-        else -> primitiveKotlin(m.returnType).takeIf { it != "Any" } ?: m.returnType
+    private fun memberKotlinType(m: io.github.dendygrobovshik.kardman.types.MethodInfo): String {
+        val base = when {
+            m.isList -> "List<${descriptorKotlin(m.listElementType ?: "kotlin.Any")}>"
+            m.isMap -> "Map<${descriptorKotlin(m.mapKeyType ?: "kotlin.Any")}, ${descriptorKotlin(m.mapValueType ?: "kotlin.Any")}>"
+            else -> primitiveKotlin(m.returnType).takeIf { it != "Any" } ?: m.returnType
+        }
+        return if (m.nullableReturn && base != "Unit") "$base?" else base
     }
 
     private fun descriptorKotlin(descriptor: String): String = when {

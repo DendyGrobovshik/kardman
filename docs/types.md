@@ -95,6 +95,14 @@ see the boundary table above.
   the default by the native bridge (via a mask) or the dynamic polyfill (via a
   prologue). The default expression must compile in both the native kernel and the
   JS polyfill.
+- **Lambda defaults are empty-only** — a lambda parameter (`content: @Composable
+  () -> Unit`) may default only to the empty lambda `{}`. A non-empty lambda default
+  is a compile-time error: it would reference symbols that are not in scope of the
+  generated bridge.
+- **No `private` references** — a default expression may not reference a `private`
+  declaration (the default is re-materialized in a generated wrapper that lives in a
+  different scope). `internal` / `public` / companion-object / object references are
+  allowed.
 
 Adding a new trailing defaulted parameter is **forward- and backward-compatible**;
 reordering, removing, renaming, retyping, or inserting a parameter anywhere else is

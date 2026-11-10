@@ -86,6 +86,22 @@ data class RdmaParameterSignature(
     val defaultValue: String? = null,
 )
 
+/**
+ * The lean, committed form of a callable parameter written to `rdma_signatures.json`.
+ *
+ * Only `(name, type, hasDefault)` is persisted: it is exactly what the release-time
+ * [RdmaSignatureClassifier] needs to reject incompatible signature changes, and it keeps the
+ * committed baseline free of the raw default-expression source text. The `defaultValue` text is
+ * transient — it lives only in the in-memory analysis (`rdma_analysis.json`) where the polyfill
+ * materializer reads it to re-fill a masked parameter.
+ */
+@Serializable
+data class RdmaSignatureEntry(
+    val name: String,
+    val type: String,
+    val hasDefault: Boolean = false,
+)
+
 /** A directed "uses" edge: `from` references `to`. Both are collapsed polyfill-node fqns. */
 @Serializable
 data class RdmaUse(
@@ -128,5 +144,5 @@ data class RdmaHashesFile(
 @Serializable
 data class RdmaSignaturesFile(
     val moduleId: String,
-    val signatures: Map<String, List<RdmaParameterSignature>> = emptyMap(),
+    val signatures: Map<String, List<RdmaSignatureEntry>> = emptyMap(),
 )

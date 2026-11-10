@@ -120,7 +120,8 @@ object RdmaClassExtractor {
 
         val constructors = buildList {
             val primary = cls.primaryConstructor ?: return@buildList
-            add(ConstructorInfo(primary.valueParams().map { it.toParameterInfo(sourceText) }))
+            val defaults = RdmaDefaultSupport.defaultValuesFromDecl(sourceText ?: "", cls.startOffset, cls.endOffset, "class $className")
+            add(ConstructorInfo(primary.valueParams().mapIndexed { i, p -> p.toParameterInfo(sourceText, defaults[i]) }))
         }
 
         val methods = cls.functions
@@ -132,10 +133,11 @@ object RdmaClassExtractor {
             }
             .map { fn ->
                 val isOpen = fn.modality == Modality.OPEN && fn.overriddenSymbols.isEmpty()
+                val defaults = RdmaDefaultSupport.defaultValuesFromDecl(sourceText ?: "", fn.startOffset, fn.endOffset, "fun ")
                 MethodInfo(
                     name = fn.name.asString(),
                     returnType = fn.returnType.toTypeName(),
-                    parameters = fn.valueParams().map { it.toParameterInfo(sourceText) },
+                    parameters = fn.valueParams().mapIndexed { i, p -> p.toParameterInfo(sourceText, defaults[i]) },
                     nullableReturn = fn.returnType.isNullable(),
                     isOpen = isOpen,
                     isSuspend = fn.isSuspend,
@@ -199,14 +201,14 @@ object RdmaClassExtractor {
             .toList()
     }
 
-    private fun IrValueParameter.toParameterInfo(sourceText: String?): ParameterInfo {
+    private fun IrValueParameter.toParameterInfo(sourceText: String?, defaultOverride: String? = null): ParameterInfo {
         val typeName = type.toTypeName()
         return ParameterInfo(
             name = name.asString(),
             type = typeName,
             nullable = type.isNullable(),
-            hasDefault = defaultValue != null,
-            defaultValue = defaultValueText(this, sourceText),
+            hasDefault = defaultValue != null || defaultOverride != null,
+            defaultValue = defaultOverride ?: defaultValueText(this, sourceText),
             isList = type.isList(),
             listElementType = type.listElementType(),
             isMap = type.isMap(),

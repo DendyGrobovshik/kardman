@@ -27,6 +27,11 @@ import java.io.OutputStream
  *    functions, and the `@EagerInitialization` + `staticCFunction` registration;
  *  - `RdmaWidgetBridge_<mod>.h/cpp` — JSI `HostFunction`s that call the entry through
  *    the function-pointer registry (no composer/changed crossing) inside `rdmaCallUi`.
+ *
+ * Defaulted trailing parameters use the "resolved-vals" scheme: the entry stub takes the raw
+ * parameters as `_p0.._pN` plus a trailing `mask: Int`, re-materializes each value with an ordered
+ * `val <name> = if (mask and (1 shl i) != 0) (<default>) else <converted>` declaration, then calls a
+ * generated `_impl` function whose body [CAbiWidgetIrGenerator] fills with the widget call.
  */
 class CAbiWidgetGenerator(
     private val cppOutput: (String, String) -> OutputStream,
@@ -43,12 +48,16 @@ class CAbiWidgetGenerator(
     private val nsClose: String = if (moduleId.isEmpty()) "" else "} // namespace $moduleId\n"
 
     private sealed class Param {
-        data class Value(val name: String, val jvmType: String) : Param()
-        data class Ref(val name: String, val fqn: String, val nullable: Boolean) : Param()
-        data class Content(val name: String, val arity: Int) : Param()
-        data class Callback(val name: String, val arity: Int, val paramTypes: List<RdmaTypeRef>) : Param()
-        data class ListVal(val name: String, val elemType: RdmaTypeRef) : Param()
-        data class ListHandle(val name: String, val arity: Int) : Param()
+        abstract val name: String
+        abstract val hasDefault: Boolean
+        abstract val defaultValue: String?
+
+        data class Value(override val name: String, val jvmType: String, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
+        data class Ref(override val name: String, val fqn: String, val nullable: Boolean, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
+        data class Content(override val name: String, val arity: Int, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
+        data class Callback(override val name: String, val arity: Int, val paramTypes: List<RdmaTypeRef>, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
+        data class ListVal(override val name: String, val elemType: RdmaTypeRef, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
+        data class ListHandle(override val name: String, val arity: Int, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
 
         val idName: String get() = when (this) {
             is Value -> name
@@ -72,16 +81,16 @@ class CAbiWidgetGenerator(
         val fnType = p.type.type as? RdmaType.FunctionType
         val listType = p.type.type as? RdmaType.ListType
         when {
-            fnType != null && p.composable -> Param.Content(p.name, fnType.parameters.size)
-            fnType != null -> Param.Callback(p.name, fnType.parameters.size, fnType.parameters)
+            fnType != null && p.composable -> Param.Content(p.name, fnType.parameters.size, p.hasDefault, p.defaultValue)
+            fnType != null -> Param.Callback(p.name, fnType.parameters.size, fnType.parameters, p.hasDefault, p.defaultValue)
             listType != null -> {
                 val elem = listType.element
-                if (elem.type is RdmaType.FunctionType) Param.ListHandle(p.name, (elem.type as RdmaType.FunctionType).parameters.size)
-                else Param.ListVal(p.name, elem)
+                if (elem.type is RdmaType.FunctionType) Param.ListHandle(p.name, (elem.type as RdmaType.FunctionType).parameters.size, p.hasDefault, p.defaultValue)
+                else Param.ListVal(p.name, elem, p.hasDefault, p.defaultValue)
             }
             p.type.type is RdmaType.Ref ->
-                Param.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable)
-            else -> Param.Value(p.name, valueFqn(p.type.type))
+                Param.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable, p.hasDefault, p.defaultValue)
+            else -> Param.Value(p.name, valueFqn(p.type.type), p.hasDefault, p.defaultValue)
         }
     }
 
@@ -91,7 +100,8 @@ class CAbiWidgetGenerator(
         else -> "kotlin.Any"
     }
 
-    private fun changedIntCount(paramCount: Int): Int = paramCount / 16 + 1
+    private fun changedIntCount(paramCount: Int): Int =
+        if (paramCount == 0) 1 else (paramCount + 9) / 10
 
     private fun changedCallArgs(paramCount: Int): String =
         (0 until changedIntCount(paramCount)).joinToString(", ") { "0" }
@@ -129,6 +139,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.currentComposer
 import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 import io.github.dendygrobovshik.kardman.runtime.rdmaRegisterFunction
+import io.github.dendygrobovshik.kardman.runtime.rdmaToKString
 import kotlin.native.EagerInitialization
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.COpaquePointer
@@ -150,6 +161,10 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
                             else -> emptyList()
                         }
                     }
+                    is Param.ListVal -> when (val ty = p.elemType.type) {
+                        is RdmaType.Ref -> listOf(ty.fqn)
+                        else -> emptyList()
+                    }
                     else -> emptyList()
                 }
             }
@@ -164,6 +179,9 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         }
         for (fn in widgets) {
             out.write(stub(fn))
+        }
+        for (fn in widgets) {
+            if (classify(fn).any { it.hasDefault }) out.write(implStub(fn))
         }
         out.write(registration(widgets))
         out.close()
@@ -210,8 +228,57 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
     private fun stub(fn: RdmaFunctionInfo): String {
         val params = classify(fn)
         val cName = prefix + "compose" + fn.name
-        val sig = params.joinToString(", ") { cParamSig(it) }
-        return "fun $cName($sig) {\n}\n"
+        val hasDefaults = params.any { it.hasDefault }
+        if (!hasDefaults) return "fun $cName(${params.joinToString(", ") { cParamSig(it) }}) {\n}\n"
+        val sig = params.mapIndexed { i, p -> "${RdmaDefaultSupport.raw(i)}: ${cParamKotlinType(p)}" }
+            .plus(listOf("mask: Int"))
+            .joinToString(", ")
+        val resolutions = StringBuilder()
+        params.forEachIndexed { i, p ->
+            val converted = convertExpr(p, RdmaDefaultSupport.raw(i), cName)
+            val d = p.defaultValue
+            if (p is Param.Content && p.hasDefault && d != null) {
+                // Definite assignment so `{}` coerces against the declared `@Composable` type.
+                resolutions.append("    val ${p.name}: ${resolvedType(p)}\n")
+                resolutions.append("    if (${RdmaDefaultSupport.omitted(i)}) {\n")
+                resolutions.append("        ${p.name} = {}\n")
+                resolutions.append("    } else {\n")
+                resolutions.append("        ${p.name} = $converted\n")
+                resolutions.append("    }\n")
+            } else {
+                val resolved = if (p.hasDefault && d != null) {
+                    "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else $converted"
+                } else {
+                    converted
+                }
+                resolutions.append("    val ${p.name}: ${resolvedType(p)} = $resolved\n")
+            }
+        }
+        val implArgs = params.joinToString(", ") { it.name }
+        return "fun $cName($sig) {\n$resolutions    ${cName}_impl($implArgs)\n}\n"
+    }
+
+    private fun implStub(fn: RdmaFunctionInfo): String {
+        val params = classify(fn)
+        val cName = prefix + "compose" + fn.name
+        val sig = params.joinToString(", ") { "${it.name}: ${resolvedType(it)}" }
+        return "fun ${cName}_impl($sig) {\n}\n"
+    }
+
+    private fun resolvedType(p: Param): String = when (p) {
+        is Param.Value -> kotlinType(p.jvmType)
+        is Param.Ref -> "${p.fqn}${if (p.nullable) "?" else ""}"
+        is Param.Content -> if (p.arity == 0) "@Composable () -> Unit" else "@Composable (Int) -> Unit"
+        is Param.Callback -> if (p.arity == 0) "() -> Unit"
+        else "(" + p.paramTypes.joinToString(", ") { refKotlinType(it) } + ") -> Unit"
+        is Param.ListVal -> "List<${refKotlinType(p.elemType)}>"
+        is Param.ListHandle -> "List<() -> Unit>"
+    }
+
+    private fun convertExpr(p: Param, raw: String, cName: String): String = when (p) {
+        is Param.Value -> if (p.jvmType == "kotlin.String") "rdmaToKString($raw)" else raw
+        is Param.Ref -> "$raw.obj<${p.fqn}>()"
+        is Param.Content, is Param.Callback, is Param.ListVal, is Param.ListHandle -> "${cName}_${p.name}($raw)"
     }
 
     private fun registration(widgets: List<RdmaFunctionInfo>): String {
@@ -232,6 +299,17 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         is Param.Content, is Param.Callback -> "${p.idName}: Long"
         is Param.ListVal, is Param.ListHandle -> "${p.idName}: COpaquePointer"
     }
+
+    private fun cParamKotlinType(p: Param): String = when (p) {
+        is Param.Value -> when (p.jvmType) {
+            "kotlin.String" -> "CPointer<ByteVar>?"
+            else -> kotlinType(p.jvmType)
+        }
+        is Param.Ref -> "COpaquePointer"
+        is Param.Content, is Param.Callback -> "Long"
+        is Param.ListVal, is Param.ListHandle -> "COpaquePointer"
+    }
+
     private fun cParamTypeOnly(p: Param): String = when (p) {
         is Param.Value -> when (p.jvmType) {
             "kotlin.String" -> "const char*"
@@ -250,10 +328,14 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
 
     private fun cWrapper(fn: RdmaFunctionInfo): String {
         val params = classify(fn)
+        val hasDefaults = params.any { it.hasDefault }
         val cName = prefix + "compose" + fn.name
-        val decl = params.joinToString(", ") { cParamType(it) }
-        val types = params.joinToString(", ") { cParamTypeOnly(it) }
-        val args = params.joinToString(", ") { it.idName }
+        val decl = params.joinToString(", ") { cParamType(it) } +
+            (if (hasDefaults) (if (params.isNotEmpty()) ", " else "") + "int32_t mask" else "")
+        val types = params.joinToString(", ") { cParamTypeOnly(it) } +
+            (if (hasDefaults) (if (params.isNotEmpty()) ", " else "") + "int32_t" else "")
+        val args = params.joinToString(", ") { it.idName } +
+            (if (hasDefaults) (if (params.isNotEmpty()) ", " else "") + "mask" else "")
         return "inline void $cName($decl) { ((void (*)($types))rdma_lookupFunction(\"$cName\"))($args); }"
     }
 
@@ -309,20 +391,27 @@ $nsClose} // namespace rdma
 
     private fun hostFunction(fn: RdmaFunctionInfo): String {
         val params = classify(fn)
+        val hasDefaults = params.any { it.hasDefault }
         val jsName = "compose" + fn.name
         val cName = prefix + jsName
         val arity = params.size
         val extractions = params.mapIndexed { i, p -> extraction(i, p) }.joinToString("")
         val captures = params.mapIndexed { i, p -> captureExpr(i, p) }.joinToString(", ")
-        val captureList = if (captures.isEmpty()) "" else ", $captures"
-        val callArgs = params.mapIndexed { i, p -> callArgExpr(i, p) }.joinToString(", ")
+        val captureList = buildString {
+            if (captures.isNotEmpty()) append(captures)
+            if (hasDefaults) append(if (captures.isEmpty()) "mask" else ", mask")
+        }
+        val callArgs = buildList {
+            addAll(params.mapIndexed { i, p -> callArgExpr(i, p) })
+            if (hasDefaults) add("mask")
+        }.joinToString(", ")
         return """
     {
         auto fn = jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "$jsName"), $arity,
             [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-$extractions
-                RdmaResult result = rdmaCallUi([$captures]() -> RdmaResult {
+${if (hasDefaults) "                int32_t mask = 0;\n" else ""}$extractions
+                RdmaResult result = rdmaCallUi([$captureList]() -> RdmaResult {
                     $cName($callArgs);
                     RdmaResult err;
                     if (captureCAbiError(err)) return err;
@@ -350,37 +439,50 @@ $extractions
         is Param.ListVal, is Param.ListHandle -> "cpp_p$i"
     }
 
-    private fun extraction(i: Int, p: Param): String = when (p) {
-        is Param.Value -> when (p.jvmType) {
-            "kotlin.String" ->
-                "                std::string cpp_p$i = count > $i && args[$i].isString() ? args[$i].getString(r).utf8(r) : std::string();\n"
-            "kotlin.Int" ->
-                "                int32_t cpp_p$i = count > $i && args[$i].isNumber() ? (int32_t)args[$i].getNumber() : 0;\n"
-            "kotlin.Long" ->
-                "                int64_t cpp_p$i = count > $i && args[$i].isNumber() ? (int64_t)args[$i].getNumber() : 0;\n"
-            "kotlin.Boolean" ->
-                "                bool cpp_p$i = count > $i && args[$i].isBool() ? args[$i].getBool() : false;\n"
-            "kotlin.Double", "kotlin.Float" ->
-                "                double cpp_p$i = count > $i && args[$i].isNumber() ? args[$i].getNumber() : 0.0;\n"
-            else ->
-                "                void* cpp_p$i = nullptr;\n"
-        }
-        is Param.Ref ->
-            "                void* cpp_p$i = nullptr;\n" +
-                "                if (count > $i && args[$i].isObject() && args[$i].asObject(r).hasNativeState(r)) {\n" +
-                "                    auto argObj_$i = args[$i].asObject(r);\n" +
-                "                    auto argState_$i = std::static_pointer_cast<RdmaObjectNativeStateCAbi>(argObj_$i.getNativeState(r));\n" +
-                "                    if (argState_$i) cpp_p$i = argState_$i->handle();\n" +
-                "                }\n"
-        is Param.Content, is Param.Callback ->
-            "                int64_t cpp_p$i = count > $i && args[$i].isNumber() ? (int64_t)args[$i].getNumber() : 0;\n"
-        is Param.ListVal, is Param.ListHandle -> {
-            val elemType = if (p is Param.ListVal) elemTypeFqn(p.elemType) else "kotlin.Long"
-            "                void* cpp_p$i = nullptr;\n" +
-                "                if (count > $i && args[$i].isObject()) {\n" +
-                "                    auto listObj_$i = args[$i].asObject(r);\n" +
-                "                    cpp_p$i = materializeList(r, listObj_$i, \"$elemType\");\n" +
-                "                }\n"
+    private fun extraction(i: Int, p: Param): String {
+        val guarded = p.hasDefault
+        fun maskLine() = if (guarded) "                if (args[$i].isUndefined()) mask |= (1 << $i);\n" else ""
+        fun notUndef() = if (guarded) "!args[$i].isUndefined() && " else ""
+        return when (p) {
+            is Param.Value -> when (p.jvmType) {
+                "kotlin.String" ->
+                    "                std::string cpp_p$i = count > $i && ${notUndef()}args[$i].isString() ? args[$i].getString(r).utf8(r) : std::string();\n" +
+                        maskLine()
+                "kotlin.Int" ->
+                    "                int32_t cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? (int32_t)args[$i].getNumber() : 0;\n" +
+                        maskLine()
+                "kotlin.Long" ->
+                    "                int64_t cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? (int64_t)args[$i].getNumber() : 0;\n" +
+                        maskLine()
+                "kotlin.Boolean" ->
+                    "                bool cpp_p$i = count > $i && ${notUndef()}args[$i].isBool() ? args[$i].getBool() : false;\n" +
+                        maskLine()
+                "kotlin.Double", "kotlin.Float" ->
+                    "                double cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? args[$i].getNumber() : 0.0;\n" +
+                        maskLine()
+                else ->
+                    "                void* cpp_p$i = nullptr;\n"
+            }
+            is Param.Ref ->
+                "                void* cpp_p$i = nullptr;\n" +
+                    "                if (${notUndef()}count > $i && args[$i].isObject() && args[$i].asObject(r).hasNativeState(r)) {\n" +
+                    "                    auto argObj_$i = args[$i].asObject(r);\n" +
+                    "                    auto argState_$i = std::static_pointer_cast<RdmaObjectNativeStateCAbi>(argObj_$i.getNativeState(r));\n" +
+                    "                    if (argState_$i) cpp_p$i = argState_$i->handle();\n" +
+                    "                }\n" +
+                    maskLine()
+            is Param.Content, is Param.Callback ->
+                "                int64_t cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? (int64_t)args[$i].getNumber() : 0;\n" +
+                    maskLine()
+            is Param.ListVal, is Param.ListHandle -> {
+                val elemType = if (p is Param.ListVal) elemTypeFqn(p.elemType) else "kotlin.Long"
+                "                void* cpp_p$i = nullptr;\n" +
+                    "                if (${notUndef()}count > $i && args[$i].isObject()) {\n" +
+                    "                    auto listObj_$i = args[$i].asObject(r);\n" +
+                    "                    cpp_p$i = materializeList(r, listObj_$i, \"$elemType\");\n" +
+                    "                }\n" +
+                    maskLine()
+            }
         }
     }
 

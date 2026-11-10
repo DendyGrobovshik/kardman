@@ -18,6 +18,7 @@ package io.github.dendygrobovshik.kardman.kernel
 import io.github.dendygrobovshik.kardman.types.RdmaAnalysis
 import io.github.dendygrobovshik.kardman.types.RdmaHashesFile
 import io.github.dendygrobovshik.kardman.types.RdmaParameterSignature
+import io.github.dendygrobovshik.kardman.types.RdmaSignatureEntry
 import io.github.dendygrobovshik.kardman.types.RdmaSignaturesFile
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -60,10 +61,11 @@ object RdmaBaseline {
 
     // --- signature baseline (used by the release-time signature classifier) ----
 
-    fun signaturesOf(analysis: RdmaAnalysis): Map<String, List<RdmaParameterSignature>> =
+    /** The lean `(name, type, hasDefault)` form committed to `rdma_signatures.json`. */
+    fun signaturesOf(analysis: RdmaAnalysis): Map<String, List<RdmaSignatureEntry>> =
         analysis.declarations
             .filter { it.isRdma && it.signature != null }
-            .associate { it.fqn to it.signature!! }
+            .associate { it.fqn to it.signature!!.map { p -> RdmaSignatureEntry(p.name, p.type, p.hasDefault) } }
 
     /** Writes `<versionsDir>/<moduleId>/rdma_signatures.json`. */
     fun writeSignatures(analysis: RdmaAnalysis, versionsDir: File): File {
@@ -73,12 +75,18 @@ object RdmaBaseline {
         return file
     }
 
-    /** Reads `<versionsDir>/<moduleId>/rdma_signatures.json`, or an empty map if absent. */
+    /**
+     * Reads `<versionsDir>/<moduleId>/rdma_signatures.json`, or an empty map if absent.
+     *
+     * The committed file only stores `(name, type, hasDefault)`; the classifier needs the full
+     * [RdmaParameterSignature] shape, so `defaultValue` is left null on read (it is never compared).
+     */
     fun readSignatures(moduleId: String, versionsDir: File): Map<String, List<RdmaParameterSignature>> {
         val file = File(versionsDir, "$moduleId/rdma_signatures.json")
         if (!file.isFile) return emptyMap()
         return try {
             json.decodeFromString(RdmaSignaturesFile.serializer(), file.readText()).signatures
+                .mapValues { (_, list) -> list.map { e -> RdmaParameterSignature(e.name, e.type, e.hasDefault) } }
         } catch (e: Exception) {
             emptyMap()
         }

@@ -383,7 +383,9 @@ object RdmaPluginTransformState {
         }
         for ((type, m) in suspendMethods) {
             val bridgeName = methodBridgeName(type.simpleName, m.name)
-            val params = listOf("self: dynamic") + (0 until m.paramCount).map { "p$it: dynamic" }
+            val params = listOf("self: dynamic") + (0 until m.paramCount).map { i ->
+                "p$i: dynamic" + (if (m.defaulted.getOrElse(i) { false }) " = js(\"undefined\")" else "")
+            }
             val args = listOf("self") + (0 until m.paramCount).map { "p$it" }
             sb.appendLine("suspend fun $bridgeName(${params.joinToString(", ")}): dynamic {")
             sb.appendLine("    return suspendCoroutine { cont: Continuation<Any?> ->")
@@ -412,8 +414,8 @@ object RdmaPluginTransformState {
             if (!fn.composable) continue
             val bridgeName = bridgeNameFor(fn.qualifiedName)
             val params = fn.parameters.joinToString(", ") { p ->
-                if (p.hasDefault && (p.kind == RdmaParamKind.VALUE || p.kind == RdmaParamKind.LIST_VALUE)) {
-                    "${p.name}: dynamic = js(\"undefined\")"
+                if (p.hasDefault) {
+                    "${p.name}: ${p.kotlinType} = js(\"undefined\")"
                 } else {
                     "${p.name}: ${p.kotlinType}"
                 }
@@ -421,7 +423,12 @@ object RdmaPluginTransformState {
             val args = fn.parameters.joinToString(", ") { p ->
                 when (p.kind) {
                     RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
+                    RdmaParamKind.LIST_HANDLE ->
+                        if (p.hasDefault) {
+                            "(if (${p.name} === js(\"undefined\")) js(\"undefined\") else ${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") })"
+                        } else {
+                            "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
+                        }
                     else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
                 }
             }

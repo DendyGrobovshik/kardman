@@ -331,17 +331,17 @@ $argBlock    $setFn(state->handle(), $argExpr);
                 val expr: String
                 if (param.type == "kotlin.String") {
                     out.write("    std::string cpp_${param.name};\n")
-                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(r).utf8(r); }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(r).utf8(r); }\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
                 } else if (isEnumType(param.type)) {
                     out.write("    std::string cpp_${param.name};\n")
-                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r); }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r); }\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
                 } else if (param.isList || isObjectRef(param.type)) {
                     out.write("    void* arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isUndefined() && !args[$idx].isNull() && args[$idx].isObject()) {\n")
+                    out.write("    if (count > $idx && !args[$idx].isUndefined() && !args[$idx].isNull() && args[$idx].isObject()) {\n")
                     out.write("        auto argObj = args[$idx].asObject(r);\n")
                     if (param.isList) {
                         out.write("        arg_${param.name} = materializeList(r, argObj, \"${param.listElementType ?: ""}\");\n")
@@ -352,7 +352,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                         out.write("        if (argState) arg_${param.name} = argState->handle();\n")
                     }
                     out.write("    }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "arg_${param.name}"
                 } else {
                     val cType = when (param.type) {
@@ -369,7 +369,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                         else -> "0.0"
                     }
                     out.write("    $cType cpp_${param.name} = $zero;\n")
-                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = " +
+                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = " +
                         when (param.type) {
                             "kotlin.Int" -> "(int32_t)args[$idx].getNumber();"
                             "kotlin.Boolean" -> "args[$idx].getBool();"
@@ -377,7 +377,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                             "kotlin.Double", "kotlin.Float" -> "args[$idx].getNumber();"
                             else -> "nullptr;"
                         } + " }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}"
                 }
                 argNames.add(expr)
@@ -468,17 +468,17 @@ $argBlock    $setFn(state->handle(), $argExpr);
                 val expr: String
                 if (param.type == "kotlin.String") {
                     out.write("    std::string cpp_${param.name};\n")
-                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(rt).utf8(rt); }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(rt).utf8(rt); }\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
                 } else if (isEnumType(param.type)) {
                     out.write("    std::string cpp_${param.name};\n")
-                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(rt).utf8(rt); }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(rt).utf8(rt); }\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
                 } else if (param.isList || isObjectRef(param.type)) {
                     out.write("    void* arg_${param.name} = nullptr;\n")
-                    out.write("    if (!args[$idx].isUndefined() && !args[$idx].isNull() && args[$idx].isObject()) {\n")
+                    out.write("    if (count > $idx && !args[$idx].isUndefined() && !args[$idx].isNull() && args[$idx].isObject()) {\n")
                     out.write("        auto argObj = args[$idx].asObject(rt);\n")
                     if (param.isList) {
                         out.write("        arg_${param.name} = materializeList(rt, argObj, \"${param.listElementType ?: ""}\");\n")
@@ -489,7 +489,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                         out.write("        if (argState) arg_${param.name} = argState->handle();\n")
                     }
                     out.write("    }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "arg_${param.name}"
                 } else {
                     val cType = when (param.type) {
@@ -506,7 +506,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                         else -> "0.0"
                     }
                     out.write("    $cType cpp_${param.name} = $zero;\n")
-                    out.write("    if (!args[$idx].isUndefined()) { cpp_${param.name} = " +
+                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = " +
                         when (param.type) {
                             "kotlin.Int" -> "(int32_t)args[$idx].getNumber();"
                             "kotlin.Boolean" -> "args[$idx].getBool();"
@@ -514,7 +514,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                             "kotlin.Double", "kotlin.Float" -> "args[$idx].getNumber();"
                             else -> "nullptr;"
                         } + " }\n")
-                    if (guarded) out.write("    if (args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}"
                 }
                 argNames.add(expr)
