@@ -77,4 +77,29 @@ class CAbiCppGeneratorTest {
         val header = generated["RdmaCAbi.h"] ?: error("RdmaCAbi.h not generated")
         assertFalse(header.contains("rdma_SuspendService_fetch("), "suspend method should not get a sync C-ABI wrapper")
     }
+
+    @Test
+    fun `required primitive params are extracted in the C-ABI function bridge`() {
+        // Regression: a required (non-defaulted) primitive parameter must still be read from
+        // `args[idx]`. The C-ABI generator's emitParam used to emit only the zero-init declaration
+        // for required params, silently leaving them at their zero value.
+        val fn = RdmaFunctionInfo(
+            name = "addWithDefaults",
+            qualifiedName = "com.example.kernel.addWithDefaults",
+            facadeClass = "com.example.kernel.DefaultParamsKt",
+            composable = false,
+            parameters = listOf(
+                RdmaParameterInfo("a", RdmaTypeRef(RdmaType.Primitive("kotlin.Int"))),
+                RdmaParameterInfo("b", RdmaTypeRef(RdmaType.Primitive("kotlin.Int")), hasDefault = true, defaultValue = "a * 2"),
+            ),
+            returnType = RdmaTypeRef(RdmaType.Primitive("kotlin.Int")),
+        )
+        val generated = generate(emptyList(), listOf(fn))
+        val bridge = generated["RdmaBridge.cpp"] ?: error("RdmaBridge.cpp not generated")
+        // `a` is required: must be extracted from args[0].
+        assertContains(bridge, "cpp_a = (int32_t)args[0].getNumber();")
+        // `b` is defaulted: zero-init + guarded extraction + mask.
+        assertContains(bridge, "mask |= (1 << 1);")
+        assertContains(bridge, "rdma_addWithDefaults(cpp_a, cpp_b, mask)")
+    }
 }

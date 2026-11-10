@@ -987,7 +987,10 @@ $nsClose} // namespace rdma
             sb.append("        mask |= (1 << $idx);\n")
             sb.append("    }\n")
         } else {
+            // A required parameter must still be extracted: `decl` is the zero-init placeholder
+            // and `extract` is the full `cpp_x = args[idx]…;` assignment.
             sb.append("    $decl\n")
+            sb.append("    $extract\n")
         }
     }
 
