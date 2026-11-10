@@ -24,6 +24,7 @@ import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.StaticInfo
 import io.github.dendygrobovshik.kardman.types.RdmaEnumInfo
+import java.io.BufferedWriter
 import java.io.OutputStream
 
 class CppGenerator(
@@ -899,6 +900,31 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
         out.write("""
     // Copy prototype methods onto instance
 """)
+        emitClassSurface(out, info)
+        out.write("    return jsObj;\n}\n\n")
+
+        // Wrapper: creates JSI object around existing jobject (for @RDMA return values)
+        out.write("""jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobject globalObj) {
+    auto jsObj = jsi::Object(rt);
+    auto nativeState = std::make_shared<${info.className}NativeState>(jvm, globalObj);
+    jsObj.setNativeState(rt, nativeState);
+""")
+        emitClassSurface(out, info)
+        out.write("    return jsObj;\n}\n\n")
+
+        out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
+        out.close()
+    }
+
+    /**
+     * Emits the lines that attach an `@RDMA` class's public surface (non-suspend methods,
+     * property getters, and setters for mutable properties) onto a freshly created `jsObj`.
+     *
+     * Single source of truth for "what a `[RdmaClassInfo]` looks like on the JS side"; both the
+     * constructor path and the rehydration path (`createXxxWrapper`) call it so the two cannot
+     * drift (see the property-setter bug where the wrapper omitted setters).
+     */
+    private fun emitClassSurface(out: BufferedWriter, info: RdmaClassInfo) {
         for (method in info.methods.filter { !it.isSuspend }) {
             out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
         }
@@ -910,25 +936,6 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                 out.write("    jsObj.setProperty(rt, \"$setterName\", rt.global().getProperty(rt, \"__${info.className}_proto_${setterName}\"));\n")
             }
         }
-        out.write("    return jsObj;\n}\n\n")
-
-        // Wrapper: creates JSI object around existing jobject (for @RDMA return values)
-        out.write("""jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobject globalObj) {
-    auto jsObj = jsi::Object(rt);
-    auto nativeState = std::make_shared<${info.className}NativeState>(jvm, globalObj);
-    jsObj.setNativeState(rt, nativeState);
-""")
-        for (method in info.methods.filter { !it.isSuspend }) {
-            out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
-        }
-        for (prop in info.properties) {
-            val getterName = "get${prop.name.replaceFirstChar { it.uppercase() }}"
-            out.write("    jsObj.setProperty(rt, \"$getterName\", rt.global().getProperty(rt, \"__${info.className}_proto_$getterName\"));\n")
-        }
-        out.write("    return jsObj;\n}\n\n")
-
-        out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
-        out.close()
     }
 
     private fun generateBridge(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>, enums: List<RdmaEnumInfo> = emptyList()) {

@@ -109,6 +109,27 @@ class CppGeneratorTest {
     }
 
     @Test
+    fun `wrapper attaches mutable property setters like the instance path`() {
+        // Regression: the rehydration path (createXxxWrapper) must carry property setters,
+        // not just the constructor path. Objects returned from the native side (e.g. list
+        // elements) are rehydrated via the wrapper; writing a mutable property on them used to
+        // fail with "undefined is not a function".
+        val mutable = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Device",
+            qualifiedName = "com.example.kernel.Device",
+            constructors = emptyList(),
+            methods = emptyList(),
+            properties = listOf(PropertyInfo("status", "kotlin.String", isMutable = true))
+        )
+
+        val generated = generate(mutable)
+        val cpp = generated["DeviceProxy.cpp"] ?: error("Not generated")
+
+        val wrapper = cpp.substringAfter("createDeviceWrapper(")
+        assertContains(wrapper, """setProperty(rt, "setStatus"""")
+    }
+
+    @Test
     fun `generates companion static getter registered in bridge`() {
         val alignment = RdmaClassInfo(
             packageName = "com.example.kernel", className = "Alignment",

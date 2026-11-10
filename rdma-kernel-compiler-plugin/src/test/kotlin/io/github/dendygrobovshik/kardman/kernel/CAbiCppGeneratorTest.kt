@@ -17,6 +17,7 @@ package io.github.dendygrobovshik.kardman.kernel
 
 import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
+import io.github.dendygrobovshik.kardman.types.PropertyInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
 import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
@@ -101,5 +102,25 @@ class CAbiCppGeneratorTest {
         // `b` is defaulted: zero-init + guarded extraction + mask.
         assertContains(bridge, "mask |= (1 << 1);")
         assertContains(bridge, "rdma_addWithDefaults(cpp_a, cpp_b, mask)")
+    }
+
+    @Test
+    fun `wrapper attaches mutable property setters like the instance path`() {
+        // Regression: the rehydration path (createXxxWrapper) must carry property setters,
+        // not just the constructor path (createXxxInstance). Objects returned from the native
+        // side (e.g. list elements) are rehydrated via the wrapper; writing a mutable property
+        // on them used to fail with "undefined is not a function".
+        val device = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Device",
+            qualifiedName = "com.example.kernel.Device",
+            constructors = emptyList(),
+            methods = emptyList(),
+            properties = listOf(PropertyInfo("status", "kotlin.String", isMutable = true)),
+        )
+        val generated = generate(listOf(device), emptyList())
+        val cpp = generated["DeviceProxy.cpp"] ?: error("DeviceProxy.cpp not generated")
+
+        val wrapper = cpp.substringAfter("createDeviceWrapper(")
+        assertContains(wrapper, """setProperty(rt, "setStatus"""")
     }
 }

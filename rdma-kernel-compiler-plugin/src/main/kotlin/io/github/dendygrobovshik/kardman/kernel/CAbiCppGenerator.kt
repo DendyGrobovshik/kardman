@@ -24,6 +24,7 @@ import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.StaticInfo
+import java.io.BufferedWriter
 import java.io.OutputStream
 
 /**
@@ -530,6 +531,32 @@ $argBlock    $setFn(state->handle(), $argExpr);
     auto nativeState = std::make_shared<${info.className}NativeState>(handle);
     jsObj.setNativeState(rt, nativeState);
 """)
+        emitClassSurface(out, info)
+        out.write("    return jsObj;\n}\n\n")
+
+        // wrapper
+        out.write("""jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, void* handle) {
+    auto jsObj = jsi::Object(rt);
+    auto nativeState = std::make_shared<${info.className}NativeState>(handle);
+    jsObj.setNativeState(rt, nativeState);
+""")
+        emitClassSurface(out, info)
+        out.write("    return jsObj;\n}\n\n")
+
+        out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
+        out.close()
+    }
+
+    /**
+     * Emits the lines that attach an `@RDMA` class's public surface (non-suspend methods,
+     * property getters, and setters for mutable properties) onto a freshly created `jsObj`.
+     *
+     * This is the single source of truth for "what a `[RdmaClassInfo]` looks like on the JS
+     * side"; both the constructor path (`createXxxInstance`) and the rehydration path
+     * (`createXxxWrapper`) call it so the two cannot drift (see the property-setter bug where
+     * the wrapper omitted setters).
+     */
+    private fun emitClassSurface(out: BufferedWriter, info: RdmaClassInfo) {
         for (method in info.methods.filter { !it.isSuspend }) {
             out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
         }
@@ -541,25 +568,6 @@ $argBlock    $setFn(state->handle(), $argExpr);
                 out.write("    jsObj.setProperty(rt, \"$setterName\", rt.global().getProperty(rt, \"__${info.className}_proto_$setterName\"));\n")
             }
         }
-        out.write("    return jsObj;\n}\n\n")
-
-        // wrapper
-        out.write("""jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, void* handle) {
-    auto jsObj = jsi::Object(rt);
-    auto nativeState = std::make_shared<${info.className}NativeState>(handle);
-    jsObj.setNativeState(rt, nativeState);
-""")
-        for (method in info.methods.filter { !it.isSuspend }) {
-            out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
-        }
-        for (prop in info.properties) {
-            val getterName = "get${prop.name.replaceFirstChar { it.uppercase() }}"
-            out.write("    jsObj.setProperty(rt, \"$getterName\", rt.global().getProperty(rt, \"__${info.className}_proto_$getterName\"));\n")
-        }
-        out.write("    return jsObj;\n}\n\n")
-
-        out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
-        out.close()
     }
 
     // ------------------------------------------------------------------ bridge
