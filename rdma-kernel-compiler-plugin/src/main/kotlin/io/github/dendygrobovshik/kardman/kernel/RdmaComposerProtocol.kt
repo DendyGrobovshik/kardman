@@ -17,6 +17,7 @@ package io.github.dendygrobovshik.kardman.kernel
 
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.ir.util.functions
+import org.jetbrains.kotlin.ir.util.properties
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 
@@ -162,6 +163,25 @@ object RdmaComposerProtocol {
             jniSignature = "()V",
             returnKind = ComposerReturnKind.VOID,
         ),
+        // Defaults groups (composable functions with default parameter expressions)
+        ComposerMethod(
+            jsName = "startDefaults",
+            jniName = "startDefaults",
+            jniSignature = "()V",
+            returnKind = ComposerReturnKind.VOID,
+        ),
+        ComposerMethod(
+            jsName = "endDefaults",
+            jniName = "endDefaults",
+            jniSignature = "()V",
+            returnKind = ComposerReturnKind.VOID,
+        ),
+        ComposerMethod(
+            jsName = "get_defaultsInvalid",
+            jniName = "getDefaultsInvalid",
+            jniSignature = "()Z",
+            returnKind = ComposerReturnKind.BOOLEAN,
+        ),
         // Remember
         ComposerMethod(
             jsName = "rememberedValue",
@@ -234,7 +254,17 @@ object RdmaComposerProtocol {
     fun validateAgainst(context: IrPluginContext): List<String> {
         val composer = context.referenceClass(ClassId.topLevel(FqName(COMPOSER_FQN)))?.owner
             ?: return listOf("Cannot resolve $COMPOSER_FQN from the compose runtime dependency")
-        val byName = composer.functions.groupBy { it.name.asString() }
+        val byName = composer.functions.mapTo(mutableSetOf()) { it.name.asString() }
+        for (p in composer.properties) {
+            // Property accessors use the JVM getter name in bytecode (`getDefaultsInvalid`),
+            // but IR spells them `<get-defaultsInvalid>`; derive the JVM name from the
+            // property name (mirrors `JvmAbi.getterName`).
+            if (p.getter != null) {
+                val n = p.name.asString()
+                byName += if (n.startsWith("is") && n.length > 2 && n[2].isUpperCase()) n
+                else "get" + n.replaceFirstChar { it.uppercase() }
+            }
+        }
         val errors = mutableListOf<String>()
         for (m in methodsNeedingCache) {
             if (m.jniName !in byName) {

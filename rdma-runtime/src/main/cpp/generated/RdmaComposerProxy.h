@@ -16,6 +16,9 @@ struct ComposerProxyCache {
     jmethodID endReusableGroup = nullptr;
     jmethodID skipCurrentGroup = nullptr;
     jmethodID skipToGroupEnd = nullptr;
+    jmethodID startDefaults = nullptr;
+    jmethodID endDefaults = nullptr;
+    jmethodID getDefaultsInvalid = nullptr;
     jmethodID rememberedValue = nullptr;
     jmethodID updateRememberedValue = nullptr;
     jmethodID changed = nullptr;

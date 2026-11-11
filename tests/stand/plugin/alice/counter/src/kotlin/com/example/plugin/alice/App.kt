@@ -22,7 +22,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.example.kernel.internal.Button
 import com.example.kernel.internal.Column
+import com.example.kernel.internal.ColumnWithDefault
 import com.example.kernel.internal.Text
+import com.example.kernel.internal.TextWithDefault
 import com.example.kernel.internal.runRdmaApp
 
 @Composable
@@ -31,6 +33,8 @@ fun Counter() {
     Column {
         Text("Count: $count")
         Button("Increment", onClick = { count++ })
+        TextWithDefault()
+        ColumnWithDefault()
     }
 }
 

@@ -21,6 +21,9 @@ void initComposerProxyCache(JNIEnv* env) {
     g_composerProxyCache.endReusableGroup = env->GetMethodID(g_composeCache.composerClass, "endReusableGroup", "()V");
     g_composerProxyCache.skipCurrentGroup = env->GetMethodID(g_composeCache.composerClass, "skipCurrentGroup", "()V");
     g_composerProxyCache.skipToGroupEnd = env->GetMethodID(g_composeCache.composerClass, "skipToGroupEnd", "()V");
+    g_composerProxyCache.startDefaults = env->GetMethodID(g_composeCache.composerClass, "startDefaults", "()V");
+    g_composerProxyCache.endDefaults = env->GetMethodID(g_composeCache.composerClass, "endDefaults", "()V");
+    g_composerProxyCache.getDefaultsInvalid = env->GetMethodID(g_composeCache.composerClass, "getDefaultsInvalid", "()Z");
     g_composerProxyCache.rememberedValue = env->GetMethodID(g_composeCache.composerClass, "rememberedValue", "()Ljava/lang/Object;");
     g_composerProxyCache.updateRememberedValue = env->GetMethodID(g_composeCache.composerClass, "updateRememberedValue", "(Ljava/lang/Object;)V");
     g_composerProxyCache.changed = env->GetMethodID(g_composeCache.composerClass, "changed", "(Ljava/lang/Object;)Z");
@@ -262,6 +265,68 @@ public:
                     });
                     if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
                     return jsi::Value::undefined();
+                });
+        }
+        if (n.rfind("startDefaults", 0) == 0) {
+
+            return jsi::Function::createFromHostFunction(
+                rt, jsi::PropNameID::forAscii(rt, "startDefaults"), 0,
+                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    JNIEnv* e = getEnv(g_composeCache.jvm);
+                    if (!e) return jsi::Value::undefined();
+
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.startDefaults);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
+
+                        return RdmaResult::undefined();
+                    });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
+                    return jsi::Value::undefined();
+                });
+        }
+        if (n.rfind("endDefaults", 0) == 0) {
+
+            return jsi::Function::createFromHostFunction(
+                rt, jsi::PropNameID::forAscii(rt, "endDefaults"), 0,
+                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    JNIEnv* e = getEnv(g_composeCache.jvm);
+                    if (!e) return jsi::Value::undefined();
+
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        e->CallVoidMethod(composer, g_composerProxyCache.endDefaults);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
+
+                        return RdmaResult::undefined();
+                    });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
+                    return jsi::Value::undefined();
+                });
+        }
+        if (n.rfind("get_defaultsInvalid", 0) == 0) {
+
+            return jsi::Function::createFromHostFunction(
+                rt, jsi::PropNameID::forAscii(rt, "get_defaultsInvalid"), 0,
+                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    JNIEnv* e = getEnv(g_composeCache.jvm);
+                    if (!e) return jsi::Value(false);
+
+                    RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::boolean(false);
+                        jboolean res = e->CallBooleanMethod(composer, g_composerProxyCache.getDefaultsInvalid);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) return err;
+
+                        return RdmaResult::boolean((bool)res);
+                    });
+                    return rdmaResultToJsi(r, result);
                 });
         }
         if (n.rfind("rememberedValue", 0) == 0) {

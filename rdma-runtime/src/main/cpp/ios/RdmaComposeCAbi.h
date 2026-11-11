@@ -117,6 +117,9 @@ inline void rdma_composer_startReusableGroup(int32_t key, void* dataKey) { ((voi
 inline void rdma_composer_endReusableGroup() { ((void (*)())rdma_lookupFunction("rdma_composer_endReusableGroup"))(); }
 inline void rdma_composer_skipCurrentGroup() { ((void (*)())rdma_lookupFunction("rdma_composer_skipCurrentGroup"))(); }
 inline void rdma_composer_skipToGroupEnd() { ((void (*)())rdma_lookupFunction("rdma_composer_skipToGroupEnd"))(); }
+inline void rdma_composer_startDefaults() { ((void (*)())rdma_lookupFunction("rdma_composer_startDefaults"))(); }
+inline void rdma_composer_endDefaults() { ((void (*)())rdma_lookupFunction("rdma_composer_endDefaults"))(); }
+inline bool rdma_composer_getDefaultsInvalid() { return ((bool (*)())rdma_lookupFunction("rdma_composer_getDefaultsInvalid"))(); }
 inline bool rdma_composer_shouldExecute(bool cond, int32_t value) { return ((bool (*)(bool, int32_t))rdma_lookupFunction("rdma_composer_shouldExecute"))(cond, value); }
 inline bool rdma_composer_changed(void* key) { return ((bool (*)(void*))rdma_lookupFunction("rdma_composer_changed"))(key); }
 inline void* rdma_composer_rememberedValue() { return ((void* (*)())rdma_lookupFunction("rdma_composer_rememberedValue"))(); }

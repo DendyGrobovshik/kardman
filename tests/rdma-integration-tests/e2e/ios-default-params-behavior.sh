@@ -3,9 +3,9 @@ set -euo pipefail
 
 # End-to-end integration test for trailing default parameters on iOS (C-ABI):
 # a cross-parameter default (`b = a * 2`), an all-defaulted call, a nullable
-# return, a defaulted constructor, a method default referencing `this`, and a
-# defaulted suspend function. Mirrors default-params-behavior.sh but drives the
-# iOS app on a simulator.
+# return, a defaulted constructor, a method default referencing `this`, a
+# defaulted suspend function, and composable value + empty-lambda defaults.
+# Mirrors default-params-behavior.sh but drives the iOS app on a simulator.
 #
 #   ./tests/rdma-integration-tests/e2e/ios-default-params-behavior.sh
 #
@@ -20,6 +20,9 @@ PRODUCT="KardmanDemo"
 SIM_NAME="${IOS_SIM_NAME:-iPhone 17}"
 DERIVED="$ROOT_DIR/tests/stand/iosApp/build/ios-e2e-derived"
 
+EXCEPTIONS_1="$ROOT_DIR/tests/stand/plugin/itest/exceptions"
+EXCEPTIONS_2="$ROOT_DIR/tests/stand/plugin/itest/exceptions2"
+
 IT_DIR="$(mktemp -d)"
 VERSIONS_DIR="$IT_DIR/versions"
 
@@ -32,9 +35,23 @@ release() { # release <analysisJson> <polyfillOut> <internalModules>
     "$ROOT_DIR/scripts/release.sh" static-release "$1" "$VERSIONS_DIR" "$2" "$3" ""
 }
 
+# The exception crash-test plugins register their own content AFTER the alice Counter
+# and throw through it, so they are opted out of the bake (rdmaBakeInApp=false) and
+# restored afterwards. Mirrors ios-suspend-behavior.sh; the widget-default markers
+# require the alice Counter to be the rendered content.
+drop_exception_plugins() {
+    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_1/gradle.properties"
+    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_2/gradle.properties"
+}
+
+restore_exception_plugins() {
+    rm -f "$EXCEPTIONS_1/gradle.properties" "$EXCEPTIONS_2/gradle.properties"
+}
+
 LAUNCH_PID=""
 cleanup() {
     [ -n "$LAUNCH_PID" ] && kill "$LAUNCH_PID" 2>/dev/null || true
+    restore_exception_plugins
     rm -rf "$IT_DIR"
 }
 trap cleanup EXIT
@@ -112,6 +129,12 @@ step_2_run_and_assert() {
     wait_marker "$log" "DEFAULT_METHOD: bump=6"
     wait_marker "$log" "SUSPEND_DEFAULT: sum=15"
 
+    # Composable defaults: the alice Counter widget tree calls TextWithDefault() and
+    # ColumnWithDefault() with no arguments, so the value defaults ("default"/"title")
+    # and the empty-lambda default must be resolved on the native side.
+    wait_marker "$log" "WIDGET_TEXT_DEFAULT: title: default"
+    wait_marker "$log" "WIDGET_COLUMN_DEFAULT"
+
     kill "$LAUNCH_PID" 2>/dev/null || true
     LAUNCH_PID=""
     xcrun simctl terminate "$id" "$BUNDLE_ID" 2>/dev/null || true
@@ -122,6 +145,7 @@ main() {
     id="$(resolve_sim)"
     log="$(mktemp -t rdma-ios-default-params)"
 
+    drop_exception_plugins
     step_0_static_release
     step_1_build
     step_2_run_and_assert "$id" "$log"

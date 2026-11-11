@@ -22,11 +22,14 @@ public:
                 [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
             int32_t p0 = count > 0 && args[0].isNumber() ? (int32_t)args[0].getNumber() : 0;
 
-                    rdmaCallUi([p0]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([p0]() -> RdmaResult {
                         rdma_composer_startRestartGroup(p0);
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Object::createFromHostObject(r, self);
                 });
         }
@@ -38,6 +41,8 @@ public:
 
                     RdmaResult result = rdmaCallUi([]() -> RdmaResult {
                         void* scope = rdma_composer_endRestartGroup();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) { if (scope) rdma_disposeStableRef(scope); return err; }
 
                         if (!scope) return RdmaResult::null();
                         return RdmaResult::scopeRef(scope);
@@ -52,11 +57,14 @@ public:
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
             int32_t p0 = count > 0 && args[0].isNumber() ? (int32_t)args[0].getNumber() : 0;
 
-                    rdmaCallUi([p0]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([p0]() -> RdmaResult {
                         rdma_composer_startReplaceGroup(p0);
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -66,11 +74,14 @@ public:
                 rt, jsi::PropNameID::forAscii(rt, "endReplaceGroup"), 0,
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
 
-                    rdmaCallUi([]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([]() -> RdmaResult {
                         rdma_composer_endReplaceGroup();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -82,12 +93,15 @@ public:
             int32_t p0 = count > 0 && args[0].isNumber() ? (int32_t)args[0].getNumber() : 0;
             void* p1 = count > 1 ? boxJsiValue(r, args[1]) : nullptr;
 
-                    rdmaCallUi([p0, p1]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([p0, p1]() -> RdmaResult {
                         rdma_composer_startMovableGroup(p0, p1);
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
                 if (p1) rdma_disposeStableRef(p1);
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -97,11 +111,14 @@ public:
                 rt, jsi::PropNameID::forAscii(rt, "endMovableGroup"), 0,
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
 
-                    rdmaCallUi([]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([]() -> RdmaResult {
                         rdma_composer_endMovableGroup();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -113,12 +130,15 @@ public:
             int32_t p0 = count > 0 && args[0].isNumber() ? (int32_t)args[0].getNumber() : 0;
             void* p1 = count > 1 ? boxJsiValue(r, args[1]) : nullptr;
 
-                    rdmaCallUi([p0, p1]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([p0, p1]() -> RdmaResult {
                         rdma_composer_startReusableGroup(p0, p1);
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
                 if (p1) rdma_disposeStableRef(p1);
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -128,11 +148,14 @@ public:
                 rt, jsi::PropNameID::forAscii(rt, "endReusableGroup"), 0,
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
 
-                    rdmaCallUi([]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([]() -> RdmaResult {
                         rdma_composer_endReusableGroup();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -142,11 +165,14 @@ public:
                 rt, jsi::PropNameID::forAscii(rt, "skipCurrentGroup"), 0,
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
 
-                    rdmaCallUi([]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([]() -> RdmaResult {
                         rdma_composer_skipCurrentGroup();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -156,12 +182,65 @@ public:
                 rt, jsi::PropNameID::forAscii(rt, "skipToGroupEnd"), 0,
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
 
-                    rdmaCallUi([]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([]() -> RdmaResult {
                         rdma_composer_skipToGroupEnd();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
+                });
+        }
+        if (n.rfind("startDefaults", 0) == 0) {
+
+            return jsi::Function::createFromHostFunction(
+                rt, jsi::PropNameID::forAscii(rt, "startDefaults"), 0,
+                [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+
+                    RdmaResult result = rdmaCallUi([]() -> RdmaResult {
+                        rdma_composer_startDefaults();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
+
+                        return RdmaResult::undefined();
+                    });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
+                    return jsi::Value::undefined();
+                });
+        }
+        if (n.rfind("endDefaults", 0) == 0) {
+
+            return jsi::Function::createFromHostFunction(
+                rt, jsi::PropNameID::forAscii(rt, "endDefaults"), 0,
+                [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+
+                    RdmaResult result = rdmaCallUi([]() -> RdmaResult {
+                        rdma_composer_endDefaults();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
+
+                        return RdmaResult::undefined();
+                    });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
+                    return jsi::Value::undefined();
+                });
+        }
+        if (n.rfind("get_defaultsInvalid", 0) == 0) {
+
+            return jsi::Function::createFromHostFunction(
+                rt, jsi::PropNameID::forAscii(rt, "get_defaultsInvalid"), 0,
+                [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+
+                    RdmaResult result = rdmaCallUi([]() -> RdmaResult {
+                        bool res = rdma_composer_getDefaultsInvalid();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
+
+                        return RdmaResult::boolean(res);
+                    });
+                    return rdmaResultToJsiCAbi(r, result);
                 });
         }
         if (n.rfind("rememberedValue", 0) == 0) {
@@ -171,6 +250,8 @@ public:
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                     RdmaResult result = rdmaCallUi([]() -> RdmaResult {
                         void* v = rdma_composer_rememberedValue();
+                        RdmaResult err;
+                        if (captureCAbiError(err)) { if (v) rdma_disposeStableRef(v); return err; }
                         return valueHandleToResult(v);
                     });
                     return rdmaResultToJsiCAbi(r, result);
@@ -197,11 +278,14 @@ public:
                         stored = boxJsiValue(r, args[0]);
                         disposeStored = true;
                     }
-                    rdmaCallUi([stored, disposeStored]() -> RdmaResult {
+                    RdmaResult result = rdmaCallUi([stored, disposeStored]() -> RdmaResult {
                         rdma_composer_updateRememberedValue(stored);
+                        RdmaResult err;
+                        if (captureCAbiError(err)) { if (disposeStored && stored) rdma_disposeStableRef(stored); return err; }
                         if (disposeStored && stored) rdma_disposeStableRef(stored);
                         return RdmaResult::undefined();
                     });
+                    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                     return jsi::Value::undefined();
                 });
         }
@@ -217,6 +301,8 @@ public:
                     }
                     RdmaResult result = rdmaCallUi([key]() -> RdmaResult {
                         bool res = rdma_composer_changed(key);
+                        RdmaResult err;
+                        if (captureCAbiError(err)) { if (key) rdma_disposeStableRef(key); return err; }
                         if (key) rdma_disposeStableRef(key);
                         return RdmaResult::boolean(res);
                     });
@@ -233,6 +319,8 @@ public:
 
                     RdmaResult result = rdmaCallUi([p0, p1]() -> RdmaResult {
                         bool res = rdma_composer_shouldExecute(p0, p1);
+                        RdmaResult err;
+                        if (captureCAbiError(err)) return err;
 
                         return RdmaResult::boolean(res);
                     });

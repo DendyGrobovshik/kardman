@@ -32,6 +32,7 @@ class RdmaComposerProtocolTest {
             "startMovableGroup", "endMovableGroup",
             "startReusableGroup", "endReusableGroup",
             "skipCurrentGroup", "skipToGroupEnd",
+            "startDefaults", "endDefaults", "get_defaultsInvalid",
             "rememberedValue", "updateRememberedValue", "changed", "shouldExecute",
         )
         for (name in expected) {

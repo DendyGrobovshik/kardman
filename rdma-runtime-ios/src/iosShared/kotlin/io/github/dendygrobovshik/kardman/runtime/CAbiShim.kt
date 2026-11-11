@@ -415,6 +415,17 @@ fun rdma_composer_skipToGroupEnd() {
     rdmaGetCurrentComposer()?.skipToGroupEnd()
 }
 
+fun rdma_composer_startDefaults() {
+    rdmaGetCurrentComposer()?.startDefaults()
+}
+
+fun rdma_composer_endDefaults() {
+    rdmaGetCurrentComposer()?.endDefaults()
+}
+
+fun rdma_composer_getDefaultsInvalid(): Boolean =
+    rdmaGetCurrentComposer()?.defaultsInvalid ?: false
+
 fun rdma_composer_shouldExecute(cond: Boolean, value: Int): Boolean =
     rdmaGetCurrentComposer()?.shouldExecute(cond, value) ?: false
 
@@ -540,6 +551,9 @@ private val _register = run {
     rdmaRegisterFunction("rdma_composer_endReusableGroup", staticCFunction(::rdma_composer_endReusableGroup))
     rdmaRegisterFunction("rdma_composer_skipCurrentGroup", staticCFunction(::rdma_composer_skipCurrentGroup))
     rdmaRegisterFunction("rdma_composer_skipToGroupEnd", staticCFunction(::rdma_composer_skipToGroupEnd))
+    rdmaRegisterFunction("rdma_composer_startDefaults", staticCFunction(::rdma_composer_startDefaults))
+    rdmaRegisterFunction("rdma_composer_endDefaults", staticCFunction(::rdma_composer_endDefaults))
+    rdmaRegisterFunction("rdma_composer_getDefaultsInvalid", staticCFunction(::rdma_composer_getDefaultsInvalid))
     rdmaRegisterFunction("rdma_composer_shouldExecute", staticCFunction(::rdma_composer_shouldExecute))
     rdmaRegisterFunction("rdma_composer_changed", staticCFunction(::rdma_composer_changed))
     rdmaRegisterFunction("rdma_composer_rememberedValue", staticCFunction(::rdma_composer_rememberedValue))

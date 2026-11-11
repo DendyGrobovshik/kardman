@@ -1555,12 +1555,24 @@ namespace {
 thread_local std::string g_tlsCaughtError;
 thread_local std::string g_tlsCaughtErrorBuf;
 
+static void appendCauseChain(std::string& out, const facebook::rdma::RdmaExceptionInfo& info) {
+    for (auto c = info.cause; c; c = c->cause) {
+        out += "\nCaused by: ";
+        out += c->message.empty() ? c->originalExceptionType : c->message;
+        if (!c->stack.empty()) {
+            out += "\n";
+            out += c->stack;
+        }
+    }
+}
+
 void storeCaughtError(const facebook::rdma::RdmaExceptionInfo& info) {
     g_tlsCaughtError = info.message.empty() ? info.originalExceptionType : info.message;
     if (!info.stack.empty()) {
         g_tlsCaughtError += "\n";
         g_tlsCaughtError += info.stack;
     }
+    appendCauseChain(g_tlsCaughtError, info);
 }
 } // namespace
 

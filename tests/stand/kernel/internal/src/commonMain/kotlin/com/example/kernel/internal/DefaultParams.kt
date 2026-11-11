@@ -54,6 +54,7 @@ class Counter(val step: Int = 1) {
 @Composable
 @RDMA
 fun TextWithDefault(text: String = "default", title: String = "title") {
+    println("WIDGET_TEXT_DEFAULT: $title: $text")
     M3Text("$title: $text")
 }
 
@@ -61,6 +62,7 @@ fun TextWithDefault(text: String = "default", title: String = "title") {
 @Composable
 @RDMA
 fun ColumnWithDefault(content: @Composable () -> Unit = {}) {
+    println("WIDGET_COLUMN_DEFAULT")
     M3Column {
         content()
     }
