@@ -121,10 +121,13 @@ class RdmaWidgetGenerator(
     }
 
     // Renders a recursive element descriptor (`list:list:kotlin.Int`) back into a
-    // Kotlin type (`List<List<Int>>`).
+    // Kotlin type (`List<List<Int>>`). An `@RDMA` element is referenced by its fully
+    // qualified class name (no import needed), so `List<Banner>` keeps its real type
+    // instead of degrading to `List<Any?>` (matching the C ABI generator).
     private fun listKotlinType(elemFqn: String): String =
         if (elemFqn.startsWith("list:")) "List<${listKotlinType(elemFqn.removePrefix("list:"))}>"
-        else kotlinType(elemFqn)
+        else if (elemFqn.startsWith("kotlin.")) kotlinType(elemFqn)
+        else elemFqn
 
     private fun jniType(jvmType: String): String = when (jvmType) {
         "kotlin.String" -> "Ljava/lang/String;"

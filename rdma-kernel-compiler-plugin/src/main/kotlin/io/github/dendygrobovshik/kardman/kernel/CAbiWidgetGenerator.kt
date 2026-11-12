@@ -147,8 +147,6 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.asStableRef
 import kotlinx.cinterop.staticCFunction
 
-private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
-
 """)
         val refFqns = widgets
             .flatMap { classify(it) }
@@ -174,6 +172,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
             out.write("import $ref\n")
         }
         out.write("\n")
+        out.write("private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T\n\n")
         for (fn in widgets) {
             out.write(lambdaHelpers(fn))
         }
