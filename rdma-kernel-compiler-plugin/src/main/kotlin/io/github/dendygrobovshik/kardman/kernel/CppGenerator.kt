@@ -556,8 +556,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     } else if (param.nullable) {
                         out.write("    ${type.cppType} cpp_${param.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.fromJsi.replace("%d", idx.toString())});\n")
                     } else {
-                        val extractExpr = type.fromJsi.replace("%d", idx.toString())
-                        out.write("    ${type.cppType} cpp_${param.name} = $extractExpr;\n")
+                        out.write("    ${type.cppType} cpp_${param.name} = ${JniTypeMapper.fromJsiInMethod(type, idx)};\n")
                     }
                 } else if (param.isList) {
                     out.write("    jobject arg_${param.name} = nullptr;\n")

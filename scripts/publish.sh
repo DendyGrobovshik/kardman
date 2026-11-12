@@ -23,6 +23,7 @@ ensure_android_sdk "$ROOT_DIR" || exit 1
 
 ./gradlew -p "$ROOT_DIR/scripts/publish" \
     :rdma-annotation:publishToMavenLocal \
+    :rdma-compose:publishToMavenLocal \
     :rdma-types:publishToMavenLocal \
     :rdma-kernel-compiler-plugin:publishToMavenLocal \
     :rdma-kernel-gradle-plugin:publishToMavenLocal \

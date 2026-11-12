@@ -34,6 +34,10 @@ kotlin {
     sourceSets {
         commonMain {
             kotlin.srcDir("build/generated/rdma/kotlin")
+            // Modifier chain is compiled into this kernel module so the kernel
+            // compiler publishes its @RDMA constructors, methods, and companion vals.
+            kotlin.srcDir("../../../rdma-compose/src/commonMain/kotlin")
+            kotlin.srcDir("../../../rdma-compose/src/hostMain/kotlin")
             dependencies {
                 implementation("io.github.dendygrobovshik.kardman:rdma-annotation:1.0")
                 implementation(libs.compose.runtime)

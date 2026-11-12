@@ -176,6 +176,13 @@ the full Compose surface — it gets a **base protocol** (the structural
   `@Composable` functions declared in the kernel with `@RDMA` and a real
   material3 body. They are the only widgets the kernel knows how to render, so
   they can only live in the kernel.
+- **Modifiers** are `@RDMA` handles in `rdma-compose`, the same reference
+  model as any other kernel class. The plugin writes `Modifier()` (or
+  `Modifier.Empty`) and calls a method per element (`padding`, `width`,
+  `testTag`, …). Each method name is unique and every argument is required.
+  Value arguments are themselves `@RDMA` classes (`Dp`, `Color`, `Alignment`,
+  `Shape`, `Brush`) or primitives. The chain lives in kernel memory; the host
+  widget applies it with `toComposeUi()`.
 - **Composite** widgets are ordinary `@Composable` functions built from
   primitives and other composites. They can live anywhere — kernel or plugin. A
   plugin composite's `content` lambda executes in the JS runtime.

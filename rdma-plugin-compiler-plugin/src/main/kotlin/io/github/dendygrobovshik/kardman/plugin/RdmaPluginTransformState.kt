@@ -413,6 +413,24 @@ object RdmaPluginTransformState {
         for (fn in widgets) {
             if (!fn.composable) continue
             val bridgeName = bridgeNameFor(fn.qualifiedName)
+            // A guest-side default expression (an omitted Modifier) is a separate overload.
+            // Kotlin default values on a @Composable emit Composer.startDefaults, which the
+            // host now implements; those parameters use `= js("undefined")` and the JNI mask.
+            if (fn.parameters.any { it.defaultExpr != null } && fn.parameters.none { it.hasDefault }) {
+                sb.appendLine("@Composable")
+                sb.appendLine("fun $bridgeName(${widgetSignature(fn.parameters)}) {")
+                sb.appendLine("    js(\"RDMA\").${composeFnName(fn.name)}(${widgetCallArgs(fn.parameters)})")
+                sb.appendLine("}")
+                sb.appendLine()
+                val kept = fn.parameters.filter { it.defaultExpr == null }
+                val forward = fn.parameters.joinToString(", ") { it.defaultExpr ?: it.name }
+                sb.appendLine("@Composable")
+                sb.appendLine("fun $bridgeName(${widgetSignature(kept)}) {")
+                sb.appendLine("    $bridgeName($forward)")
+                sb.appendLine("}")
+                sb.appendLine()
+                continue
+            }
             val params = fn.parameters.joinToString(", ") { p ->
                 if (p.hasDefault) {
                     "${p.name}: ${p.kotlinType} = js(\"undefined\")"
@@ -432,15 +450,26 @@ object RdmaPluginTransformState {
                     else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
                 }
             }
-            val composeName = composeFnName(fn.name)
             sb.appendLine("@Composable")
             sb.appendLine("fun $bridgeName($params) {")
-            sb.appendLine("    js(\"RDMA\").$composeName($args)")
+            sb.appendLine("    js(\"RDMA\").${composeFnName(fn.name)}($args)")
             sb.appendLine("}")
             sb.appendLine()
         }
         return sb.toString()
     }
+
+    private fun widgetSignature(parameters: List<RdmaPluginParameter>): String =
+        parameters.joinToString(", ") { "${it.name}: ${it.kotlinType}" }
+
+    private fun widgetCallArgs(parameters: List<RdmaPluginParameter>): String =
+        parameters.joinToString(", ") { p ->
+            when (p.kind) {
+                RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
+                RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
+                else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
+            }
+        }
 
     fun reset() {
         fileTexts.clear()

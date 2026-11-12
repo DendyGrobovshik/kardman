@@ -25,39 +25,42 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.github.dendygrobovshik.kardman.RDMA
+import io.github.dendygrobovshik.kardman.compose.Modifier as Chain
+import io.github.dendygrobovshik.kardman.compose.provideModifierScope
+import io.github.dendygrobovshik.kardman.compose.toComposeUi
 
 @Composable
 @RDMA
-fun Text(text: String) {
-    M3Text(text)
+fun Text(text: String, modifier: Chain? = null) {
+    M3Text(text, modifier = (modifier ?: Chain()).toComposeUi())
 }
 
 @Composable
 @RDMA
-fun Column(content: @Composable () -> Unit) {
-    M3Column {
-        content()
+fun Column(modifier: Chain? = null, content: @Composable () -> Unit) {
+    M3Column(modifier = (modifier ?: Chain()).toComposeUi()) {
+        provideModifierScope { content() }
     }
 }
 
 @Composable
 @RDMA
-fun Row(content: @Composable () -> Unit) {
-    M3Row {
-        content()
+fun Row(modifier: Chain? = null, content: @Composable () -> Unit) {
+    M3Row(modifier = (modifier ?: Chain()).toComposeUi()) {
+        provideModifierScope { content() }
     }
 }
 
 @Composable
 @RDMA
-fun Spacer(width: Double, height: Double) {
-    M3Spacer(Modifier.size(width.dp, height.dp))
+fun Spacer(width: Double, height: Double, modifier: Chain? = null) {
+    M3Spacer(Modifier.size(width.dp, height.dp).then((modifier ?: Chain()).toComposeUi()))
 }
 
 @Composable
 @RDMA
-fun Button(text: String, onClick: () -> Unit) {
-    M3Button(onClick = onClick) {
+fun Button(text: String, modifier: Chain? = null, onClick: () -> Unit) {
+    M3Button(onClick = onClick, modifier = (modifier ?: Chain()).toComposeUi()) {
         M3Text(text)
     }
 }

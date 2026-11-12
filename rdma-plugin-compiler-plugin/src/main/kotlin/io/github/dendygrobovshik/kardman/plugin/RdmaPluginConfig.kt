@@ -40,6 +40,8 @@ data class RdmaPluginFunction(
 
 enum class RdmaParamKind { VALUE, CONTENT, CALLBACK, LIST_VALUE, LIST_HANDLE }
 
+private const val MODIFIER_FQN = "io.github.dendygrobovshik.kardman.compose.Modifier"
+
 data class RdmaPluginParameter(
     val name: String,
     val kind: RdmaParamKind,
@@ -49,6 +51,8 @@ data class RdmaPluginParameter(
     val lambdaArity: Int? = null,
     /** True when this parameter has a default value (and is therefore optional at the call site). */
     val hasDefault: Boolean = false,
+    /** Kotlin expression inserted as a default so omitted widget arguments still compile. */
+    val defaultExpr: String? = null,
 )
 
 data class RdmaPluginManifest(
@@ -125,8 +129,16 @@ object RdmaPluginConfig {
                             )
                         }
                     }
-                    else ->
-                        RdmaPluginParameter(p.name, RdmaParamKind.VALUE, kotlinTypeFor(fqnOf(p.type.type)), hasDefault = p.hasDefault)
+                    else -> {
+                        val fqn = fqnOf(p.type.type)
+                        RdmaPluginParameter(
+                            p.name,
+                            RdmaParamKind.VALUE,
+                            kotlinTypeFor(fqn),
+                            hasDefault = p.hasDefault,
+                            defaultExpr = if (fqn == MODIFIER_FQN) "js(\"RDMA.createModifier()\")" else null,
+                        )
+                    }
                 }
             }
             RdmaPluginFunction(fn.name, fn.qualifiedName, fn.composable, parameters, fn.suspend)

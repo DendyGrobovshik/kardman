@@ -108,6 +108,10 @@ object JniTypeMapper {
         return qualifiedName in primitives && qualifiedName != "kotlin.Unit"
     }
 
+    /** Method bodies name the JSI runtime `r`. [JniType.fromJsi] is written for constructors, which name it `rt`. */
+    fun fromJsiInMethod(type: JniType, index: Int): String =
+        type.fromJsi.replace("%d", index.toString()).replace("(rt)", "(r)")
+
     fun rdmaShortName(qualifiedName: String): String {
         return qualifiedName.substringAfterLast(".")
     }
