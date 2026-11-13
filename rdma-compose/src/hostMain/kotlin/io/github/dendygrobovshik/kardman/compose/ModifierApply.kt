@@ -40,6 +40,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -76,7 +77,7 @@ fun interface ModifierClickHandler {
 }
 
 val LocalModifierClickHandler = compositionLocalOf<ModifierClickHandler> {
-    ModifierClickHandler { }
+    ModifierClickHandler(ClickActions::click)
 }
 
 private val LocalActiveModifierScope = compositionLocalOf<ActiveModifierScope?> { null }
@@ -92,13 +93,7 @@ private sealed interface ActiveModifierScope {
         override val kind: ModifierScope get() = ModifierScope.Row
     }
 
-    class InBox(val scope: BoxScope) : ActiveModifierScope {
-        override val kind: ModifierScope get() = ModifierScope.Box
-    }
-
-    class InAsyncBox(val scope: BoxScope) : ActiveModifierScope {
-        override val kind: ModifierScope get() = ModifierScope.AsyncBox
-    }
+    class InBox(val scope: BoxScope, override val kind: ModifierScope) : ActiveModifierScope
 
     class InFlowColumn(val scope: FlowColumnScope) : ActiveModifierScope {
         override val kind: ModifierScope get() = ModifierScope.FlowColumn
@@ -125,12 +120,18 @@ internal fun RowScope.provideModifierScope(content: @Composable () -> Unit) {
 
 @Composable
 internal fun BoxScope.provideModifierScope(content: @Composable () -> Unit) {
-    CompositionLocalProvider(LocalActiveModifierScope provides ActiveModifierScope.InBox(this), content)
+    CompositionLocalProvider(
+        LocalActiveModifierScope provides ActiveModifierScope.InBox(this, ModifierScope.Box),
+        content,
+    )
 }
 
 @Composable
 internal fun BoxScope.provideAsyncBoxModifierScope(content: @Composable () -> Unit) {
-    CompositionLocalProvider(LocalActiveModifierScope provides ActiveModifierScope.InAsyncBox(this), content)
+    CompositionLocalProvider(
+        LocalActiveModifierScope provides ActiveModifierScope.InBox(this, ModifierScope.AsyncBox),
+        content,
+    )
 }
 
 @Composable
@@ -156,11 +157,19 @@ internal fun LazyGridItemScope.provideModifierScope(content: @Composable () -> U
  * reuse is a host marker). [StickyHeader] is likewise a marker for a lazy grid.
  */
 @Composable
-internal fun Chain.toComposeUi(): Modifier {
+internal fun Chain?.toComposeUi(): Modifier {
+    val chain = this ?: Chain.Empty
     val scope = LocalActiveModifierScope.current
     var acc: Modifier = Modifier
-    for (element in elementsFor(scope?.kind)) {
-        acc = applyElement(acc, element, scope)
+    val seen = mutableMapOf<ModifierElement, Int>()
+    for (element in chain.elementsFor(scope?.kind)) {
+        val occurrence = (seen[element] ?: 0) + 1
+        seen[element] = occurrence
+        // Key by value, not list index, so inserting an element in front does not
+        // move scroll position or the click interaction source onto a different node.
+        key(element, occurrence) {
+            acc = applyElement(acc, element, scope)
+        }
     }
     return acc
 }
@@ -221,7 +230,6 @@ private fun applyElement(
     }
     is Align -> when (scope) {
         is ActiveModifierScope.InBox -> with(scope.scope) { modifier.align(element.alignment.toAlignment()) }
-        is ActiveModifierScope.InAsyncBox -> with(scope.scope) { modifier.align(element.alignment.toAlignment()) }
         else -> modifier
     }
     is Weight -> when (scope) {
@@ -304,54 +312,70 @@ private fun Offset.toRelativeOffset(size: Size): ComposeOffset {
     return ComposeOffset(x = size.width * point.x, y = size.height * point.y)
 }
 
-private fun Brush.toBrush(): ComposeBrush = when (kind) {
-    BRUSH_SOLID -> ComposeSolidColor((color ?: Color.Unspecified).toColor())
-    BRUSH_LINEAR -> if (stops.isNotEmpty()) {
-        ComposeBrush.linearGradient(
-            colorStops = stops.mapIndexed { index, stop -> stop to colors[index].toColor() }.toTypedArray(),
-            start = start.toOffset(),
-            end = end.toOffset(),
-            tileMode = tileMode.toTileMode(),
-        )
-    } else {
-        ComposeBrush.linearGradient(
-            colors = colors.map { it.toColor() },
-            start = start.toOffset(),
-            end = end.toOffset(),
-            tileMode = tileMode.toTileMode(),
-        )
-    }
-    BRUSH_RADIAL -> if (stops.isNotEmpty()) {
-        ComposeBrush.radialGradient(
-            colorStops = stops.mapIndexed { index, stop -> stop to colors[index].toColor() }.toTypedArray(),
-            center = center.toOffset(),
-            radius = radius,
-            tileMode = tileMode.toTileMode(),
-        )
-    } else {
-        ComposeBrush.radialGradient(
-            colors = colors.map { it.toColor() },
-            center = center.toOffset(),
-            radius = radius,
-            tileMode = tileMode.toTileMode(),
-        )
-    }
-    BRUSH_RELATIVE_LINEAR -> object : ShaderBrush() {
-        override fun createShader(size: Size): Shader = LinearGradientShader(
-            colors = colors.map { it.toColor() },
-            colorStops = stops.takeIf { it.isNotEmpty() },
-            from = start.toRelativeOffset(size),
-            to = end.toRelativeOffset(size),
-            tileMode = tileMode.toTileMode(),
-        )
-    }
-    else -> object : ShaderBrush() {
-        override fun createShader(size: Size): Shader = RadialGradientShader(
-            colors = colors.map { it.toColor() },
-            colorStops = stops.takeIf { it.isNotEmpty() },
-            center = center.toRelativeOffset(size),
-            radius = (size.minDimension * 0.5f) * radius,
-            tileMode = tileMode.toTileMode(),
-        )
+private fun Brush.composeColors(): List<ComposeColor> = colors.map { it.toColor() }
+
+private fun Brush.pairedStops(): Array<Pair<Float, ComposeColor>>? {
+    if (stops.isEmpty() || stops.size != colors.size) return null
+    return Array(stops.size) { index -> stops[index] to colors[index].toColor() }
+}
+
+private fun Brush.relativeStops(): List<Float>? =
+    stops.takeIf { it.isNotEmpty() && it.size == colors.size }
+
+private fun Brush.toBrush(): ComposeBrush {
+    val tile = tileMode.toTileMode()
+    val mapped = composeColors()
+    val paired = pairedStops()
+    return when (kind) {
+        BRUSH_SOLID -> ComposeSolidColor((color ?: Color.Unspecified).toColor())
+        BRUSH_LINEAR -> if (paired != null) {
+            ComposeBrush.linearGradient(
+                colorStops = paired,
+                start = start.toOffset(),
+                end = end.toOffset(),
+                tileMode = tile,
+            )
+        } else {
+            ComposeBrush.linearGradient(
+                colors = mapped,
+                start = start.toOffset(),
+                end = end.toOffset(),
+                tileMode = tile,
+            )
+        }
+        BRUSH_RADIAL -> if (paired != null) {
+            ComposeBrush.radialGradient(
+                colorStops = paired,
+                center = center.toOffset(),
+                radius = radius,
+                tileMode = tile,
+            )
+        } else {
+            ComposeBrush.radialGradient(
+                colors = mapped,
+                center = center.toOffset(),
+                radius = radius,
+                tileMode = tile,
+            )
+        }
+        BRUSH_RELATIVE_LINEAR -> object : ShaderBrush() {
+            override fun createShader(size: Size): Shader = LinearGradientShader(
+                colors = mapped,
+                colorStops = relativeStops(),
+                from = start.toRelativeOffset(size),
+                to = end.toRelativeOffset(size),
+                tileMode = tile,
+            )
+        }
+        BRUSH_RELATIVE_RADIAL -> object : ShaderBrush() {
+            override fun createShader(size: Size): Shader = RadialGradientShader(
+                colors = mapped,
+                colorStops = relativeStops(),
+                center = center.toRelativeOffset(size),
+                radius = (size.minDimension * 0.5f) * radius,
+                tileMode = tile,
+            )
+        }
+        else -> ComposeSolidColor(ComposeColor.Unspecified)
     }
 }

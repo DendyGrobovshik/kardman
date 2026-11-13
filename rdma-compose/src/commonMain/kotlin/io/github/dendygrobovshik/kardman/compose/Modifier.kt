@@ -89,9 +89,10 @@ class Modifier {
 
     fun layoutId(id: String): Modifier = with(LayoutId(id))
 
-    fun horizontalScroll(initial: Int, useNativeScroll: Boolean): Modifier =
-        with(HorizontalScroll(initial, useNativeScroll))
+    /** Horizontal scroll, starting at [initial]. */
+    fun horizontalScroll(initial: Int): Modifier = with(HorizontalScroll(initial))
 
+    /** Records a click. The host runs the block registered with [ClickAction] for [actionId]. */
     fun clickable(actionId: Int, enabled: Boolean, indication: Indication): Modifier =
         with(Clickable(actionId, enabled, indication))
 
@@ -187,147 +188,78 @@ internal enum class ModifierScope {
     LazyGridItem,
 }
 
-internal sealed interface ModifierElement {
-    val id: Int
-    val scopes: Set<ModifierScope>
-}
+internal sealed class ModifierElement(
+    val id: Int,
+    val scopes: Set<ModifierScope> = emptySet(),
+)
 
-internal data class Padding(val values: PaddingValues) : ModifierElement {
-    override val id: Int get() = ModifierIds.PADDING
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class Padding(val values: PaddingValues) : ModifierElement(ModifierIds.PADDING)
 
-internal data class AlignHorizontally(val alignment: HorizontalAlignment) : ModifierElement {
-    override val id: Int get() = ModifierIds.ALIGN_HORIZONTALLY
-    override val scopes: Set<ModifierScope> get() = setOf(ModifierScope.Column, ModifierScope.FlowColumn)
-}
+internal data class AlignHorizontally(val alignment: HorizontalAlignment) : ModifierElement(
+    ModifierIds.ALIGN_HORIZONTALLY,
+    setOf(ModifierScope.Column, ModifierScope.FlowColumn),
+)
 
-internal data class AlignVertically(val alignment: VerticalAlignment) : ModifierElement {
-    override val id: Int get() = ModifierIds.ALIGN_VERTICALLY
-    override val scopes: Set<ModifierScope> get() = setOf(ModifierScope.Row, ModifierScope.FlowRow)
-}
+internal data class AlignVertically(val alignment: VerticalAlignment) : ModifierElement(
+    ModifierIds.ALIGN_VERTICALLY,
+    setOf(ModifierScope.Row, ModifierScope.FlowRow),
+)
 
-internal data class Align(val alignment: Alignment) : ModifierElement {
-    override val id: Int get() = ModifierIds.ALIGN
-    override val scopes: Set<ModifierScope> get() = setOf(ModifierScope.Box, ModifierScope.AsyncBox)
-}
+internal data class Align(val alignment: Alignment) : ModifierElement(
+    ModifierIds.ALIGN,
+    setOf(ModifierScope.Box, ModifierScope.AsyncBox),
+)
 
-internal data class Width(val width: Dp) : ModifierElement {
-    override val id: Int get() = ModifierIds.WIDTH
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class Width(val width: Dp) : ModifierElement(ModifierIds.WIDTH)
 
-internal data class Height(val height: Dp) : ModifierElement {
-    override val id: Int get() = ModifierIds.HEIGHT
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class Height(val height: Dp) : ModifierElement(ModifierIds.HEIGHT)
 
-internal data class Weight(val value: Double) : ModifierElement {
-    override val id: Int get() = ModifierIds.WEIGHT
-    override val scopes: Set<ModifierScope> get() = setOf(
-        ModifierScope.Row,
-        ModifierScope.FlowRow,
-        ModifierScope.Column,
-        ModifierScope.FlowColumn,
-    )
-}
+internal data class Weight(val value: Double) : ModifierElement(
+    ModifierIds.WEIGHT,
+    setOf(ModifierScope.Row, ModifierScope.FlowRow, ModifierScope.Column, ModifierScope.FlowColumn),
+)
 
-internal data object FillMaxWidth : ModifierElement {
-    override val id: Int get() = ModifierIds.FILL_MAX_WIDTH
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data object FillMaxWidth : ModifierElement(ModifierIds.FILL_MAX_WIDTH)
 
-internal data object FillMaxHeight : ModifierElement {
-    override val id: Int get() = ModifierIds.FILL_MAX_HEIGHT
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data object FillMaxHeight : ModifierElement(ModifierIds.FILL_MAX_HEIGHT)
 
-internal data class AspectRatio(val ratio: Double) : ModifierElement {
-    override val id: Int get() = ModifierIds.ASPECT_RATIO
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class AspectRatio(val ratio: Double) : ModifierElement(ModifierIds.ASPECT_RATIO)
 
-internal data class Background(val color: Color, val shape: Shape) : ModifierElement {
-    override val id: Int get() = ModifierIds.BACKGROUND
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class Background(val color: Color, val shape: Shape) : ModifierElement(ModifierIds.BACKGROUND)
 
-internal data class Clip(val shape: Shape) : ModifierElement {
-    override val id: Int get() = ModifierIds.CLIP
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class Clip(val shape: Shape) : ModifierElement(ModifierIds.CLIP)
 
-internal data object StickyHeader : ModifierElement {
-    override val id: Int get() = ModifierIds.STICKY_HEADER
-    override val scopes: Set<ModifierScope> get() = setOf(ModifierScope.LazyGridItem)
-}
+internal data object StickyHeader : ModifierElement(
+    ModifierIds.STICKY_HEADER,
+    setOf(ModifierScope.LazyGridItem),
+)
 
-internal data object Shimmer : ModifierElement {
-    override val id: Int get() = ModifierIds.SHIMMER
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data object Shimmer : ModifierElement(ModifierIds.SHIMMER)
 
-internal data class Alpha(val value: Double) : ModifierElement {
-    override val id: Int get() = ModifierIds.ALPHA
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class Alpha(val value: Double) : ModifierElement(ModifierIds.ALPHA)
 
-internal data class DefaultMinSize(val minWidth: Dp, val minHeight: Dp) : ModifierElement {
-    override val id: Int get() = ModifierIds.DEFAULT_MIN_SIZE
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class DefaultMinSize(val minWidth: Dp, val minHeight: Dp) : ModifierElement(ModifierIds.DEFAULT_MIN_SIZE)
 
-internal data class WrapContentHeight(val align: VerticalAlignment, val unbounded: Boolean) : ModifierElement {
-    override val id: Int get() = ModifierIds.WRAP_CONTENT_HEIGHT
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class WrapContentHeight(val align: VerticalAlignment, val unbounded: Boolean) :
+    ModifierElement(ModifierIds.WRAP_CONTENT_HEIGHT)
 
-internal data class LayoutId(val idValue: String) : ModifierElement {
-    override val id: Int get() = ModifierIds.LAYOUT_ID
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class LayoutId(val idValue: String) : ModifierElement(ModifierIds.LAYOUT_ID)
 
-internal data class HorizontalScroll(val initial: Int, val useNativeScroll: Boolean) : ModifierElement {
-    override val id: Int get() = ModifierIds.HORIZONTAL_SCROLL
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class HorizontalScroll(val initial: Int) : ModifierElement(ModifierIds.HORIZONTAL_SCROLL)
 
-internal data class BrushBackground(val brush: Brush, val shape: Shape) : ModifierElement {
-    override val id: Int get() = ModifierIds.BRUSH_BACKGROUND
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class BrushBackground(val brush: Brush, val shape: Shape) : ModifierElement(ModifierIds.BRUSH_BACKGROUND)
 
-internal data class Clickable(val actionId: Int, val enabled: Boolean, val indication: Indication) : ModifierElement {
-    override val id: Int get() = ModifierIds.CLICKABLE
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class Clickable(val actionId: Int, val enabled: Boolean, val indication: Indication) :
+    ModifierElement(ModifierIds.CLICKABLE)
 
-internal data class IntrinsicHeight(val size: IntrinsicSize) : ModifierElement {
-    override val id: Int get() = ModifierIds.INTRINSIC_HEIGHT
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class IntrinsicHeight(val size: IntrinsicSize) : ModifierElement(ModifierIds.INTRINSIC_HEIGHT)
 
-internal data class IntrinsicWidth(val size: IntrinsicSize) : ModifierElement {
-    override val id: Int get() = ModifierIds.INTRINSIC_WIDTH
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class IntrinsicWidth(val size: IntrinsicSize) : ModifierElement(ModifierIds.INTRINSIC_WIDTH)
 
-internal data object StatusBarPadding : ModifierElement {
-    override val id: Int get() = ModifierIds.STATUS_BAR_PADDING
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data object StatusBarPadding : ModifierElement(ModifierIds.STATUS_BAR_PADDING)
 
-internal data class OffsetElement(val x: Dp, val y: Dp) : ModifierElement {
-    override val id: Int get() = ModifierIds.OFFSET
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class OffsetElement(val x: Dp, val y: Dp) : ModifierElement(ModifierIds.OFFSET)
 
-internal data class TestTag(val tag: String) : ModifierElement {
-    override val id: Int get() = ModifierIds.TEST_TAG
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data class TestTag(val tag: String) : ModifierElement(ModifierIds.TEST_TAG)
 
-internal data object Reuse : ModifierElement {
-    override val id: Int get() = ModifierIds.REUSE
-    override val scopes: Set<ModifierScope> get() = emptySet()
-}
+internal data object Reuse : ModifierElement(ModifierIds.REUSE)

@@ -98,7 +98,7 @@ class ModifierTest {
             .defaultMinSize(Dp(8.0), Dp.Unspecified)
             .wrapContentHeight(VerticalAlignment.Top, true)
             .layoutId("slot")
-            .horizontalScroll(12, true)
+            .horizontalScroll(12)
             .brushBackground(solidColor(Color.Red), Shape.Rectangle)
             .clickable(7, false, Indication.None)
             .intrinsicHeight(IntrinsicSize.Max)
@@ -143,7 +143,7 @@ class ModifierTest {
     }
 
     @Test
-    fun `then copies brush corners and scroll flags`() {
+    fun `then copies brush corners and scroll`() {
         val brush = linearGradient(
             colors = listOf(Color.Red, Color.Blue),
             stops = listOf(0f, 1f),
@@ -160,9 +160,8 @@ class ModifierTest {
             .offset(Dp(0.0), Dp(0.0))
         val copy = Modifier.Empty.then(original)
         assertEquals(original, copy)
-        val scroll = Modifier.Empty.horizontalScroll(4, true).elements().single() as HorizontalScroll
+        val scroll = Modifier.Empty.horizontalScroll(4).elements().single() as HorizontalScroll
         assertEquals(4, scroll.initial)
-        assertTrue(scroll.useNativeScroll)
         val painted = copy.elements()[1] as BrushBackground
         assertEquals(listOf(Color.Red, Color.Blue), painted.brush.colors)
         assertEquals(TileMode.Mirror, painted.brush.tileMode)
@@ -223,4 +222,5 @@ class ModifierTest {
         assertEquals(Shape.Circle, brush.shape)
         assertEquals(Color.Red, brush.brush.color)
     }
+
 }

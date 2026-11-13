@@ -182,17 +182,17 @@ internal const val BRUSH_RELATIVE_RADIAL: Int = 4
  * An empty [stops] list means the colors are spaced evenly.
  */
 @RDMA
-class Brush internal constructor() {
-    internal var kind: Int = BRUSH_SOLID
-    internal var color: Color? = null
-    internal var colors: List<Color> = emptyList()
-    internal var stops: List<Float> = emptyList()
-    internal var start: Offset = Offset.Zero
-    internal var end: Offset = Offset.Zero
-    internal var center: Offset = Offset.Zero
-    internal var radius: Float = 0f
-    internal var tileMode: TileMode = TileMode.Clamp
-
+class Brush internal constructor(
+    internal val kind: Int,
+    internal val color: Color?,
+    internal val colors: List<Color>,
+    internal val stops: List<Float>,
+    internal val start: Offset,
+    internal val end: Offset,
+    internal val center: Offset,
+    internal val radius: Float,
+    internal val tileMode: TileMode,
+) {
     override fun equals(other: Any?): Boolean =
         other is Brush &&
             kind == other.kind &&
@@ -219,11 +219,20 @@ class Brush internal constructor() {
     }
 }
 
+private fun brush(
+    kind: Int,
+    color: Color? = null,
+    colors: List<Color> = emptyList(),
+    stops: List<Float> = emptyList(),
+    start: Offset = Offset.Zero,
+    end: Offset = Offset.Zero,
+    center: Offset = Offset.Zero,
+    radius: Float = 0f,
+    tileMode: TileMode = TileMode.Clamp,
+): Brush = Brush(kind, color, colors, stops, start, end, center, radius, tileMode)
+
 @RDMA
-fun solidColor(color: Color): Brush = Brush().also {
-    it.kind = BRUSH_SOLID
-    it.color = color
-}
+fun solidColor(color: Color): Brush = brush(BRUSH_SOLID, color = color)
 
 @RDMA
 fun linearGradient(
@@ -232,14 +241,14 @@ fun linearGradient(
     start: Offset,
     end: Offset,
     tileMode: TileMode,
-): Brush = Brush().also {
-    it.kind = BRUSH_LINEAR
-    it.colors = colors
-    it.stops = stops
-    it.start = start
-    it.end = end
-    it.tileMode = tileMode
-}
+): Brush = brush(
+    BRUSH_LINEAR,
+    colors = colors,
+    stops = stops,
+    start = start,
+    end = end,
+    tileMode = tileMode,
+)
 
 @RDMA
 fun radialGradient(
@@ -248,14 +257,14 @@ fun radialGradient(
     center: Offset,
     radius: Float,
     tileMode: TileMode,
-): Brush = Brush().also {
-    it.kind = BRUSH_RADIAL
-    it.colors = colors
-    it.stops = stops
-    it.center = center
-    it.radius = radius
-    it.tileMode = tileMode
-}
+): Brush = brush(
+    BRUSH_RADIAL,
+    colors = colors,
+    stops = stops,
+    center = center,
+    radius = radius,
+    tileMode = tileMode,
+)
 
 @RDMA
 fun relativeLinearGradient(
@@ -264,14 +273,14 @@ fun relativeLinearGradient(
     start: Offset,
     end: Offset,
     tileMode: TileMode,
-): Brush = Brush().also {
-    it.kind = BRUSH_RELATIVE_LINEAR
-    it.colors = colors
-    it.stops = stops
-    it.start = start
-    it.end = end
-    it.tileMode = tileMode
-}
+): Brush = brush(
+    BRUSH_RELATIVE_LINEAR,
+    colors = colors,
+    stops = stops,
+    start = start,
+    end = end,
+    tileMode = tileMode,
+)
 
 @RDMA
 fun relativeRadialGradient(
@@ -280,14 +289,14 @@ fun relativeRadialGradient(
     center: Offset,
     radius: Float,
     tileMode: TileMode,
-): Brush = Brush().also {
-    it.kind = BRUSH_RELATIVE_RADIAL
-    it.colors = colors
-    it.stops = stops
-    it.center = center
-    it.radius = radius
-    it.tileMode = tileMode
-}
+): Brush = brush(
+    BRUSH_RELATIVE_RADIAL,
+    colors = colors,
+    stops = stops,
+    center = center,
+    radius = radius,
+    tileMode = tileMode,
+)
 
 /** Click indication. `0` is none, `1` is the host default. */
 @RDMA

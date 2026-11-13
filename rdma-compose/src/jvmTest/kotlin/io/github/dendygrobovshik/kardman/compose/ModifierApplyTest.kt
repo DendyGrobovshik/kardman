@@ -145,6 +145,28 @@ class ModifierApplyTest {
         onNodeWithTag("hit").performClick()
         assertEquals(7, clicked)
     }
+
+    @Test
+    fun `clickable runs the action registered for its id`() = runComposeUiTest {
+        ClickActions.clear()
+        try {
+            var clicked = -1
+            setContent {
+                ClickAction(7) { clicked = 7 }
+                Box(
+                    io.github.dendygrobovshik.kardman.compose.Modifier.Empty
+                        .size(Dp(48.0), Dp(48.0))
+                        .clickable(7, true, Indication.None)
+                        .testTag("hit")
+                        .toComposeUi(),
+                )
+            }
+            onNodeWithTag("hit").performClick()
+            assertEquals(7, clicked)
+        } finally {
+            ClickActions.clear()
+        }
+    }
 }
 
 private fun Modifier.foldText(): String =

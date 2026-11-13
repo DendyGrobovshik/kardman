@@ -338,13 +338,7 @@ object RdmaPluginTransformState {
                 }
                 if (p.hasDefault) "$base = js(\"undefined\")" else base
             }.joinToString(", ")
-            val args = fn.parameters.map { p ->
-                when (p.kind) {
-                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
-                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
-                }
-            }.joinToString(", ")
+            val args = fn.parameters.joinToString(", ") { it.guestExpr() }
             sb.appendLine("fun $bridgeName($params): dynamic {")
             sb.appendLine("    rdmaListKindInstalled")
             sb.appendLine("    return js(\"RDMA\").${fn.name}($args)")
@@ -363,13 +357,7 @@ object RdmaPluginTransformState {
                 }
                 if (p.hasDefault) "$base = js(\"undefined\")" else base
             }.joinToString(", ")
-            val args = fn.parameters.map { p ->
-                when (p.kind) {
-                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
-                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
-                }
-            }.joinToString(", ")
+            val args = fn.parameters.joinToString(", ") { it.guestExpr() }
             sb.appendLine("suspend fun $bridgeName($params): dynamic {")
             sb.appendLine("    return suspendCoroutine { cont: Continuation<Any?> ->")
             sb.appendLine("        val id = js(\"RDMA\").registerContinuation(")
@@ -463,13 +451,13 @@ object RdmaPluginTransformState {
         parameters.joinToString(", ") { "${it.name}: ${it.kotlinType}" }
 
     private fun widgetCallArgs(parameters: List<RdmaPluginParameter>): String =
-        parameters.joinToString(", ") { p ->
-            when (p.kind) {
-                RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
-                else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
-            }
-        }
+        parameters.joinToString(", ") { it.guestExpr() }
+
+    private fun RdmaPluginParameter.guestExpr(): String = when (kind) {
+        RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> name
+        RdmaParamKind.LIST_HANDLE -> "$name.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
+        else -> "js(\"RDMA\").registerBlock($name, \"$pluginIdJs\")"
+    }
 
     fun reset() {
         fileTexts.clear()

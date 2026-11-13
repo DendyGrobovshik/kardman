@@ -33,6 +33,7 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             implementation(project(":rdma-annotation"))
+            implementation(libs.compose.runtime)
         }
         // Host apply (androidx.compose.ui.Modifier). The JS guest only needs the model.
         jvmMain {
@@ -50,11 +51,6 @@ kotlin {
                 implementation(libs.compose.foundation)
                 implementation(libs.compose.ui)
             }
-        }
-        // The Compose compiler plugin is applied to every target, including JS.
-        // The guest model has no composables; the runtime is only here so that check passes.
-        jsMain.dependencies {
-            implementation(libs.compose.runtime)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)

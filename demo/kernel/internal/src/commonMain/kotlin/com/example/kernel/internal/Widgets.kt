@@ -32,13 +32,13 @@ import io.github.dendygrobovshik.kardman.compose.toComposeUi
 @Composable
 @RDMA
 fun Text(text: String, modifier: Chain? = null) {
-    M3Text(text, modifier = (modifier ?: Chain()).toComposeUi())
+    M3Text(text, modifier = modifier.toComposeUi())
 }
 
 @Composable
 @RDMA
 fun Column(modifier: Chain? = null, content: @Composable () -> Unit) {
-    M3Column(modifier = (modifier ?: Chain()).toComposeUi()) {
+    M3Column(modifier = modifier.toComposeUi()) {
         provideModifierScope { content() }
     }
 }
@@ -46,7 +46,7 @@ fun Column(modifier: Chain? = null, content: @Composable () -> Unit) {
 @Composable
 @RDMA
 fun Row(modifier: Chain? = null, content: @Composable () -> Unit) {
-    M3Row(modifier = (modifier ?: Chain()).toComposeUi()) {
+    M3Row(modifier = modifier.toComposeUi()) {
         provideModifierScope { content() }
     }
 }
@@ -54,13 +54,13 @@ fun Row(modifier: Chain? = null, content: @Composable () -> Unit) {
 @Composable
 @RDMA
 fun Spacer(width: Double, height: Double, modifier: Chain? = null) {
-    M3Spacer(Modifier.size(width.dp, height.dp).then((modifier ?: Chain()).toComposeUi()))
+    M3Spacer(Modifier.size(width.dp, height.dp).then(modifier.toComposeUi()))
 }
 
 @Composable
 @RDMA
 fun Button(text: String, modifier: Chain? = null, onClick: () -> Unit) {
-    M3Button(onClick = onClick, modifier = (modifier ?: Chain()).toComposeUi()) {
+    M3Button(onClick = onClick, modifier = modifier.toComposeUi()) {
         M3Text(text)
     }
 }

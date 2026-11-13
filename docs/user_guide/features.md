@@ -182,7 +182,8 @@ the full Compose surface — it gets a **base protocol** (the structural
   `testTag`, …). Each method name is unique and every argument is required.
   Value arguments are themselves `@RDMA` classes (`Dp`, `Color`, `Alignment`,
   `Shape`, `Brush`) or primitives. The chain lives in kernel memory; the host
-  widget applies it with `toComposeUi()`.
+  widget applies it with `toComposeUi()`. `ClickAction(id) { ... }` registers the
+  block that `clickable` runs.
 - **Composite** widgets are ordinary `@Composable` functions built from
   primitives and other composites. They can live anywhere — kernel or plugin. A
   plugin composite's `content` lambda executes in the JS runtime.

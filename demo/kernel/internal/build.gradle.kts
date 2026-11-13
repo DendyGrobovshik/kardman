@@ -34,8 +34,9 @@ kotlin {
     sourceSets {
         commonMain {
             kotlin.srcDir("build/generated/rdma/kotlin")
-            // Modifier chain is compiled into this kernel module so the kernel
-            // compiler publishes its @RDMA constructors, methods, and companion vals.
+            // The kernel compiler only publishes @RDMA types compiled in this module, and the
+            // applier has to see that same Modifier class. Host functions stay internal because
+            // a kernel module cannot expose a non-@RDMA public API.
             kotlin.srcDir("../../../rdma-compose/src/commonMain/kotlin")
             kotlin.srcDir("../../../rdma-compose/src/hostMain/kotlin")
             dependencies {
