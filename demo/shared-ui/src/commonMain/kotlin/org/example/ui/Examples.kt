@@ -230,4 +230,79 @@ fun main() {
     runRdmaApp { GeneratedContent() }
 }
 """),
+    Example("Heavy", """package com.example.plugin.generated
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.example.kernel.internal.Button
+import com.example.kernel.internal.Column
+import com.example.kernel.internal.Row
+import com.example.kernel.internal.Text
+import com.example.kernel.internal.runRdmaApp
+import io.github.dendygrobovshik.kardman.compose.Color
+import io.github.dendygrobovshik.kardman.compose.Dp
+import io.github.dendygrobovshik.kardman.compose.Modifier
+import io.github.dendygrobovshik.kardman.compose.Shape
+import io.github.dendygrobovshik.kardman.compose.VerticalAlignment
+import kotlin.time.TimeSource
+
+private const val HEAVY_ROWS = 32
+private const val HEAVY_COLS = 4
+
+@Composable
+fun GeneratedContent() {
+    var tick by remember { mutableStateOf(0) }
+    var recordedTick by remember { mutableStateOf(-1) }
+    var shown by remember { mutableStateOf("measuring") }
+    Column(modifier = Modifier().fillMaxWidth().paddingAll(Dp(8.0))) {
+        Text(shown, modifier = Modifier().testTag("heavy-time").paddingAll(Dp(4.0)))
+        Button(
+            "Recompose",
+            modifier = Modifier().fillMaxWidth().paddingAll(Dp(4.0)),
+            onClick = { tick = tick + 1 },
+        )
+        val started = TimeSource.Monotonic.markNow()
+        repeat(HEAVY_ROWS) { row ->
+            Row(modifier = Modifier().fillMaxWidth().paddingSymmetric(Dp(2.0), Dp(1.0))) {
+                repeat(HEAVY_COLS) { col ->
+                    val band = (row + col + tick) % 2
+                    Text(
+                        "" + row + "." + col,
+                        modifier = Modifier()
+                            .weight(1.0)
+                            .paddingAll(Dp(4.0))
+                            .background(if (band == 0) Color.Red else Color.Blue, if (col % 2 == 0) Shape.Rectangle else Shape.Circle)
+                            .paddingSymmetric(Dp(6.0), Dp(2.0))
+                            .alpha(if (tick % 2 == 0) 1.0 else 0.7)
+                            .offset(Dp(0.0), Dp((row % 3).toDouble()))
+                            .alignVertically(VerticalAlignment.CenterVertically)
+                            .testTag("c" + row + "x" + col),
+                    )
+                }
+            }
+        }
+        val elapsedUs = started.elapsedNow().inWholeMicroseconds
+        SideEffect {
+            if (recordedTick != tick) {
+                recordedTick = tick
+                shown = "grid " + formatMs(elapsedUs) + " ms"
+            }
+        }
+    }
+}
+
+private fun formatMs(elapsedUs: Long): String {
+    val whole = elapsedUs / 1000
+    val frac = (elapsedUs % 1000) / 100
+    return "" + whole + "." + frac
+}
+
+fun main() {
+    runRdmaApp { GeneratedContent() }
+}
+"""),
 )
