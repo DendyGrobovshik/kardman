@@ -56,6 +56,7 @@ plugins {
 
 include(":kernel:internal")
 include(":plugin:generated")
+include(":plugin:bench")
 include(":shared-ui")
 include(":server")
 include(":androidApp")

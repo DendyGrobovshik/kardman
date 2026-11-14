@@ -42,31 +42,40 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * Host composition cost of the same grid as the demo "Heavy" example:
- * 32 rows × 4 cells, each cell a chain of eight modifier elements applied
- * with [toComposeUi]. [Composition.setContent] is the first composition.
- * The following sample writes state and calls `recompose`/`applyChanges`,
+ * Host composition cost of a 32×4 grid. Modifiers applies eight modifier
+ * elements per cell with [toComposeUi]. NoModifiers is the same grid of
+ * empty boxes. [Composition.setContent] is the first composition. The
+ * following sample writes state and calls `recompose`/`applyChanges`,
  * which is the recomposition. Neither pass measures or draws.
  */
 class ModifierCompositionBenchTest {
     @Test
-    fun `heavy modifier grid composition and recomposition`() {
+    fun `modifier grid composition and recomposition`() {
+        measure(withModifiers = true, "modifiers")
+    }
+
+    @Test
+    fun `no modifier grid composition and recomposition`() {
+        measure(withModifiers = false, "nomodifiers")
+    }
+
+    private fun measure(withModifiers: Boolean, name: String) {
         val warmup = 2
         val runs = 5
-        val samples = List(warmup + runs) { sample() }
+        val samples = List(warmup + runs) { sample(withModifiers) }
         val measured = samples.drop(warmup)
         val composeMs = measured.map { it.composeNs }.medianNanosToMs()
         val recomposeMs = measured.map { it.recomposeNs }.medianNanosToMs()
         println(
-            "heavy modifier grid ${HeavyRows}x$HeavyCols " +
-                "(${HeavyRows * HeavyCols} cells, 8 elements): " +
+            "$name grid ${Rows}x$Cols " +
+                "(${Rows * Cols} cells): " +
                 "composition median $composeMs ms, recomposition median $recomposeMs ms " +
                 "(warmup $warmup, runs $runs)",
         )
-        measured.forEach { assertEquals(HeavyRows * HeavyCols, it.cells) }
+        measured.forEach { assertEquals(Rows * Cols, it.cells) }
     }
 
-    private fun sample(): Sample {
+    private fun sample(withModifiers: Boolean): Sample {
         val recomposer = Recomposer(EmptyCoroutineContext)
         val root = newLayoutNode()
         val composition = Composition(newUiApplier(root), recomposer)
@@ -80,7 +89,7 @@ class ModifierCompositionBenchTest {
                         LocalLayoutDirection provides LayoutDirection.Ltr,
                         LocalViewConfiguration provides BenchViewConfiguration,
                     ) {
-                        HeavyModifierGrid(tick) { passes++ }
+                        Grid(tick, withModifiers) { passes++ }
                     }
                 }
             }
@@ -102,21 +111,27 @@ class ModifierCompositionBenchTest {
     }
 }
 
-private const val HeavyRows = 32
-private const val HeavyCols = 4
+private const val Rows = 32
+private const val Cols = 4
 
 private data class Sample(val composeNs: Long, val recomposeNs: Long, val cells: Int)
 
 @Composable
-private fun HeavyModifierGrid(tick: State<Int>, onPass: () -> Unit) {
+private fun Grid(tick: State<Int>, withModifiers: Boolean, onPass: () -> Unit) {
     onPass()
     val value = tick.value
     Column {
-        repeat(HeavyRows) { row ->
+        repeat(Rows) { row ->
             Row(Modifier.fillMaxWidth()) {
-                provideModifierScope {
-                    repeat(HeavyCols) { col ->
-                        Box(modifier = cellChain(row, col, value).toComposeUi())
+                if (withModifiers) {
+                    provideModifierScope {
+                        repeat(Cols) { col ->
+                            Box(modifier = cellChain(row, col, value).toComposeUi())
+                        }
+                    }
+                } else {
+                    repeat(Cols) {
+                        Box(modifier = Modifier)
                     }
                 }
             }

@@ -230,7 +230,7 @@ fun main() {
     runRdmaApp { GeneratedContent() }
 }
 """),
-    Example("Heavy", """package com.example.plugin.generated
+    Example("Modifiers", """package com.example.plugin.generated
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
