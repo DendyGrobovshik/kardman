@@ -22,6 +22,7 @@ import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class RdmaWidgetGeneratorTest {
@@ -157,5 +158,26 @@ class RdmaWidgetGeneratorTest {
         assertContains(bridge, "mask |= (1 << 1)")
         // The JNI cache signature includes the mask `I` after the params, before the composer.
         assertContains(bridge, "Ljava/lang/String;JI")
+    }
+
+    @Test
+    fun `defaulted callback resolves via definite assignment`() {
+        val widget = RdmaFunctionInfo(
+            name = "Button",
+            qualifiedName = "com.example.kernel.Button",
+            facadeClass = "com.example.kernel.WidgetsKt",
+            composable = true,
+            parameters = listOf(
+                RdmaParameterInfo("text", RdmaTypeRef(RdmaType.Primitive("kotlin.String"))),
+                RdmaParameterInfo("onClick", RdmaTypeRef(RdmaType.FunctionType(emptyList(), RdmaTypeRef(RdmaType.UnitType))), hasDefault = true, defaultValue = "{}"),
+            ),
+            returnType = RdmaTypeRef(RdmaType.UnitType),
+        )
+        val (_, kt) = generate(listOf(widget))
+        val entries = kt["RdmaWidgetEntries.kt"] ?: error("not generated")
+        assertContains(entries, "val onClick: () -> Unit")
+        assertContains(entries, "onClick = {}")
+        assertContains(entries, "onClick = { RdmaComposeHost.nativeInvokeCallback(_p1, emptyArray<Any?>()) }")
+        assertFalse(entries.contains("else { RdmaComposeHost.nativeInvokeCallback"))
     }
 }

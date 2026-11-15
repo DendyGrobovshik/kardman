@@ -37,7 +37,7 @@ fun Text(text: String, modifier: Chain? = null) {
 
 @Composable
 @RDMA
-fun Column(modifier: Chain? = null, content: @Composable () -> Unit) {
+fun Column(modifier: Chain? = null, content: @Composable () -> Unit = {}) {
     M3Column(modifier = modifier.toComposeUi()) {
         provideModifierScope { content() }
     }
@@ -45,7 +45,7 @@ fun Column(modifier: Chain? = null, content: @Composable () -> Unit) {
 
 @Composable
 @RDMA
-fun Row(modifier: Chain? = null, content: @Composable () -> Unit) {
+fun Row(modifier: Chain? = null, content: @Composable () -> Unit = {}) {
     M3Row(modifier = modifier.toComposeUi()) {
         provideModifierScope { content() }
     }
@@ -59,7 +59,7 @@ fun Spacer(width: Double, height: Double, modifier: Chain? = null) {
 
 @Composable
 @RDMA
-fun Button(text: String, modifier: Chain? = null, onClick: () -> Unit) {
+fun Button(text: String, modifier: Chain? = null, onClick: () -> Unit = {}) {
     M3Button(onClick = onClick, modifier = modifier.toComposeUi()) {
         M3Text(text)
     }

@@ -239,9 +239,10 @@ class CppGeneratorTest {
             ByteArrayOutputStream().also { files[fileName] = it }
         }.generate(listOf(createPerson()))
         val cpp = files["RdmaBridge_internal.cpp"]!!.toString("UTF-8")
-        val declaration = cpp.indexOf("jobject materializeArray")
+        val include = cpp.indexOf("#include \"ListHandle.h\"")
         val moduleNamespace = cpp.indexOf("namespace internal")
-        assertTrue(declaration in 0 until moduleNamespace, "materializeArray must be declared in facebook::rdma, before the module namespace")
+        assertTrue(include in 0 until moduleNamespace, "ListHandle.h declares materializeArray in facebook::rdma and must be included before the module namespace")
+        assertFalse(cpp.substring(moduleNamespace).contains("jobject materializeArray"), "materializeArray must not be redeclared inside the module namespace")
     }
 
     @Test
