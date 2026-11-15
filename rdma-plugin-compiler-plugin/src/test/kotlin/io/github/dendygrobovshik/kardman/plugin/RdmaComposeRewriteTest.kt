@@ -67,6 +67,18 @@ class RdmaComposeRewriteTest {
     }
 
     @Test
+    fun `float and long literals lose their suffix inside a constructor js call`() {
+        assertEquals("0", jsNumberText("kotlin.Float", "0f"))
+        assertEquals("0.3", jsNumberText("kotlin.Float", "0.3f"))
+        assertEquals("1", jsNumberText("kotlin.Float", "1F"))
+        assertEquals("1000.5", jsNumberText("kotlin.Float", "1_000.5f"))
+        assertEquals("24", jsNumberText("kotlin.Long", "24L"))
+        assertEquals("widthf", jsNumberText("kotlin.Float", "widthf"))
+        assertEquals("1f + 2f", jsNumberText("kotlin.Float", "1f + 2f"))
+        assertEquals("0f", jsNumberText("kotlin.Double", "0f"))
+    }
+
+    @Test
     fun `structural symbols are allowed but not bridged`() {
         assertTrue(ComposeAllowlist.isAllowed("androidx.compose.runtime.key"))
         assertTrue(ComposeAllowlist.isAllowed("androidx.compose.runtime.rememberUpdatedState"))

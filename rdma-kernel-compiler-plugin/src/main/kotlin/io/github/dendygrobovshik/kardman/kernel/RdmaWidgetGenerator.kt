@@ -247,7 +247,21 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
         // gives each `name = { ... }` the declared function type. `@Composable` lambdas also
         // need this because Kotlin does not propagate that expected type into `if` branches.
         if ((p is Param.Content || p is Param.Callback) && p.hasDefault && p.defaultValue != null) {
-            val converted = lambdaExpr(p, RdmaDefaultSupport.raw(i))
+            val raw = RdmaDefaultSupport.raw(i)
+            val converted = when (p) {
+                is Param.Content -> when (p.arity) {
+                    0 -> "{ RdmaComposeHost.nativeInvokeScopeBlock($raw, currentComposer, 0) }"
+                    1 -> "{ p0 -> RdmaComposeHost.nativeInvokeScopeBlock1($raw, currentComposer, 0, p0) }"
+                    else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
+                }
+                is Param.Callback -> if (p.arity == 0) {
+                    "{ RdmaComposeHost.nativeInvokeCallback($raw, emptyArray<Any?>()) }"
+                } else {
+                    val lambdaParams = (0 until p.arity).joinToString(", ") { "p$it" }
+                    val array = (0 until p.arity).joinToString(", ") { "p$it" }
+                    "{ $lambdaParams -> RdmaComposeHost.nativeInvokeCallback($raw, arrayOf<Any?>($array)) }"
+                }
+            }
             return "    val ${p.name}: ${resolvedType(p)}\n" +
                 "    if (${RdmaDefaultSupport.omitted(i)}) {\n" +
                 "        ${p.name} = {}\n" +
@@ -258,27 +272,22 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
         return "    val ${p.name}: ${resolvedType(p)} = ${resolvedExpr(p, i)}\n"
     }
 
-    private fun lambdaExpr(p: Param, raw: String): String = when (p) {
-        is Param.Content -> when (p.arity) {
-            0 -> "{ RdmaComposeHost.nativeInvokeScopeBlock($raw, currentComposer, 0) }"
-            1 -> "{ p0 -> RdmaComposeHost.nativeInvokeScopeBlock1($raw, currentComposer, 0, p0) }"
-            else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
-        }
-        is Param.Callback -> if (p.arity == 0) {
-            "{ RdmaComposeHost.nativeInvokeCallback($raw, emptyArray<Any?>()) }"
-        } else {
-            val lambdaParams = (0 until p.arity).joinToString(", ") { "p$it" }
-            val array = (0 until p.arity).joinToString(", ") { "p$it" }
-            "{ $lambdaParams -> RdmaComposeHost.nativeInvokeCallback($raw, arrayOf<Any?>($array)) }"
-        }
-        else -> error("not a lambda parameter")
-    }
-
     private fun resolvedExpr(p: Param, i: Int): String {
         val raw = RdmaDefaultSupport.raw(i)
         val converted = when (p) {
             is Param.Value, is Param.Ref, is Param.ListVal -> raw
-            is Param.Content, is Param.Callback -> lambdaExpr(p, raw)
+            is Param.Content -> when (p.arity) {
+                0 -> "{ RdmaComposeHost.nativeInvokeScopeBlock($raw, currentComposer, 0) }"
+                1 -> "{ p0 -> RdmaComposeHost.nativeInvokeScopeBlock1($raw, currentComposer, 0, p0) }"
+                else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
+            }
+            is Param.Callback -> if (p.arity == 0) {
+                "{ RdmaComposeHost.nativeInvokeCallback($raw, emptyArray<Any?>()) }"
+            } else {
+                val lambdaParams = (0 until p.arity).joinToString(", ") { "p$it" }
+                val array = (0 until p.arity).joinToString(", ") { "p$it" }
+                "{ $lambdaParams -> RdmaComposeHost.nativeInvokeCallback($raw, arrayOf<Any?>($array)) }"
+            }
             is Param.ListHandle -> when (p.arity) {
                 0 -> "$raw.map { { RdmaComposeHost.nativeInvokeCallback(it, emptyArray<Any?>()) } }"
                 else -> error("List callback arity ${p.arity} is not supported (only 0)")
