@@ -49,6 +49,7 @@ plugins {
 }
 
 include(":rdma-annotation")
+include(":rdma-compose")
 include(":rdma-types")
 include(":rdma-kernel-compiler-plugin")
 include(":rdma-kernel-gradle-plugin")

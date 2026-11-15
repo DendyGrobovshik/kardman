@@ -48,7 +48,10 @@ allowed types below.
   plugin (the subject is dynamic) — an `else` branch is required.
 - **`@RDMA` class** is a reference type. The object is created and kept in the JVM
   (kernel); the plugin receives a proxy handle. Fields/methods are reached through the
-  handle, so a mutation happens on the kernel-side object.
+  handle, so a mutation happens on the kernel-side object. Compose modifiers use this
+  path: `io.github.dendygrobovshik.kardman.compose.Modifier` and its value types
+  (`Dp`, `Color`, `Alignment`, `Shape`, `Brush`, …) are `@RDMA` classes. A widget
+  parameter of that type is an ordinary reference.
 - **`List`** is a special case. Only `ArrayList` crosses. A list first created in the plugin
   is materialized into a native `ArrayList` on its first crossing (a JVM `ArrayList` on
   Android, a Kotlin `ArrayList` held via `StableRef` on iOS) and morphed into a proxy list.

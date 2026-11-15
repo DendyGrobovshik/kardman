@@ -18,8 +18,8 @@ package org.example.ui
 /**
  * Example plugin sources shown in the "edit" tab. Each is a complete plugin file: a
  * `package` header, a `@Composable` content function and a `main()` that registers it.
- * They showcase different Kardman capabilities — Compose state, `@RDMA` widgets and
- * `@RDMA` services (platform info + HTTP).
+ * They showcase different Kardman capabilities — Compose state, `@RDMA` widgets,
+ * modifiers, and `@RDMA` services (platform info + HTTP).
  */
 data class Example(val name: String, val code: String)
 
@@ -152,6 +152,206 @@ fun GeneratedContent() {
         }
         Spacer(0.0, 8.0)
         Text("Bottom")
+    }
+}
+
+fun main() {
+    runRdmaApp { GeneratedContent() }
+}
+"""),
+    Example("Modifiers", """package com.example.plugin.generated
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.example.kernel.internal.Button
+import com.example.kernel.internal.Column
+import com.example.kernel.internal.Row
+import com.example.kernel.internal.Spacer
+import com.example.kernel.internal.Text
+import com.example.kernel.internal.runRdmaApp
+import io.github.dendygrobovshik.kardman.compose.Color
+import io.github.dendygrobovshik.kardman.compose.Dp
+import io.github.dendygrobovshik.kardman.compose.HorizontalAlignment
+import io.github.dendygrobovshik.kardman.compose.Indication
+import io.github.dendygrobovshik.kardman.compose.IntrinsicSize
+import io.github.dendygrobovshik.kardman.compose.Modifier
+import io.github.dendygrobovshik.kardman.compose.Offset
+import io.github.dendygrobovshik.kardman.compose.Shape
+import io.github.dendygrobovshik.kardman.compose.TileMode
+import io.github.dendygrobovshik.kardman.compose.VerticalAlignment
+import io.github.dendygrobovshik.kardman.compose.linearGradient
+import io.github.dendygrobovshik.kardman.compose.radialGradient
+import io.github.dendygrobovshik.kardman.compose.relativeLinearGradient
+import io.github.dendygrobovshik.kardman.compose.relativeRadialGradient
+import io.github.dendygrobovshik.kardman.compose.roundedCornerShape
+import io.github.dendygrobovshik.kardman.compose.roundedCornerShapeAll
+import io.github.dendygrobovshik.kardman.compose.solidColor
+
+@Composable
+fun GeneratedContent() {
+    var picked by remember { mutableStateOf("none") }
+    val chip = Modifier().paddingSymmetric(Dp(12.0), Dp(8.0))
+    Column(modifier = Modifier().statusBarPadding().paddingAll(Dp(16.0)).fillMaxWidth()) {
+        Text(
+            "Modifiers",
+            modifier = Modifier().padding(Dp(0.0), Dp(0.0), Dp(0.0), Dp(8.0)).testTag("title"),
+        )
+        Text(
+            "Picked: " + picked,
+            modifier = Modifier().alpha(0.7).alignHorizontally(HorizontalAlignment.CenterHorizontally),
+        )
+        Spacer(0.0, 12.0)
+        Row(modifier = Modifier().fillMaxWidth()) {
+            Button(
+                "Left",
+                modifier = Modifier().weight(1.0).paddingAll(Dp(4.0)),
+                onClick = { picked = "left" },
+            )
+            Spacer(8.0, 0.0)
+            Button(
+                "Right",
+                modifier = Modifier().weight(1.0).paddingAll(Dp(4.0)),
+                onClick = { picked = "right" },
+            )
+        }
+        Spacer(0.0, 12.0)
+        Row(modifier = Modifier().fillMaxWidth().height(Dp(48.0))) {
+            Text(
+                "Red",
+                modifier = Modifier()
+                    .weight(1.0)
+                    .fillMaxHeight()
+                    .background(Color.Red, Shape.Rectangle)
+                    .alignVertically(VerticalAlignment.CenterVertically)
+                    .paddingAll(Dp(8.0)),
+            )
+            Spacer(8.0, 0.0)
+            Text(
+                "Blue",
+                modifier = Modifier()
+                    .weight(1.0)
+                    .fillMaxHeight()
+                    .background(Color.Blue, Shape.Circle)
+                    .paddingSymmetric(Dp(12.0), Dp(8.0))
+                    .offset(Dp(0.0), Dp(4.0)),
+            )
+        }
+        Spacer(0.0, 12.0)
+        Text(
+            "Relative",
+            modifier = Modifier()
+                .fillMaxWidth()
+                .height(Dp(40.0))
+                .brushBackground(
+                    relativeLinearGradient(
+                        listOf(Color.Red, Color.White, Color.Blue),
+                        listOf(0f, 0.5f, 1f),
+                        Offset(0f, 0f),
+                        Offset(1f, 0f),
+                        TileMode.Clamp,
+                    ),
+                    roundedCornerShapeAll(Dp(12.0)),
+                )
+                .paddingAll(Dp(8.0))
+                .testTag("relative-linear"),
+        )
+        Spacer(0.0, 8.0)
+        Row(modifier = Modifier().fillMaxWidth()) {
+            Text(
+                "Radial",
+                modifier = Modifier()
+                    .weight(1.0)
+                    .aspectRatio(1.6)
+                    .brushBackground(
+                        relativeRadialGradient(
+                            listOf(Color.White, Color.Blue),
+                            listOf(0f, 1f),
+                            Offset(0.3f, 0.3f),
+                            1f,
+                            TileMode.Clamp,
+                        ),
+                        Shape.Circle,
+                    )
+                    .paddingAll(Dp(8.0)),
+            )
+            Spacer(8.0, 0.0)
+            Text(
+                "Repeat",
+                modifier = Modifier()
+                    .weight(1.0)
+                    .aspectRatio(1.6)
+                    .clip(roundedCornerShape(Dp(16.0), Dp(4.0), Dp(16.0), Dp(4.0)))
+                    .brushBackground(
+                        linearGradient(
+                            listOf(Color.Red, Color.Blue),
+                            listOf(0f, 1f),
+                            Offset(0f, 0f),
+                            Offset(24f, 0f),
+                            TileMode.Repeated,
+                        ),
+                        Shape.Rectangle,
+                    )
+                    .paddingAll(Dp(8.0)),
+            )
+        }
+        Spacer(0.0, 8.0)
+        Row(modifier = Modifier().fillMaxWidth()) {
+            Text(
+                "Mirror",
+                modifier = Modifier()
+                    .weight(1.0)
+                    .defaultMinSize(Dp(0.0), Dp(36.0))
+                    .brushBackground(
+                        radialGradient(
+                            listOf(Color.Green, Color.Black),
+                            listOf(0f, 1f),
+                            Offset(20f, 20f),
+                            48f,
+                            TileMode.Mirror,
+                        ),
+                        Shape.Rectangle,
+                    )
+                    .wrapContentHeight(VerticalAlignment.CenterVertically, false)
+                    .paddingAll(Dp(8.0)),
+            )
+            Spacer(8.0, 0.0)
+            Text(
+                "Solid",
+                modifier = Modifier()
+                    .clickable(1, true, Indication.Default)
+                    .brushBackground(solidColor(Color.Green), roundedCornerShapeAll(Dp(8.0)))
+                    .then(chip),
+            )
+        }
+        Spacer(0.0, 12.0)
+        Row(modifier = Modifier().fillMaxWidth().horizontalScroll(0)) {
+            Text(
+                "Scroll A",
+                modifier = Modifier().width(Dp(140.0)).background(Color.Red, Shape.Rectangle).paddingAll(Dp(8.0)),
+            )
+            Text(
+                "Scroll B",
+                modifier = Modifier().width(Dp(140.0)).background(Color.Green, Shape.Rectangle).paddingAll(Dp(8.0)),
+            )
+            Text(
+                "Scroll C",
+                modifier = Modifier().size(Dp(140.0), Dp(36.0)).background(Color.Blue, Shape.Rectangle).paddingAll(Dp(8.0)),
+            )
+        }
+        Spacer(0.0, 12.0)
+        Column(modifier = Modifier().intrinsicWidth(IntrinsicSize.Max).alignHorizontally(HorizontalAlignment.CenterHorizontally)) {
+            Text(
+                "Short",
+                modifier = Modifier().fillMaxWidth().background(Color.Red, Shape.Rectangle).paddingAll(Dp(4.0)),
+            )
+            Text(
+                "Matched width",
+                modifier = Modifier().fillMaxWidth().background(Color.Blue, Shape.Rectangle).paddingAll(Dp(4.0)),
+            )
+        }
     }
 }
 

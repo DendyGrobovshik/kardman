@@ -1249,7 +1249,8 @@ void* jsiToHandle(jsi::Runtime& rt, const jsi::Value& v, const std::string& elem
     }
     if (v.isNumber()) {
         if (elementType == "kotlin.Long") return rdma_boxLong((int64_t)v.getNumber());
-        if (elementType == "kotlin.Double" || elementType == "kotlin.Float") return rdma_boxDouble(v.getNumber());
+        if (elementType == "kotlin.Float") return rdma_boxFloat((float)v.getNumber());
+        if (elementType == "kotlin.Double") return rdma_boxDouble(v.getNumber());
         return rdma_boxInt((int32_t)v.getNumber());
     }
     if (v.isBool()) return rdma_boxBoolean(v.getBool());

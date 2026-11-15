@@ -76,7 +76,7 @@ object JniTypeMapper {
             jniSignature = "Ljava/lang/String;",
             cppType = "std::string",
             jniType = "jstring",
-            fromJsi = "args[%d].getString(rt).utf8(rt)",
+            fromJsi = "args[%d].getString(%r).utf8(%r)",
             toJsi = "facebook::jsi::String::createFromUtf8(rt, %s)",
             fromJni = "env->GetStringUTFChars(%s, nullptr)",
             toJni = "env->NewStringUTF(%s.c_str())",
@@ -107,6 +107,13 @@ object JniTypeMapper {
     fun isPrimitiveOrString(qualifiedName: String): Boolean {
         return qualifiedName in primitives && qualifiedName != "kotlin.Unit"
     }
+
+    /**
+     * [JniType.fromJsi] uses `%d` for the argument index and `%r` for the JSI runtime
+     * variable. Constructors name that variable `rt`; method bodies name it `r`.
+     */
+    fun fromJsi(type: JniType, index: Int, runtime: String): String =
+        type.fromJsi.replace("%d", index.toString()).replace("%r", runtime)
 
     fun rdmaShortName(qualifiedName: String): String {
         return qualifiedName.substringAfterLast(".")

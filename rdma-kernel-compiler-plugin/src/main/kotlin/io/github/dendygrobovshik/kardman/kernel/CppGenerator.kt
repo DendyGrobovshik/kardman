@@ -552,12 +552,11 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                             else -> "0.0"
                         }
                         out.write("    ${type.cppType} cpp_${param.name} = $zero;\n")
-                        out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = ${type.fromJsi.replace("%d", idx.toString())}; } else { mask |= (1 << $idx); }\n")
+                        out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = ${JniTypeMapper.fromJsi(type, idx, "r")}; } else { mask |= (1 << $idx); }\n")
                     } else if (param.nullable) {
-                        out.write("    ${type.cppType} cpp_${param.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.fromJsi.replace("%d", idx.toString())});\n")
+                        out.write("    ${type.cppType} cpp_${param.name} = args[$idx].isNull() ? ${type.cppType}() : (${JniTypeMapper.fromJsi(type, idx, "r")});\n")
                     } else {
-                        val extractExpr = type.fromJsi.replace("%d", idx.toString())
-                        out.write("    ${type.cppType} cpp_${param.name} = $extractExpr;\n")
+                        out.write("    ${type.cppType} cpp_${param.name} = ${JniTypeMapper.fromJsi(type, idx, "r")};\n")
                     }
                 } else if (param.isList) {
                     out.write("    jobject arg_${param.name} = nullptr;\n")
@@ -787,6 +786,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                 val type = JniTypeMapper.forType(param.type)
                 val guarded = param.hasDefault
                 if (type != null) {
+                    val extract = JniTypeMapper.fromJsi(type, idx, "rt")
                     if (guarded) {
                         val zero = when (param.type) {
                             "kotlin.Int" -> "0"
@@ -794,11 +794,9 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                             "kotlin.Boolean" -> "false"
                             else -> "0.0"
                         }
-                        val extract = type.fromJsi.replace("%d", idx.toString())
                         out.write("    ${type.cppType} cpp_${param.name} = $zero;\n")
                         out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = $extract; } else { mask |= (1 << $idx); }\n")
                     } else {
-                        val extract = type.fromJsi.replace("%d", idx.toString())
                         out.write("    ${type.cppType} cpp_${param.name} = $extract;\n")
                     }
                 } else if (param.isList) {
@@ -1558,6 +1556,7 @@ $body}
                     }
                 } else {
                     val jt = JniTypeMapper.forType(t.fqn) ?: return ""
+                    val extract = JniTypeMapper.fromJsi(jt, i, "r")
                     if (guarded) {
                         val zero = when (t.fqn) {
                             "kotlin.Int" -> "0"
@@ -1566,9 +1565,9 @@ $body}
                             else -> "0.0"
                         }
                         "    ${jt.cppType} cpp_${p.name} = $zero;\n" +
-                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())}; } else { mask |= (1 << $maskBit); }\n"
+                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = $extract; } else { mask |= (1 << $maskBit); }\n"
                     } else {
-                        "    ${jt.cppType} cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())};\n"
+                        "    ${jt.cppType} cpp_${p.name} = $extract;\n"
                     }
                 }
             }

@@ -338,13 +338,7 @@ object RdmaPluginTransformState {
                 }
                 if (p.hasDefault) "$base = js(\"undefined\")" else base
             }.joinToString(", ")
-            val args = fn.parameters.map { p ->
-                when (p.kind) {
-                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
-                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
-                }
-            }.joinToString(", ")
+            val args = fn.parameters.joinToString(", ") { it.guestExpr() }
             sb.appendLine("fun $bridgeName($params): dynamic {")
             sb.appendLine("    rdmaListKindInstalled")
             sb.appendLine("    return js(\"RDMA\").${fn.name}($args)")
@@ -363,13 +357,7 @@ object RdmaPluginTransformState {
                 }
                 if (p.hasDefault) "$base = js(\"undefined\")" else base
             }.joinToString(", ")
-            val args = fn.parameters.map { p ->
-                when (p.kind) {
-                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
-                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
-                }
-            }.joinToString(", ")
+            val args = fn.parameters.joinToString(", ") { it.guestExpr() }
             sb.appendLine("suspend fun $bridgeName($params): dynamic {")
             sb.appendLine("    return suspendCoroutine { cont: Continuation<Any?> ->")
             sb.appendLine("        val id = js(\"RDMA\").registerContinuation(")
@@ -413,6 +401,7 @@ object RdmaPluginTransformState {
         for (fn in widgets) {
             if (!fn.composable) continue
             val bridgeName = bridgeNameFor(fn.qualifiedName)
+            val composeName = composeFnName(fn.name)
             val params = fn.parameters.joinToString(", ") { p ->
                 if (p.hasDefault) {
                     "${p.name}: ${p.kotlinType} = js(\"undefined\")"
@@ -429,10 +418,16 @@ object RdmaPluginTransformState {
                         } else {
                             "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
                         }
-                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
+                    else ->
+                        // An omitted lambda is js("undefined"). registerBlock would hide that
+                        // from the host, so the JNI mask could not apply the empty default.
+                        if (p.hasDefault) {
+                            "(if (${p.name} === js(\"undefined\")) js(\"undefined\") else js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\"))"
+                        } else {
+                            "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
+                        }
                 }
             }
-            val composeName = composeFnName(fn.name)
             sb.appendLine("@Composable")
             sb.appendLine("fun $bridgeName($params) {")
             sb.appendLine("    js(\"RDMA\").$composeName($args)")
@@ -440,6 +435,12 @@ object RdmaPluginTransformState {
             sb.appendLine()
         }
         return sb.toString()
+    }
+
+    private fun RdmaPluginParameter.guestExpr(): String = when (kind) {
+        RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> name
+        RdmaParamKind.LIST_HANDLE -> "$name.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
+        else -> "js(\"RDMA\").registerBlock($name, \"$pluginIdJs\")"
     }
 
     fun reset() {

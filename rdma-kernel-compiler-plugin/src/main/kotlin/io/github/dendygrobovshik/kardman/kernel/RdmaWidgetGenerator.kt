@@ -242,14 +242,25 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
     }
 
     private fun resolvedDecl(p: Param, i: Int): String {
-        // A `@Composable` lambda default cannot be expressed as an `if`-expression branch (Kotlin
-        // does not propagate the `@Composable` expected type into branches). Use definite assignment
-        // so each `content = ...` assignment coerces against the declared `@Composable` type.
-        if (p is Param.Content && p.hasDefault && p.defaultValue != null) {
-            val converted = when (p.arity) {
-                0 -> "{ RdmaComposeHost.nativeInvokeScopeBlock(${RdmaDefaultSupport.raw(i)}, currentComposer, 0) }"
-                1 -> "{ p0 -> RdmaComposeHost.nativeInvokeScopeBlock1(${RdmaDefaultSupport.raw(i)}, currentComposer, 0, p0) }"
-                else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
+        // A lambda default cannot be an `if` branch. `else { body }` is a block, so the branch
+        // value is the callback's return (`Any`) rather than the lambda. Definite assignment
+        // gives each `name = { ... }` the declared function type. `@Composable` lambdas also
+        // need this because Kotlin does not propagate that expected type into `if` branches.
+        if ((p is Param.Content || p is Param.Callback) && p.hasDefault && p.defaultValue != null) {
+            val raw = RdmaDefaultSupport.raw(i)
+            val converted = when (p) {
+                is Param.Content -> when (p.arity) {
+                    0 -> "{ RdmaComposeHost.nativeInvokeScopeBlock($raw, currentComposer, 0) }"
+                    1 -> "{ p0 -> RdmaComposeHost.nativeInvokeScopeBlock1($raw, currentComposer, 0, p0) }"
+                    else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
+                }
+                is Param.Callback -> if (p.arity == 0) {
+                    "{ RdmaComposeHost.nativeInvokeCallback($raw, emptyArray<Any?>()) }"
+                } else {
+                    val lambdaParams = (0 until p.arity).joinToString(", ") { "p$it" }
+                    val array = (0 until p.arity).joinToString(", ") { "p$it" }
+                    "{ $lambdaParams -> RdmaComposeHost.nativeInvokeCallback($raw, arrayOf<Any?>($array)) }"
+                }
             }
             return "    val ${p.name}: ${resolvedType(p)}\n" +
                 "    if (${RdmaDefaultSupport.omitted(i)}) {\n" +

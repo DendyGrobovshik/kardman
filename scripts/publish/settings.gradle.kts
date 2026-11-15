@@ -65,6 +65,7 @@ fun includeModule(name: String) {
 }
 
 includeModule("rdma-annotation")
+includeModule("rdma-compose")
 includeModule("rdma-types")
 includeModule("rdma-kernel-compiler-plugin")
 includeModule("rdma-kernel-gradle-plugin")

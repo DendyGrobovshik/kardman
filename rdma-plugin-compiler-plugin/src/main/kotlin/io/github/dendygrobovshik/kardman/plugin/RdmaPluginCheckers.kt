@@ -108,6 +108,8 @@ private fun endWithNewline(text: String, end: Int): Int {
  * slots in order; omitted trailing (defaulted) parameters are left out entirely. When
  * [quoteStrings] is true, arguments bound to a `kotlin.String` parameter are re-quoted as JS
  * string literals (single quotes), matching the positional marshalling of the generated bridge.
+ * A whole-argument `Float` or `Long` literal loses its Kotlin suffix (`0f` -> `0`) because the
+ * text is pasted into a `js("RDMA.create…")` string.
  */
 private fun orderedArgTexts(
     arguments: List<FirExpression>,
@@ -124,12 +126,32 @@ private fun orderedArgTexts(
         val idx = if (named != null) nameToIndex[named.name.asString()] else positional++
         if (idx == null || idx !in ordered.indices) continue
         var argText = argTextOf(value, text)
-        if (quoteStrings && constructorParams[idx].second == "kotlin.String") {
+        val typeFqn = constructorParams[idx].second
+        if (quoteStrings && typeFqn == "kotlin.String") {
             argText = "'${argText.removeSurrounding("\"")}'"
+        } else {
+            argText = jsNumberText(typeFqn, argText)
         }
         ordered[idx] = argText
     }
     return ordered.filterNotNull()
+}
+
+/**
+ * Kotlin number text that can be parsed as a JavaScript number. Returns [argText] unchanged
+ * when it is not a literal of [typeFqn] (a call or a name must stay as written).
+ */
+internal fun jsNumberText(typeFqn: String, argText: String): String {
+    val suffix = when (typeFqn) {
+        "kotlin.Float" -> setOf('f', 'F')
+        "kotlin.Long" -> setOf('l', 'L')
+        else -> return argText
+    }
+    if (argText.length < 2 || argText.last() !in suffix) return argText
+    val body = argText.dropLast(1).replace("_", "")
+    if (body.none { it.isDigit() }) return argText
+    if (!body.all { it.isDigit() || it == '.' || it == '-' || it == '+' || it == 'e' || it == 'E' }) return argText
+    return body
 }
 
 object RdmaPluginFileChecker : FirDeclarationChecker<FirFile>(MppCheckerKind.Common) {

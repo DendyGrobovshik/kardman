@@ -22,42 +22,44 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button as M3Button
 import androidx.compose.material3.Text as M3Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.github.dendygrobovshik.kardman.RDMA
+import io.github.dendygrobovshik.kardman.compose.Modifier
+import io.github.dendygrobovshik.kardman.compose.provideModifierScope
+import io.github.dendygrobovshik.kardman.compose.toComposeUi
 
 @Composable
 @RDMA
-fun Text(text: String) {
-    M3Text(text)
+fun Text(text: String, modifier: Modifier? = null) {
+    M3Text(text, modifier = modifier.toComposeUi())
 }
 
 @Composable
 @RDMA
-fun Column(content: @Composable () -> Unit) {
-    M3Column {
-        content()
+fun Column(modifier: Modifier? = null, content: @Composable () -> Unit = {}) {
+    M3Column(modifier = modifier.toComposeUi()) {
+        provideModifierScope { content() }
     }
 }
 
 @Composable
 @RDMA
-fun Row(content: @Composable () -> Unit) {
-    M3Row {
-        content()
+fun Row(modifier: Modifier? = null, content: @Composable () -> Unit = {}) {
+    M3Row(modifier = modifier.toComposeUi()) {
+        provideModifierScope { content() }
     }
 }
 
 @Composable
 @RDMA
-fun Spacer(width: Double, height: Double) {
-    M3Spacer(Modifier.size(width.dp, height.dp))
+fun Spacer(width: Double, height: Double, modifier: Modifier? = null) {
+    M3Spacer(androidx.compose.ui.Modifier.size(width.dp, height.dp).then(modifier.toComposeUi()))
 }
 
 @Composable
 @RDMA
-fun Button(text: String, onClick: () -> Unit) {
-    M3Button(onClick = onClick) {
+fun Button(text: String, modifier: Modifier? = null, onClick: () -> Unit = {}) {
+    M3Button(onClick = onClick, modifier = modifier.toComposeUi()) {
         M3Text(text)
     }
 }

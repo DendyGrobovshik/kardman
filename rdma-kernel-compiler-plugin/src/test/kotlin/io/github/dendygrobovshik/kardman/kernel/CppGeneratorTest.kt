@@ -223,6 +223,29 @@ class CppGeneratorTest {
     }
 
     @Test
+    fun `method string arguments use the method runtime`() {
+        val person = createPerson().copy(
+            methods = listOf(MethodInfo("rename", "kotlin.String", listOf(ParameterInfo("tag", "kotlin.String")))),
+        )
+        val cpp = generate(person)["PersonProxy.cpp"] ?: error("PersonProxy.cpp not generated")
+        assertContains(cpp, "std::string cpp_tag = args[0].getString(r).utf8(r);")
+        assertContains(cpp, "std::string cpp_name = args[0].getString(rt).utf8(rt);")
+    }
+
+    @Test
+    fun `list helpers stay in the runtime namespace`() {
+        val files = mutableMapOf<String, ByteArrayOutputStream>()
+        CppGenerator("internal") { fileName, _ ->
+            ByteArrayOutputStream().also { files[fileName] = it }
+        }.generate(listOf(createPerson()))
+        val cpp = files["RdmaBridge_internal.cpp"]!!.toString("UTF-8")
+        val include = cpp.indexOf("#include \"ListHandle.h\"")
+        val moduleNamespace = cpp.indexOf("namespace internal")
+        assertTrue(include in 0 until moduleNamespace, "ListHandle.h declares materializeArray in facebook::rdma and must be included before the module namespace")
+        assertFalse(cpp.substring(moduleNamespace).contains("jobject materializeArray"), "materializeArray must not be redeclared inside the module namespace")
+    }
+
+    @Test
     fun `method calls capture host exceptions`() {
         val generated = generate(createPerson())
         val cpp = generated["PersonProxy.cpp"] ?: error("PersonProxy.cpp not generated")

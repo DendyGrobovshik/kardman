@@ -17,6 +17,7 @@ package io.github.dendygrobovshik.kardman.plugin
 
 import org.junit.Test
 import kotlin.test.assertContains
+import kotlin.test.assertFalse
 
 class RdmaWidgetBridgeTest {
 
@@ -73,5 +74,40 @@ class RdmaWidgetBridgeTest {
         assertContains(src, "fun rdmaNavigationPanel(title: String, actionLabels: List<String>, actions: List<() -> Unit>, content: @Composable () -> Unit)")
         assertContains(src, "actions.map { js(\"RDMA\").registerBlock(it, \"\") }")
         assertContains(src, "js(\"RDMA\").composeNavigationPanel(title, actionLabels, actions.map { js(\"RDMA\").registerBlock(it, \"\") }, js(\"RDMA\").registerBlock(content, \"\"))")
+    }
+
+    @Test
+    fun `optional modifier is an undefined default`() {
+        val fn = RdmaPluginFunction(
+            name = "Column",
+            qualifiedName = "com.example.kernel.internal.Column",
+            composable = true,
+            parameters = listOf(
+                RdmaPluginParameter("modifier", RdmaParamKind.VALUE, "Any", hasDefault = true),
+                RdmaPluginParameter("content", RdmaParamKind.CONTENT, "@Composable () -> Unit", 0, hasDefault = true),
+            ),
+        )
+        val src = RdmaPluginTransformState.buildWidgetBridge(listOf(fn))
+        assertContains(src, "fun rdmaColumn(modifier: Any = js(\"undefined\"), content: @Composable () -> Unit = js(\"undefined\"))")
+        assertContains(src, "js(\"RDMA\").composeColumn(modifier, (if (content === js(\"undefined\")) js(\"undefined\") else js(\"RDMA\").registerBlock(content, \"\")))")
+        assertFalse(src.contains("fun rdmaColumn(content:"))
+    }
+
+    @Test
+    fun `optional modifier in the middle keeps the following parameter`() {
+        val fn = RdmaPluginFunction(
+            name = "Button",
+            qualifiedName = "com.example.kernel.internal.Button",
+            composable = true,
+            parameters = listOf(
+                RdmaPluginParameter("text", RdmaParamKind.VALUE, "String"),
+                RdmaPluginParameter("modifier", RdmaParamKind.VALUE, "Any", hasDefault = true),
+                RdmaPluginParameter("onClick", RdmaParamKind.CALLBACK, "() -> Unit", 0, hasDefault = true),
+            ),
+        )
+        val src = RdmaPluginTransformState.buildWidgetBridge(listOf(fn))
+        assertContains(src, "fun rdmaButton(text: String, modifier: Any = js(\"undefined\"), onClick: () -> Unit = js(\"undefined\"))")
+        assertContains(src, "js(\"RDMA\").composeButton(text, modifier, (if (onClick === js(\"undefined\")) js(\"undefined\") else js(\"RDMA\").registerBlock(onClick, \"\")))")
+        assertFalse(src.contains("fun rdmaButton(text: String, onClick:"))
     }
 }
