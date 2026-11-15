@@ -401,6 +401,7 @@ object RdmaPluginTransformState {
         for (fn in widgets) {
             if (!fn.composable) continue
             val bridgeName = bridgeNameFor(fn.qualifiedName)
+            val composeName = composeFnName(fn.name)
             val params = fn.parameters.joinToString(", ") { p ->
                 if (p.hasDefault) {
                     "${p.name}: ${p.kotlinType} = js(\"undefined\")"
@@ -418,6 +419,8 @@ object RdmaPluginTransformState {
                             "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
                         }
                     else ->
+                        // An omitted lambda is js("undefined"). registerBlock would hide that
+                        // from the host, so the JNI mask could not apply the empty default.
                         if (p.hasDefault) {
                             "(if (${p.name} === js(\"undefined\")) js(\"undefined\") else js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\"))"
                         } else {
@@ -427,7 +430,7 @@ object RdmaPluginTransformState {
             }
             sb.appendLine("@Composable")
             sb.appendLine("fun $bridgeName($params) {")
-            sb.appendLine("    js(\"RDMA\").${composeFnName(fn.name)}($args)")
+            sb.appendLine("    js(\"RDMA\").$composeName($args)")
             sb.appendLine("}")
             sb.appendLine()
         }

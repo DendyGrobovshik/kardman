@@ -22,22 +22,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button as M3Button
 import androidx.compose.material3.Text as M3Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.github.dendygrobovshik.kardman.RDMA
-import io.github.dendygrobovshik.kardman.compose.Modifier as Chain
+import io.github.dendygrobovshik.kardman.compose.Modifier
 import io.github.dendygrobovshik.kardman.compose.provideModifierScope
 import io.github.dendygrobovshik.kardman.compose.toComposeUi
 
 @Composable
 @RDMA
-fun Text(text: String, modifier: Chain? = null) {
+fun Text(text: String, modifier: Modifier? = null) {
     M3Text(text, modifier = modifier.toComposeUi())
 }
 
 @Composable
 @RDMA
-fun Column(modifier: Chain? = null, content: @Composable () -> Unit = {}) {
+fun Column(modifier: Modifier? = null, content: @Composable () -> Unit = {}) {
     M3Column(modifier = modifier.toComposeUi()) {
         provideModifierScope { content() }
     }
@@ -45,7 +44,7 @@ fun Column(modifier: Chain? = null, content: @Composable () -> Unit = {}) {
 
 @Composable
 @RDMA
-fun Row(modifier: Chain? = null, content: @Composable () -> Unit = {}) {
+fun Row(modifier: Modifier? = null, content: @Composable () -> Unit = {}) {
     M3Row(modifier = modifier.toComposeUi()) {
         provideModifierScope { content() }
     }
@@ -53,13 +52,13 @@ fun Row(modifier: Chain? = null, content: @Composable () -> Unit = {}) {
 
 @Composable
 @RDMA
-fun Spacer(width: Double, height: Double, modifier: Chain? = null) {
-    M3Spacer(Modifier.size(width.dp, height.dp).then(modifier.toComposeUi()))
+fun Spacer(width: Double, height: Double, modifier: Modifier? = null) {
+    M3Spacer(androidx.compose.ui.Modifier.size(width.dp, height.dp).then(modifier.toComposeUi()))
 }
 
 @Composable
 @RDMA
-fun Button(text: String, modifier: Chain? = null, onClick: () -> Unit = {}) {
+fun Button(text: String, modifier: Modifier? = null, onClick: () -> Unit = {}) {
     M3Button(onClick = onClick, modifier = modifier.toComposeUi()) {
         M3Text(text)
     }
