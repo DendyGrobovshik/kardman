@@ -36,6 +36,7 @@ fun Counter() {
         TextWithDefault()
         ColumnWithDefault()
     }
+    StateTypesProbe()
 }
 
 fun main() {

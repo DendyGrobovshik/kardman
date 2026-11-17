@@ -32,14 +32,14 @@ inline int32_t rdma_listSize(void* listHandle) {
 inline void* rdma_listGet(void* listHandle, int32_t index) {
     return ((void* (*)(void*, int32_t))rdma_lookupFunction("rdma_listGet"))(listHandle, index);
 }
-inline void rdma_listSet(void* listHandle, int32_t index, void* valueHandle) {
-    ((void (*)(void*, int32_t, void*))rdma_lookupFunction("rdma_listSet"))(listHandle, index, valueHandle);
+inline void* rdma_listSet(void* listHandle, int32_t index, void* valueHandle) {
+    return ((void* (*)(void*, int32_t, void*))rdma_lookupFunction("rdma_listSet"))(listHandle, index, valueHandle);
 }
 inline void rdma_listAdd(void* listHandle, void* valueHandle) {
     ((void (*)(void*, void*))rdma_lookupFunction("rdma_listAdd"))(listHandle, valueHandle);
 }
-inline void rdma_listRemoveAt(void* listHandle, int32_t index) {
-    ((void (*)(void*, int32_t))rdma_lookupFunction("rdma_listRemoveAt"))(listHandle, index);
+inline void* rdma_listRemoveAt(void* listHandle, int32_t index) {
+    return ((void* (*)(void*, int32_t))rdma_lookupFunction("rdma_listRemoveAt"))(listHandle, index);
 }
 inline void rdma_listClear(void* listHandle) {
     ((void (*)(void*))rdma_lookupFunction("rdma_listClear"))(listHandle);
@@ -70,7 +70,8 @@ inline void* rdma_emptyList() {
 }
 // Creates a Kotlin List<Any?> from an array of handles (for materializing JS
 // arrays into Kotlin Lists). Caller transfers ownership of the returned handle.
-// The Kotlin side reads the handle array as `CPointer<LongVar>`; `void* const*`
+// CONSUMES the element handles (reads and disposes each one). The Kotlin side
+// reads the handle array as `CPointer<LongVar>`; `void* const*`
 // and `int64_t*` are representation-identical here.
 inline void* rdma_listCreate(void* const* handles, int32_t count) {
     return ((void* (*)(void* const*, int32_t))rdma_lookupFunction("rdma_listCreate"))(handles, count);
@@ -99,6 +100,9 @@ inline bool rdma_listRemoveAll(void* listHandle, void* otherHandle) {
 inline bool rdma_listRetainAll(void* listHandle, void* otherHandle) {
     return ((bool (*)(void*, void*))rdma_lookupFunction("rdma_listRetainAll"))(listHandle, otherHandle);
 }
+inline bool rdma_listContainsAll(void* listHandle, void* otherHandle) {
+    return ((bool (*)(void*, void*))rdma_lookupFunction("rdma_listContainsAll"))(listHandle, otherHandle);
+}
 // Creates a Kotlin Array<Any?> from an array of handles (for DisposableEffect keys).
 inline void* rdma_arrayCreate(void* const* handles, int32_t count) {
     return ((void* (*)(void* const*, int32_t))rdma_lookupFunction("rdma_arrayCreate"))(handles, count);
@@ -110,17 +114,24 @@ inline int32_t rdma_mapSize(void* mapHandle) {
 inline void* rdma_mapGet(void* mapHandle, void* keyHandle) {
     return ((void* (*)(void*, void*))rdma_lookupFunction("rdma_mapGet"))(mapHandle, keyHandle);
 }
-inline void rdma_mapPut(void* mapHandle, void* keyHandle, void* valueHandle) {
-    ((void (*)(void*, void*, void*))rdma_lookupFunction("rdma_mapPut"))(mapHandle, keyHandle, valueHandle);
+inline void* rdma_mapPut(void* mapHandle, void* keyHandle, void* valueHandle) {
+    return ((void* (*)(void*, void*, void*))rdma_lookupFunction("rdma_mapPut"))(mapHandle, keyHandle, valueHandle);
 }
 inline bool rdma_mapRemove(void* mapHandle, void* keyHandle) {
     return ((bool (*)(void*, void*))rdma_lookupFunction("rdma_mapRemove"))(mapHandle, keyHandle);
+}
+// Kotlin `MutableMap.remove(key)` returns the removed value (`V?`), not a boolean.
+inline void* rdma_mapRemoveEntry(void* mapHandle, void* keyHandle) {
+    return ((void* (*)(void*, void*))rdma_lookupFunction("rdma_mapRemoveEntry"))(mapHandle, keyHandle);
 }
 inline void rdma_mapClear(void* mapHandle) {
     ((void (*)(void*))rdma_lookupFunction("rdma_mapClear"))(mapHandle);
 }
 inline bool rdma_mapContainsKey(void* mapHandle, void* keyHandle) {
     return ((bool (*)(void*, void*))rdma_lookupFunction("rdma_mapContainsKey"))(mapHandle, keyHandle);
+}
+inline bool rdma_mapContainsValue(void* mapHandle, void* valueHandle) {
+    return ((bool (*)(void*, void*))rdma_lookupFunction("rdma_mapContainsValue"))(mapHandle, valueHandle);
 }
 inline bool rdma_mapIsEmpty(void* mapHandle) {
     return ((bool (*)(void*))rdma_lookupFunction("rdma_mapIsEmpty"))(mapHandle);
@@ -139,6 +150,7 @@ inline void* rdma_emptyMap() {
 }
 // Creates a Kotlin Map<Any?, Any?> from parallel key/value handle arrays (for
 // materializing a JS map). Caller transfers ownership of the returned handle.
+// CONSUMES the key/value handles (reads and disposes each one).
 inline void* rdma_mapCreate(void* const* keys, void* const* values, int32_t count) {
     return ((void* (*)(void* const*, void* const*, int32_t))rdma_lookupFunction("rdma_mapCreate"))(keys, values, count);
 }
@@ -169,18 +181,25 @@ private:
 
 // A JSI host object wrapping a Kotlin List handle (a `List<T>` crosses as a
 // StableRef). Exposes `get`/`sizeImpl` and defines a `size` getter, mirroring the
-// JNI `ListNativeState`/`populateListHandle`. Implemented in RdmaComposeCAbi.cpp.
+// JNI `ListNativeState`/`populateListHandle`. `stateBacked` marks a kernel
+// `SnapshotStateList` (`mutableStateListOf`): every operation then registers a
+// composition read first so mutations schedule a recomposition
+// (docs/design/type_descriptors.md#state-semantics). Implemented in
+// RdmaComposeCAbi.cpp.
 class ListCAbiHost : public jsi::HostObject {
 public:
-    ListCAbiHost(void* listHandle, const std::string& elementType);
+    ListCAbiHost(void* listHandle, const std::string& elementType, bool stateBacked = false);
     ~ListCAbiHost() override;
     jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& name) override;
     void* listHandle() const { return listHandle_; }
     const std::string& elementType() const { return elementType_; }
+    bool stateBacked() const { return stateBacked_; }
 
 private:
+    jsi::Value getDispatch(jsi::Runtime& rt, const jsi::PropNameID& name);
     void* listHandle_;
     std::string elementType_;
+    bool stateBacked_;
 };
 
 // Converts a JSI value into a Kotlin value handle for list materialization. Uses
@@ -191,24 +210,28 @@ void* jsiToHandle(jsi::Runtime& rt, const jsi::Value& v, const std::string& elem
 
 // Morphs a plugin-created Kotlin/JS `ArrayList` into a proxy list backed by the
 // C ABI handle. Implemented in RdmaComposeCAbi.cpp.
-void morphListCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& elementType);
+void morphListCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& elementType, bool stateBacked = false);
 
 // A JSI host object wrapping a Kotlin Map handle (a `Map<K,V>` crosses as a
 // StableRef). Exposes the full MutableMap surface + `keys`/`values`/`entries`
-// live views. Implemented in RdmaComposeCAbi.cpp.
+// live views. `stateBacked` marks a kernel `SnapshotStateMap`
+// (`mutableStateMapOf`) — see `ListCAbiHost`. Implemented in RdmaComposeCAbi.cpp.
 class MapCAbiHost : public jsi::HostObject {
 public:
-    MapCAbiHost(void* mapHandle, const std::string& keyType, const std::string& valueType);
+    MapCAbiHost(void* mapHandle, const std::string& keyType, const std::string& valueType, bool stateBacked = false);
     ~MapCAbiHost() override;
     jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& name) override;
     void* mapHandle() const { return mapHandle_; }
     const std::string& keyType() const { return keyType_; }
     const std::string& valueType() const { return valueType_; }
+    bool stateBacked() const { return stateBacked_; }
 
 private:
+    jsi::Value getDispatch(jsi::Runtime& rt, const jsi::PropNameID& name);
     void* mapHandle_;
     std::string keyType_;
     std::string valueType_;
+    bool stateBacked_;
 };
 
 // Materializes a JS map (plugin-created Kotlin/JS Map or JS object) into a Kotlin
@@ -218,7 +241,7 @@ void* materializeMap(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& ke
 
 // Morphs a plugin-created Kotlin/JS `Map` into a proxy map backed by the C ABI
 // handle. Implemented in RdmaComposeCAbi.cpp.
-void morphMapCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& keyType, const std::string& valueType);
+void morphMapCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& keyType, const std::string& valueType, bool stateBacked = false);
 
 // Materializes a JS map into a native Map handle without kind classification or
 // morphing. Shared by materializeMap (generated) and jsiToHandle's nested-map
@@ -227,10 +250,13 @@ void* buildMapHandleFromJs(jsi::Runtime& rt, jsi::Object& jsObj, const std::stri
 
 // Live view over a native Map (`keys`/`values`). `mode` 0 = keys, 1 = values.
 // The view holds a non-owning reference to the map handle (the owning MapCAbiHost
-// outlives any view it hands out). Implemented in RdmaComposeCAbi.cpp.
+// outlives any view it hands out). `stateBacked` marks a view over a kernel
+// `SnapshotStateMap` and routes its ops through the state thread contract.
+// Implemented in RdmaComposeCAbi.cpp.
 class MapViewHost : public jsi::HostObject {
 public:
-    MapViewHost(void* mapHandle, int mode, const std::string& elementType, const std::string& unused);
+    MapViewHost(void* mapHandle, int mode, const std::string& elementType, const std::string& unused,
+                bool stateBacked = false);
     ~MapViewHost() override;
     jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& name) override;
 
@@ -238,12 +264,14 @@ private:
     void* mapHandle_;
     int mode_;
     std::string elementType_;
+    bool stateBacked_;
 };
 
 // Live `entries` view over a native Map. Implemented in RdmaComposeCAbi.cpp.
 class MapEntrySetHost : public jsi::HostObject {
 public:
-    MapEntrySetHost(void* mapHandle, const std::string& keyType, const std::string& valueType);
+    MapEntrySetHost(void* mapHandle, const std::string& keyType, const std::string& valueType,
+                    bool stateBacked = false);
     ~MapEntrySetHost() override;
     jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& name) override;
 
@@ -251,6 +279,7 @@ private:
     void* mapHandle_;
     std::string keyType_;
     std::string valueType_;
+    bool stateBacked_;
 };
 
 } // namespace rdma

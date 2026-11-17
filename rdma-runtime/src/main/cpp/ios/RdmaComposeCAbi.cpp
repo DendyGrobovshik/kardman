@@ -16,6 +16,8 @@
 #include "RdmaComposeCAbi.h"
 #include "RdmaComposerProxy.h"
 #include "RdmaRuntime.h"
+#include "RdmaTypeDesc.h"
+#include "RdmaJsLong.h"
 #include "RdmaVtable.h"
 #include "RdmaLog.h"
 
@@ -91,6 +93,17 @@ void rdmaSetObjectWrapper(ObjectWrapper wrapper) {
 
 // ------------------------------------------------------------ value conversion
 
+// Cross-runtime error for a type-marshal violation (docs/design/type_descriptors.md):
+// a value that does not fit its channel's descriptor raises instead of being coerced.
+[[noreturn]] static void throwTypeErrorCAbi(jsi::Runtime& rt, const std::string& message) {
+    rdmaThrowTypeError(rt, message); // shared construction (RdmaJsLong.h) — no drift
+}
+
+// `Long` crossings use the shared helpers (RdmaJsLong.h, included via
+// RdmaComposeCAbi.h): `rdmaCheckedJLong` reads the plugin's `Long(low, high)` object
+// (or an integral JS number) with full 64-bit fidelity, `rdmaLongToJs` wraps a
+// kernel Long back into that object (docs/design/type_descriptors.md#long-policy).
+
 void* boxJsiValue(jsi::Runtime& rt, const jsi::Value& v) {
     if (v.isNumber()) return rdma_boxInt((int32_t)v.getNumber());
     if (v.isString()) return rdma_boxString(v.getString(rt).utf8(rt).c_str());
@@ -98,9 +111,119 @@ void* boxJsiValue(jsi::Runtime& rt, const jsi::Value& v) {
     return nullptr;
 }
 
+// Descriptor-typed strict boxing for state writes (docs/design/type_descriptors.md):
+// every returned handle is OWNED by the caller (fresh StableRef — the shim's
+// state setters only read the value behind it). Scalars get their exact Kotlin
+// class, `null` is a value only on nullable channels, enum entries rebuild
+// through the kernel's registered `valueOf` bridge, `@RDMA` objects reuse the
+// kernel handle behind the plugin-side wrapper (cloned so disposal is safe),
+// and lists/maps reuse or materialize their kernel collection. A value that
+// does not fit its descriptor raises instead of being coerced.
+
+// Strict scalar leaf boxing shared with the collection element path
+// (`jsiToHandle`) so state writes and element writes cannot drift: a foreign
+// shape raises, and `Long` accepts ONLY the plugin's `Long(low, high)` object
+// (docs/design/type_descriptors.md#long-policy).
+static void* boxLeafValueCAbi(jsi::Runtime& rt, const jsi::Value& v, const std::string& fqn) {
+    if (fqn == "kotlin.Int") {
+        if (!v.isNumber() || v.getNumber() != (double)(long long)v.getNumber() ||
+            v.getNumber() < -2147483648.0 || v.getNumber() > 2147483647.0) {
+            throwTypeErrorCAbi(rt, "value does not fit kotlin.Int");
+        }
+        return rdma_boxInt((int32_t)v.getNumber());
+    }
+    if (fqn == "kotlin.Long") {
+        // The plugin's `Long(low, high)` object with full 64-bit fidelity
+        // (docs/design/type_descriptors.md#long-policy).
+        return rdma_boxLong((int64_t)rdmaCheckedJLong(rt, v));
+    }
+    if (fqn == "kotlin.Double") {
+        if (!v.isNumber()) throwTypeErrorCAbi(rt, "expected a number for kotlin.Double");
+        return rdma_boxDouble(v.getNumber());
+    }
+    if (fqn == "kotlin.Float") {
+        // Float crosses as a Kotlin Float, not a Double (audit #26): box it as such.
+        if (!v.isNumber()) throwTypeErrorCAbi(rt, "expected a number for kotlin.Float");
+        return rdma_boxFloat((float)v.getNumber());
+    }
+    if (fqn == "kotlin.Boolean") {
+        if (!v.isBool()) throwTypeErrorCAbi(rt, "expected a Boolean value");
+        return rdma_boxBoolean(v.getBool());
+    }
+    if (fqn == "kotlin.String") {
+        if (!v.isString()) throwTypeErrorCAbi(rt, "expected a String value");
+        return rdma_boxString(v.getString(rt).utf8(rt).c_str());
+    }
+    return nullptr; // not a known scalar leaf
+}
+
+// Rebuilds an `@RDMA` enum entry from its name string through the kernel's
+// registered `valueOf` bridge (`rdma_enumValueOfHandle`, populated by the
+// generated per-module shims). Returns an OWNED handle of the entry.
+static void* enumValueOfCAbi(jsi::Runtime& rt, const std::string& fqn, const std::string& entryName) {
+    void* entry = rdma_enumValueOfHandle(fqn.c_str(), entryName.c_str());
+    checkKotlinError(rt); // an invalid name surfaces as the kernel's error (types.md)
+    if (!entry) {
+        throwTypeErrorCAbi(rt, "cannot rebuild the enum entry '" + entryName + "' for " + fqn +
+            ": no kernel valueOf bridge is registered for this enum");
+    }
+    return entry;
+}
+
+static void* boxStateValueCAbi(jsi::Runtime& rt, const jsi::Value& v, const TypeDesc& d) {
+    // `kotlin.Unit` is a channel's "no-value": an `undefined` write or initial is legal
+    // (audit #27). The kernel holds `undefined`/null for Unit, so no strict null-shape check
+    // applies.
+    if (d.kind == TypeDesc::LEAF && d.fqn == "kotlin.Unit") return nullptr;
+    if (v.isNull() || v.isUndefined()) {
+        if (d.nullable) return nullptr;
+        throwTypeErrorCAbi(rt, "null is not a value of the non-nullable state type " + d.serialize());
+    }
+    if (d.kind == TypeDesc::LEAF) {
+        if (d.isEnum) {
+            // The entry crosses as its name string (types.md).
+            if (!v.isString()) throwTypeErrorCAbi(rt, "expected the enum entry name string for " + d.fqn);
+            return enumValueOfCAbi(rt, d.fqn, v.getString(rt).utf8(rt));
+        }
+        void* scalar = boxLeafValueCAbi(rt, v, d.fqn);
+        if (scalar) return scalar;
+        // `@RDMA` class leaf: the plugin-side value is the wrapper around the kernel
+        // object's handle. Clone the handle (OWNED) so the state write keeps the
+        // object and the caller's dispose is safe.
+        if (v.isObject()) {
+            jsi::Object o = v.asObject(rt);
+            if (o.hasNativeState(rt)) {
+                auto ns = std::dynamic_pointer_cast<RdmaObjectNativeStateCAbi>(o.getNativeState(rt));
+                if (ns && ns->handle()) return rdma_cloneHandle(ns->handle());
+            }
+        }
+        throwTypeErrorCAbi(rt, "value does not fit the state type " + d.serialize());
+    }
+    if (d.kind == TypeDesc::LIST) {
+        if (!v.isObject()) throwTypeErrorCAbi(rt, "expected a List value for " + d.serialize());
+        // `jsiToHandle` reuses a wrapped kernel list (same list object, cloned
+        // handle) or materializes a plain JS array/Kotlin/JS list — either way it
+        // returns an OWNED handle the state write consumes.
+        return jsiToHandle(rt, v, d.serialize());
+    }
+    if (d.kind == TypeDesc::MAP) {
+        if (!v.isObject()) throwTypeErrorCAbi(rt, "expected a Map value for " + d.serialize());
+        return jsiToHandle(rt, v, d.serialize());
+    }
+    throwTypeErrorCAbi(rt, "value does not fit the state type " + d.serialize());
+}
+
 static void* boxKeyForRemember(jsi::Runtime& rt, const jsi::Value& v) {
     if (v.isObject()) return rdma_boxObject();
     return boxJsiValue(rt, v);
+}
+
+// The channel type descriptor a state handle carries (empty for a remembered raw
+// `MutableState`, whose descriptor never existed — writes to such a channel fail
+// loudly instead of guessing).
+static std::string rdmaStateTypeDescStr(void* stateHandle) {
+    const char* s = rdma_stateTypeDesc(stateHandle);
+    return s ? std::string(s) : std::string();
 }
 
 jsi::Value wrapAnyCAbi(jsi::Runtime& rt, HostContext /*ctx*/, void* handle) {
@@ -116,7 +239,7 @@ jsi::Value wrapAnyCAbi(jsi::Runtime& rt, HostContext /*ctx*/, void* handle) {
         case CAbiValueKind::Long: {
             int64_t v = rdma_valueAsLong(handle);
             rdma_disposeStableRef(handle);
-            return jsi::Value((double)v);
+            return rdmaLongToJs(rt, (long long)v); // plugin's Long object, exact
         }
         case CAbiValueKind::Double: {
             double v = rdma_valueAsDouble(handle);
@@ -139,8 +262,18 @@ jsi::Value wrapAnyCAbi(jsi::Runtime& rt, HostContext /*ctx*/, void* handle) {
             rdma_disposeStableRef(handle);
             return out;
         }
-        case CAbiValueKind::State:
-            return makeStateProxyCAbi(rt, handle);
+        case CAbiValueKind::Enum: {
+            // `@RDMA` enum entries cross as their name string (types.md).
+            const char* s = rdma_valueAsEnumName(handle);
+            jsi::String out = jsi::String::createFromUtf8(rt, s ? s : "");
+            rdma_disposeStableRef(handle);
+            return out;
+        }
+        case CAbiValueKind::State: {
+            // The state handle carries its channel descriptor (RdmaTypedState): the
+            // re-wrapped proxy marshals writes/reads with the exact channel type.
+            return makeStateProxyCAbi(rt, handle, rdmaStateTypeDescStr(handle));
+        }
         case CAbiValueKind::JsValue: {
             int64_t id = rdma_valueAsJsValueId(handle);
             rdma_disposeStableRef(handle);
@@ -163,7 +296,10 @@ RdmaResult valueHandleToResult(void* handle) {
             if (handle) rdma_disposeStableRef(handle);
             return RdmaResult::empty();
         case CAbiValueKind::State:
-            return RdmaResult::stateRef(handle);
+            // The state handle carries its channel descriptor — ride it along so
+            // `rdmaResultToJsiCAbi` re-wraps the proxy with the exact channel type
+            // (no side registry, no descriptor loss).
+            return RdmaResult::stateRef(handle, rdmaStateTypeDescStr(handle));
         case CAbiValueKind::JsValue: {
             int64_t id = rdma_valueAsJsValueId(handle);
             rdma_disposeStableRef(handle);
@@ -177,7 +313,7 @@ RdmaResult valueHandleToResult(void* handle) {
         case CAbiValueKind::Long: {
             int64_t v = rdma_valueAsLong(handle);
             rdma_disposeStableRef(handle);
-            return RdmaResult::number((double)v);
+            return RdmaResult::i64Value((long long)v); // full 64 bits, never squeezed through a double
         }
         case CAbiValueKind::Double: {
             double v = rdma_valueAsDouble(handle);
@@ -200,6 +336,19 @@ RdmaResult valueHandleToResult(void* handle) {
             rdma_disposeStableRef(handle);
             return RdmaResult::string(std::move(str));
         }
+        case CAbiValueKind::Enum: {
+            // `@RDMA` enum entries cross as their name string (types.md).
+            const char* s = rdma_valueAsEnumName(handle);
+            std::string str(s ? s : "");
+            rdma_disposeStableRef(handle);
+            return RdmaResult::string(std::move(str));
+        }
+        case CAbiValueKind::Other:
+            // An opaque kernel object crossed as a handle (an `@RDMA` class, a
+            // `List`/`Map` container): wrap it on the JS thread — `wrapTypedHandle`
+            // with an empty descriptor falls through to the `Any` wrapper, the same
+            // object shape the non-rendezvous `wrapAnyCAbi` path produces.
+            return RdmaResult::hostValue(handle, "");
         case CAbiValueKind::Null:
         default:
             if (handle) rdma_disposeStableRef(handle);
@@ -234,12 +383,17 @@ bool captureCAbiError(RdmaResult& out) {
     return true;
 }
 
+// Forward-declared: defined in the map-host section below (used here for
+// HostValue results).
+static jsi::Value wrapTypedHandle(jsi::Runtime& rt, void* handle, const std::string& type);
+
 jsi::Value rdmaResultToJsiCAbi(jsi::Runtime& rt, RdmaResult& result) {
     switch (result.kind) {
         case RdmaResultKind::Undefined: return jsi::Value::undefined();
         case RdmaResultKind::Null: return jsi::Value::null();
         case RdmaResultKind::Bool: return jsi::Value(result.b);
         case RdmaResultKind::Number: return jsi::Value(result.num);
+        case RdmaResultKind::I64: return rdmaLongToJs(rt, result.i64); // plugin's Long object, exact
         case RdmaResultKind::String: return jsi::String::createFromUtf8(rt, result.str);
         case RdmaResultKind::Empty:
             return g_empty ? jsi::Value(rt, *g_empty) : jsi::Value::undefined();
@@ -248,11 +402,16 @@ jsi::Value rdmaResultToJsiCAbi(jsi::Runtime& rt, RdmaResult& result) {
             if (it != g_jsValues.end()) return jsi::Value(rt, *it->second);
             return jsi::Value::undefined();
         }
+        case RdmaResultKind::HostValue: {
+            void* ref = result.ref;
+            result.ref = nullptr; // the wrap keeps ownership
+            return wrapTypedHandle(rt, ref, result.str);
+        }
         case RdmaResultKind::StateRef: {
             void* ref = result.ref;
             result.ref = nullptr;
             if (!ref) return jsi::Value::null();
-            return makeStateProxyCAbi(rt, ref);
+            return makeStateProxyCAbi(rt, ref, result.str);
         }
         case RdmaResultKind::ScopeRef: {
             void* ref = result.ref;
@@ -271,7 +430,8 @@ jsi::Value rdmaResultToJsiCAbi(jsi::Runtime& rt, RdmaResult& result) {
 
 class StateProxyHostCAbi : public jsi::HostObject {
 public:
-    explicit StateProxyHostCAbi(void* state) : state_(state) {}
+    explicit StateProxyHostCAbi(void* state, std::string typeDesc)
+        : state_(state), desc_(TypeDesc::parseOrAny(typeDesc)) {}
     ~StateProxyHostCAbi() override {
         if (state_) rdma_disposeStableRef(state_);
     }
@@ -297,19 +457,33 @@ public:
         if (n.rfind("set_value", 0) == 0) {
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "set_value"), 1,
-                [state = state_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [state = state_, desc = desc_](
+                        jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                     if (count < 1) return jsi::Value::undefined();
-                    void* boxed = boxJsiValue(r, args[0]);
-                    if (boxed) {
-                        // Route the state write to the UI (main) thread so the Compose
-                        // snapshot system records the write and the Recomposer schedules
-                        // a recomposition. Writing directly on the Hermes thread bypasses
-                        // the Kotlin/Native snapshot observation and the change is lost.
-                        dispatch_async(dispatch_get_main_queue(), ^{
+                    // Descriptor-typed and strict (docs/design/type_descriptors.md):
+                    // a foreign-typed value raises instead of being coerced, and `null`
+                    // is written as a value only on nullable states. The legacy path
+                    // keeps the old skip-on-unboxable behavior for pre-descriptor jars.
+                    void* boxed = boxStateValueCAbi(r, args[0], desc);
+                    if (g_inComposition) {
+                        // Rendezvous write during composition: the write runs inside the
+                        // UI thread's active composition snapshot, so it is visible to
+                        // the same pass' reads (docs/bridges.md §state) — the Android
+                        // backend follows the same contract.
+                        rdmaCallUi([state, boxed]() -> RdmaResult {
                             rdma_stateSetValue(state, boxed);
-                            rdma_disposeStableRef(boxed);
+                            if (boxed) rdma_disposeStableRef(boxed);
+                            return RdmaResult::undefined();
                         });
+                        return jsi::Value::undefined();
                     }
+                    // Outside composition the UI thread is not in a rendezvous: post the
+                    // write to the main queue so the Compose snapshot system records it
+                    // and the Recomposer schedules a recomposition.
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        rdma_stateSetValue(state, boxed);
+                        if (boxed) rdma_disposeStableRef(boxed);
+                    });
                     return jsi::Value::undefined();
                 });
         }
@@ -320,10 +494,18 @@ public:
 
 private:
     void* state_;
+    TypeDesc desc_;
 };
 
-jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle) {
-    auto host = std::make_shared<StateProxyHostCAbi>(stateHandle);
+jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle, const std::string& typeDesc) {
+    // The channel descriptor normally rides along the value transport
+    // (`RdmaResult::stateRef(handle, desc)`). A handle without one falls back to
+    // the descriptor the state handle itself carries (`RdmaTypedState`), and a
+    // remembered raw `MutableState` (whose descriptor never existed) proxies with
+    // an empty descriptor — reads work, writes fail loudly instead of guessing
+    // (docs/design/type_descriptors.md: the descriptor is fixed per channel).
+    std::string desc = typeDesc.empty() ? rdmaStateTypeDescStr(stateHandle) : typeDesc;
+    auto host = std::make_shared<StateProxyHostCAbi>(stateHandle, desc);
     return jsi::Object::createFromHostObject(rt, host);
 }
 
@@ -388,8 +570,46 @@ static std::string nestedElementType(const std::string& elementType) {
 // Forward-declared (defined in the map-host section below).
 static jsi::Value wrapTypedHandle(jsi::Runtime& rt, void* handle, const std::string& type);
 
-ListCAbiHost::ListCAbiHost(void* listHandle, const std::string& elementType)
-    : listHandle_(listHandle), elementType_(elementType) {}
+// For a state-backed handle (a kernel `SnapshotStateList`/`SnapshotStateMap`) an
+// operation during composition first touches the collection's structural state on
+// the UI thread so Compose's snapshot read observer records the dependency —
+// without this, mutations through the proxy would not schedule a recomposition
+// (docs/design/type_descriptors.md#state-semantics). Same contract as the JNI
+// backend's `touchCompositionRead` (ListHandle.cpp).
+static void touchCompositionReadCAbi(void* handle, bool map) {
+    if (!g_inComposition) return;
+    rdmaCallUi([handle, map]() -> RdmaResult {
+        if (map) rdma_mapSize(handle);
+        else rdma_listSize(handle);
+        return RdmaResult::undefined();
+    });
+}
+
+// State-backed collection ops obey the state-value channel's thread contract
+// (`StateProxyHostCAbi`): during composition the op runs inside the UI thread's
+// active composition snapshot via the rendezvous — the kernel snapshot record
+// must belong to the snapshot the composing pass can read/write; outside
+// composition writes are posted to the main queue so the Compose snapshot system
+// records them and the Recomposer schedules, and reads run directly. A plain
+// (non-state) collection runs directly. Returns the shim call's result; a
+// fire-and-forget posted write comes back as `Empty`.
+static RdmaResult dispatchStateOp(bool stateBacked, bool write, std::function<RdmaResult()> op) {
+    if (!stateBacked) return op();
+    if (g_inComposition) return rdmaCallUi(op);
+    if (write) {
+        dispatch_async(dispatch_get_main_queue(), ^{ RdmaResult res = op(); (void)res; });
+        return RdmaResult::empty();
+    }
+    return op();
+}
+
+// Defined in the collection-surface section below (used by the list/map hosts'
+// iterator objects and the state-collection factories).
+static std::vector<std::string> collectionMangledNamesOf(jsi::Runtime& rt, bool map);
+static void installIteratorAliasesCAbi(jsi::Runtime& rt, jsi::Object& it, const std::vector<std::string>& names);
+
+ListCAbiHost::ListCAbiHost(void* listHandle, const std::string& elementType, bool stateBacked)
+    : listHandle_(listHandle), elementType_(elementType), stateBacked_(stateBacked) {}
 
 ListCAbiHost::~ListCAbiHost() {
     if (listHandle_) rdma_disposeStableRef(listHandle_);
@@ -397,160 +617,315 @@ ListCAbiHost::~ListCAbiHost() {
 
 jsi::Value ListCAbiHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
     std::string n = name.utf8(rt);
+    if (stateBacked_ && n == "size") touchCompositionReadCAbi(listHandle_, /*map=*/false);
+    jsi::Value v = getDispatch(rt, name);
+    if (stateBacked_ && v.isObject() && v.asObject(rt).isFunction(rt)) {
+        // Register the composition read when the method is CALLED, not when the
+        // property is fetched (the same contract as the JNI `wrapStateBackedReads`).
+        auto inner = std::make_shared<jsi::Function>(v.asObject(rt).asFunction(rt));
+        v = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, n.c_str()), 0,
+            [inner, handle = listHandle_](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                touchCompositionReadCAbi(handle, /*map=*/false);
+                return inner->callWithThis(r, thisVal.asObject(r), args, count);
+            });
+    }
+    return v;
+}
+
+jsi::Value ListCAbiHost::getDispatch(jsi::Runtime& rt, const jsi::PropNameID& name) {
+    std::string n = name.utf8(rt);
     if (n == "size") {
-        return jsi::Value((double)rdma_listSize(listHandle_));
+        RdmaResult res = dispatchStateOp(stateBacked_, /*write=*/false, [handle = listHandle_]() -> RdmaResult {
+            int32_t v = rdma_listSize(handle);
+            RdmaResult captured;
+            if (captureCAbiError(captured)) return captured;
+            return RdmaResult::number((double)v);
+        });
+        return rdmaResultToJsiCAbi(rt, res);
+    }
+    if (n.rfind("get_size_", 0) == 0) {
+        // A compile-mangled `size` read (`get_size_..._k$()`) on a bare host object.
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "sizeImpl"), 0,
+            [handle = listHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    int32_t v = rdma_listSize(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)v);
+                });
+                return rdmaResultToJsiCAbi(r, res);
+            });
     }
     if (n.rfind("get", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "get"), 1,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isNumber()) return jsi::Value::undefined();
-                void* elem = rdma_listGet(handle, (int32_t)args[0].getNumber());
-                if (!elem) return jsi::Value::null();
-                return wrapTypedHandle(r, elem, elemType);
+                RdmaResult res = dispatchStateOp(sb, false, [handle, index = (int32_t)args[0].getNumber(), elemType]() -> RdmaResult {
+                    void* elem = rdma_listGet(handle, index);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return elem ? RdmaResult::hostValue(elem, elemType) : RdmaResult::null();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("set", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "set"), 2,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 2 || !args[0].isNumber()) return jsi::Value::undefined();
                 void* value = jsiToHandle(r, args[1], elemType);
-                rdma_listSet(handle, (int32_t)args[0].getNumber(), value);
-                return jsi::Value::undefined();
+                // Kotlin `MutableList.set` returns the previous element (parity
+                // with the JNI backend, audit #16). `wrapTypedHandle` consumes it.
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, index = (int32_t)args[0].getNumber(), value, elemType]() -> RdmaResult {
+                    void* previous = rdma_listSet(handle, index, value);
+                    if (value) rdma_disposeStableRef(value);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return previous ? RdmaResult::hostValue(previous, elemType) : RdmaResult::null();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
-    if (n.rfind("add", 0) == 0) {
+    if (n == "add" || n.rfind("add_", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "add"), 2,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value::undefined();
-                if (count >= 2 && args[0].isNumber() && !args[1].isUndefined()) {
-                    void* value = jsiToHandle(r, args[1], elemType);
-                    rdma_listAddAt(handle, (int32_t)args[0].getNumber(), value);
-                } else {
-                    void* value = jsiToHandle(r, args[0], elemType);
-                    rdma_listAdd(handle, value);
-                }
-                return jsi::Value::undefined();
+                void* value = jsiToHandle(r, (count >= 2 && args[0].isNumber() && !args[1].isUndefined()) ? args[1] : args[0], elemType);
+                int32_t at = (count >= 2 && args[0].isNumber() && !args[1].isUndefined()) ? (int32_t)args[0].getNumber() : -1;
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, at, value]() -> RdmaResult {
+                    if (at >= 0) rdma_listAddAt(handle, at, value);
+                    else rdma_listAdd(handle, value);
+                    if (value) rdma_disposeStableRef(value);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::undefined();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("removeAt", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "removeAt"), 1,
-            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isNumber()) return jsi::Value::undefined();
-                rdma_listRemoveAt(handle, (int32_t)args[0].getNumber());
-                return jsi::Value::undefined();
+                // Kotlin `MutableList.removeAt` returns the removed element
+                // (parity with the JNI backend, audit #16).
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, index = (int32_t)args[0].getNumber(), elemType]() -> RdmaResult {
+                    void* removed = rdma_listRemoveAt(handle, index);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return removed ? RdmaResult::hostValue(removed, elemType) : RdmaResult::null();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("clear", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "clear"), 0,
-            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                rdma_listClear(handle);
-                return jsi::Value::undefined();
+            [handle = listHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle]() -> RdmaResult {
+                    rdma_listClear(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::undefined();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("sizeImpl", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "sizeImpl"), 0,
-            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                return jsi::Value((double)rdma_listSize(handle));
+            [handle = listHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    int32_t v = rdma_listSize(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)v);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("isEmpty", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "isEmpty"), 0,
-            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                return jsi::Value(rdma_listIsEmpty(handle));
+            [handle = listHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    bool v = rdma_listIsEmpty(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(v);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
-    if (n.rfind("contains", 0) == 0) {
+    if (n == "containsAll" || n.rfind("containsAll_", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "containsAll"), 1,
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 1 || !args[0].isObject()) return jsi::Value(false);
+                void* other = jsiToHandle(r, args[0], "list:" + elemType);
+                RdmaResult res = dispatchStateOp(sb, false, [handle, other]() -> RdmaResult {
+                    bool has = rdma_listContainsAll(handle, other);
+                    if (other) rdma_disposeStableRef(other);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(has);
+                });
+                return rdmaResultToJsiCAbi(r, res);
+            });
+    }
+    if (n == "contains" || n.rfind("contains_", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "contains"), 1,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value(false);
                 void* value = jsiToHandle(r, args[0], elemType);
-                return jsi::Value(rdma_listContains(handle, value));
+                RdmaResult res = dispatchStateOp(sb, false, [handle, value]() -> RdmaResult {
+                    bool has = rdma_listContains(handle, value);
+                    if (value) rdma_disposeStableRef(value);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(has);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("indexOf", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "indexOf"), 1,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value(-1);
                 void* value = jsiToHandle(r, args[0], elemType);
-                return jsi::Value((double)rdma_listIndexOf(handle, value));
+                RdmaResult res = dispatchStateOp(sb, false, [handle, value]() -> RdmaResult {
+                    int32_t index = rdma_listIndexOf(handle, value);
+                    if (value) rdma_disposeStableRef(value);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)index);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("lastIndexOf", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "lastIndexOf"), 1,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value(-1);
                 void* value = jsiToHandle(r, args[0], elemType);
-                return jsi::Value((double)rdma_listLastIndexOf(handle, value));
+                RdmaResult res = dispatchStateOp(sb, false, [handle, value]() -> RdmaResult {
+                    int32_t index = rdma_listLastIndexOf(handle, value);
+                    if (value) rdma_disposeStableRef(value);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)index);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
-    if (n.rfind("remove", 0) == 0) {
+    if (n == "remove" || n.rfind("remove_", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "remove"), 1,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value::undefined();
                 void* value = jsiToHandle(r, args[0], elemType);
-                return jsi::Value(rdma_listRemoveValue(handle, value));
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, value]() -> RdmaResult {
+                    bool removed = rdma_listRemoveValue(handle, value);
+                    if (value) rdma_disposeStableRef(value);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(removed);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("removeRange", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "removeRange"), 2,
-            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 2) return jsi::Value::undefined();
-                rdma_listRemoveRange(handle, (int32_t)args[0].getNumber(), (int32_t)args[1].getNumber());
-                return jsi::Value::undefined();
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, from = (int32_t)args[0].getNumber(), to = (int32_t)args[1].getNumber()]() -> RdmaResult {
+                    rdma_listRemoveRange(handle, from, to);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::undefined();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("iterator", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "iterator"), 0,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 auto index = std::make_shared<int>(0);
                 auto last = std::make_shared<int>(-1);
                 auto it = jsi::Object(r);
                 auto hasNextFn = jsi::Function::createFromHostFunction(r, jsi::PropNameID::forAscii(r, "hasNext"), 0,
-                    [handle, index](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
-                        return jsi::Value(*index < rdma_listSize(handle));
+                    [handle, index, sb](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                        RdmaResult res = dispatchStateOp(sb, false, [handle, index]() -> RdmaResult {
+                            bool more = *index < rdma_listSize(handle);
+                            RdmaResult captured;
+                            if (captureCAbiError(captured)) return captured;
+                            return RdmaResult::boolean(more);
+                        });
+                        return rdmaResultToJsiCAbi(rr, res);
                     });
                 it.setProperty(r, "hasNext", std::move(hasNextFn));
                 auto nextFn = jsi::Function::createFromHostFunction(r, jsi::PropNameID::forAscii(r, "next"), 0,
-                    [handle, elemType, index, last](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
-                        if (*index >= rdma_listSize(handle)) return jsi::Value::undefined();
-                        int i = (*index)++;
-                        *last = i;
-                        return wrapTypedHandle(rr, rdma_listGet(handle, i), elemType);
+                    [handle, elemType, index, last, sb](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                        RdmaResult res = dispatchStateOp(sb, false, [handle, elemType, index, last]() -> RdmaResult {
+                            if (*index >= rdma_listSize(handle)) return RdmaResult::undefined();
+                            int i = (*index)++;
+                            *last = i;
+                            void* elem = rdma_listGet(handle, i);
+                            RdmaResult captured;
+                            if (captureCAbiError(captured)) return captured;
+                            return elem ? RdmaResult::hostValue(elem, elemType) : RdmaResult::null();
+                        });
+                        return rdmaResultToJsiCAbi(rr, res);
                     });
                 it.setProperty(r, "next", std::move(nextFn));
                 auto removeFn = jsi::Function::createFromHostFunction(r, jsi::PropNameID::forAscii(r, "remove"), 0,
-                    [handle, index, last](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                    [handle, index, last, sb](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
                         if (*last < 0) return jsi::Value::undefined();
-                        rdma_listRemoveAt(handle, *last);
-                        *index = *last;
-                        *last = -1;
-                        return jsi::Value::undefined();
+                        RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, index, last]() -> RdmaResult {
+                            void* removed = rdma_listRemoveAt(handle, *last);
+                            if (removed) rdma_disposeStableRef(removed);
+                            *index = *last;
+                            *last = -1;
+                            RdmaResult captured;
+                            if (captureCAbiError(captured)) return captured;
+                            return RdmaResult::undefined();
+                        });
+                        return rdmaResultToJsiCAbi(rr, res);
                     });
                 it.setProperty(r, "remove", std::move(removeFn));
+                installIteratorAliasesCAbi(r, it, collectionMangledNamesOf(r, /*map=*/false));
                 return it;
             });
     }
     if (n.rfind("toArray", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "toArray"), 0,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                int32_t size = rdma_listSize(handle);
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                int32_t size = (int32_t)dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    int32_t v = rdma_listSize(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)v);
+                }).num;
                 auto arr = jsi::Array(r, size);
                 for (int32_t i = 0; i < size; i++) {
-                    arr.setValueAtIndex(r, i, wrapTypedHandle(r, rdma_listGet(handle, i), elemType));
+                    RdmaResult elem = dispatchStateOp(sb, false, [handle, i, elemType]() -> RdmaResult {
+                        void* v = rdma_listGet(handle, i);
+                        RdmaResult captured;
+                        if (captureCAbiError(captured)) return captured;
+                        return v ? RdmaResult::hostValue(v, elemType) : RdmaResult::null();
+                    });
+                    arr.setValueAtIndex(r, i, rdmaResultToJsiCAbi(r, elem));
                 }
                 return arr;
             });
@@ -558,15 +933,20 @@ jsi::Value ListCAbiHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
     if (n.rfind("toString", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "toString"), 0,
-            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                const char* s = rdma_listToString(handle);
-                return jsi::String::createFromUtf8(r, s ? s : "");
+            [handle = listHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    const char* s = rdma_listToString(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::string(s ? s : "");
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("equals", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "equals"), 1,
-            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isObject()) return jsi::Value(false);
                 auto other = args[0].asObject(r);
                 void* otherHandle = nullptr;
@@ -581,70 +961,194 @@ jsi::Value ListCAbiHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
                     }
                 }
                 if (!otherHandle) return jsi::Value(false);
-                return jsi::Value(rdma_listEquals(handle, otherHandle));
+                RdmaResult res = dispatchStateOp(sb, false, [handle, otherHandle]() -> RdmaResult {
+                    bool eq = rdma_listEquals(handle, otherHandle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(eq);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("hashCode", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "hashCode"), 0,
-            [handle = listHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                return jsi::Value((double)rdma_listHashCode(handle));
+            [handle = listHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    int32_t h = rdma_listHashCode(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)h);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("subList", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "subList"), 2,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                if (count < 2) return jsi::Value::undefined();
-                void* sub = rdma_listSubList(handle, (int32_t)args[0].getNumber(), (int32_t)args[1].getNumber());
-                if (!sub) return jsi::Value::null();
-                auto host = std::make_shared<ListCAbiHost>(sub, elemType);
-                return jsi::Object::createFromHostObject(r, host);
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 2 || !args[0].isNumber() || !args[1].isNumber()) return jsi::Value::undefined();
+                RdmaResult res = dispatchStateOp(sb, false, [handle, from = (int32_t)args[0].getNumber(), to = (int32_t)args[1].getNumber(), elemType]() -> RdmaResult {
+                    void* sub = rdma_listSubList(handle, from, to);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return sub ? RdmaResult::hostValue(sub, "list:" + elemType) : RdmaResult::null();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("addAll", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "addAll"), 2,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value(false);
                 const jsi::Value& otherArg = args[count - 1];
                 if (!otherArg.isObject()) return jsi::Value(false);
-                auto otherObj = otherArg.asObject(r);
-                void* other = jsiToHandle(r, jsi::Value(r, otherObj), "list:" + elemType);
-                if (count >= 2 && args[0].isNumber()) {
-                    return jsi::Value(rdma_listAddAllAt(handle, (int32_t)args[0].getNumber(), other));
-                }
-                return jsi::Value(rdma_listAddAll(handle, other));
+                void* other = jsiToHandle(r, jsi::Value(r, otherArg.asObject(r)), "list:" + elemType);
+                int32_t at = (count >= 2 && args[0].isNumber()) ? (int32_t)args[0].getNumber() : -1;
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, at, other]() -> RdmaResult {
+                    bool ok = (at >= 0)
+                        ? rdma_listAddAllAt(handle, at, other)
+                        : rdma_listAddAll(handle, other);
+                    if (other) rdma_disposeStableRef(other);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(ok);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("removeAll", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "removeAll"), 1,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isObject()) return jsi::Value(false);
-                auto otherObj = args[0].asObject(r);
-                void* other = jsiToHandle(r, jsi::Value(r, otherObj), "list:" + elemType);
-                return jsi::Value(rdma_listRemoveAll(handle, other));
+                void* other = jsiToHandle(r, jsi::Value(r, args[0].asObject(r)), "list:" + elemType);
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, other]() -> RdmaResult {
+                    bool removed = rdma_listRemoveAll(handle, other);
+                    if (other) rdma_disposeStableRef(other);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(removed);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("retainAll", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "retainAll"), 1,
-            [handle = listHandle_, elemType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = listHandle_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isObject()) return jsi::Value(false);
-                auto otherObj = args[0].asObject(r);
-                void* other = jsiToHandle(r, jsi::Value(r, otherObj), "list:" + elemType);
-                return jsi::Value(rdma_listRetainAll(handle, other));
+                void* other = jsiToHandle(r, jsi::Value(r, args[0].asObject(r)), "list:" + elemType);
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, other]() -> RdmaResult {
+                    bool kept = rdma_listRetainAll(handle, other);
+                    if (other) rdma_disposeStableRef(other);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(kept);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     return jsi::Value::undefined();
 }
 
+// Mangled collection method spellings (`add_1x7w2j_k$`, ...) discovered by the
+// guest bridge (`RDMA.listMethodNames` / `RDMA.mapMethodNames`, compiled with the
+// plugin). Cached per runtime once discovered. TODO: the static caches assume a
+// single JS runtime — revisit with a second runtime (docs/design/collections.md).
+static std::vector<std::string> collectionMangledNamesOf(jsi::Runtime& rt, bool map) {
+    static std::vector<std::string> listCached;
+    static std::vector<std::string> mapCached;
+    static bool listComputed = false;
+    static bool mapComputed = false;
+    std::vector<std::string>& cached = map ? mapCached : listCached;
+    bool& computed = map ? mapComputed : listComputed;
+    if (computed) return cached;
+    auto rdma = rt.global().getProperty(rt, "RDMA");
+    if (!rdma.isObject()) return cached;
+    auto fn = rdma.asObject(rt).getProperty(rt, map ? "mapMethodNames" : "listMethodNames");
+    if (!fn.isObject() || !fn.asObject(rt).isFunction(rt)) return cached;
+    jsi::Value res = fn.asObject(rt).asFunction(rt).call(rt);
+    if (!res.isObject() || !res.asObject(rt).isArray(rt)) return cached;
+    jsi::Array arr = res.asObject(rt).getArray(rt);
+    size_t n = arr.size(rt);
+    std::vector<std::string> out;
+    for (size_t i = 0; i < n; i++) {
+        jsi::Value v = arr.getValueAtIndex(rt, i);
+        if (v.isString()) out.push_back(v.getString(rt).utf8(rt));
+    }
+    if (!out.empty()) {
+        cached = std::move(out);
+        computed = true;
+    }
+    return cached;
+}
+
+// Installs the compile-mangled method aliases (`add_1x7w2j_k$` -> `add`) onto a
+// collection proxy object. The name set comes from the object's own Kotlin/JS
+// prototype (a morphed plugin collection) or from the guest bridge name table (a
+// kernel-created proxy). A missing plain target is a loud install-time error — no
+// quiet correctness hole. ONE table for both discovery paths and the property
+// setters they mirror (`installListMangledForwards` / `installMapMangledForwards`
+// in the JNI backend) so the two backends cannot drift.
+static void installMangledAliasesCAbi(jsi::Runtime& rt, jsi::Object& obj, const std::vector<std::string>& names, bool map) {
+    static const std::pair<const char*, const char*> kListTable[] = {
+        {"get_size_", "sizeImpl"},
+        {"get_", "get"},
+        {"set_", "set"},
+        {"add_", "add"},
+        {"removeAt_", "removeAt"},
+        {"removeRange_", "removeRange"},
+        {"removeAll_", "removeAll"},
+        {"retainAll_", "retainAll"},
+        {"addAll_", "addAll"},
+        {"clear_", "clear"},
+        {"toArray", "toArray"},
+        {"remove_", "remove"},
+        {"containsAll_", "containsAll"},
+        {"contains_", "contains"},
+        {"indexOf_", "indexOf"},
+        {"lastIndexOf_", "lastIndexOf"},
+        {"isEmpty_", "isEmpty"},
+        {"iterator", "iterator"},
+        {"subList_", "subList"},
+    };
+    static const std::pair<const char*, const char*> kMapTable[] = {
+        {"get_size_", "sizeImpl"},
+        {"get_keys_", "keys"},
+        {"get_values_", "values"},
+        {"get_entries_", "entries"},
+        {"get_", "get"},
+        {"put_", "set"},
+        {"remove_", "remove"},
+        {"clear_", "clear"},
+        {"containsKey_", "containsKey"},
+        {"containsValue_", "containsValue"},
+        {"isEmpty_", "isEmpty"},
+        {"putAll_", "putAll"},
+    };
+    const std::pair<const char*, const char*>* table = map ? kMapTable : kListTable;
+    const size_t tableSize = map ? sizeof(kMapTable) / sizeof(kMapTable[0]) : sizeof(kListTable) / sizeof(kListTable[0]);
+    for (const std::string& name : names) {
+        for (size_t i = 0; i < tableSize; i++) {
+            if (name.rfind(table[i].first, 0) == 0) {
+                jsi::Value target = obj.getProperty(rt, table[i].second);
+                if (!target.isObject() || !target.asObject(rt).isFunction(rt)) {
+                    throw jsi::JSError(rt, std::string("collection proxy: no implementation for '") + table[i].second + "'");
+                }
+                obj.setProperty(rt, name.c_str(), std::move(target));
+                break;
+            }
+        }
+    }
+}
+
 // Morphs a plugin-created Kotlin/JS `ArrayList` into a proxy list backed by the
-// C ABI handle. Stores the `ListCAbiHost` on the object and installs forwarding
+// C ABI handle. Stores the `ListCAbiHost` on the object and installs both
 // wrappers for the plain and mangled storage methods.
-void morphListCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& elementType) {
-    auto proxy = std::make_shared<ListCAbiHost>(handle, elementType);
+void morphListCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& elementType, bool stateBacked) {
+    auto proxy = std::make_shared<ListCAbiHost>(handle, elementType, stateBacked);
     obj.setProperty(rt, "__rdma_proxy", jsi::Object::createFromHostObject(rt, proxy));
 
     auto installPlain = [&rt, &obj](const char* name, size_t arity) {
@@ -679,42 +1183,20 @@ void morphListCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::
     installPlain("addAll", 2);
     installPlain("removeAll", 1);
     installPlain("retainAll", 1);
+    installPlain("containsAll", 1);
 
-    auto forwardMangled = [&rt, &obj](const std::string& mangled, const char* plain) {
-        obj.setProperty(rt, mangled.c_str(), jsi::Function::createFromHostFunction(
-            rt, jsi::PropNameID::forAscii(rt, mangled.c_str()), 2,
-            [plain](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-                auto target = thisVal.asObject(r).getProperty(r, plain);
-                if (!target.isObject() || !target.asObject(r).isFunction(r)) return jsi::Value::undefined();
-                return target.asObject(r).asFunction(r).callWithThis(r, thisVal.asObject(r), args, count);
-            }));
-    };
-
+    // The morphed object's own Kotlin/JS prototype names are the name set to alias.
     auto objectCtor = rt.global().getPropertyAsObject(rt, "Object");
     auto getPrototypeOf = objectCtor.getPropertyAsFunction(rt, "getPrototypeOf");
     jsi::Object proto = getPrototypeOf.call(rt, jsi::Value(rt, obj)).asObject(rt);
-    auto names = proto.getPropertyNames(rt);
-    size_t n = names.size(rt);
+    auto protoNames = proto.getPropertyNames(rt);
+    size_t n = protoNames.size(rt);
+    std::vector<std::string> names;
+    names.reserve(n);
     for (size_t i = 0; i < n; i++) {
-        std::string name = names.getValueAtIndex(rt, i).getString(rt).utf8(rt);
-        if (name.rfind("get_size_", 0) == 0) {
-            forwardMangled(name, "sizeImpl");
-        } else if (name.rfind("get_", 0) == 0) {
-            forwardMangled(name, "get");
-        } else if (name.rfind("set_", 0) == 0) {
-            forwardMangled(name, "set");
-        } else if (name.rfind("add_", 0) == 0) {
-            forwardMangled(name, "add");
-        } else if (name.rfind("removeAt_", 0) == 0) {
-            forwardMangled(name, "removeAt");
-        } else if (name.rfind("removeRange_", 0) == 0) {
-            forwardMangled(name, "removeRange");
-        } else if (name.rfind("clear_", 0) == 0) {
-            forwardMangled(name, "clear");
-        } else if (name.rfind("toArray", 0) == 0) {
-            forwardMangled(name, "toArray");
-        }
+        names.push_back(protoNames.getValueAtIndex(rt, i).getString(rt).utf8(rt));
     }
+    installMangledAliasesCAbi(rt, obj, names, /*map=*/false);
 
     // Define a `size` getter on the instance that forwards to the native size,
     // shadowing the Kotlin/JS ArrayList's own `size` (which reads the stale
@@ -803,8 +1285,8 @@ void rdmaRegisterSuspendResultType(int64_t completionId, const std::string& type
     }
 }
 
-MapCAbiHost::MapCAbiHost(void* mapHandle, const std::string& keyType, const std::string& valueType)
-    : mapHandle_(mapHandle), keyType_(keyType), valueType_(valueType) {}
+MapCAbiHost::MapCAbiHost(void* mapHandle, const std::string& keyType, const std::string& valueType, bool stateBacked)
+    : mapHandle_(mapHandle), keyType_(keyType), valueType_(valueType), stateBacked_(stateBacked) {}
 
 MapCAbiHost::~MapCAbiHost() {
     if (mapHandle_) rdma_disposeStableRef(mapHandle_);
@@ -812,112 +1294,255 @@ MapCAbiHost::~MapCAbiHost() {
 
 jsi::Value MapCAbiHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
     std::string n = name.utf8(rt);
+    if (stateBacked_ && (n == "size" || n.rfind("get_size_", 0) == 0)) touchCompositionReadCAbi(mapHandle_, /*map=*/true);
+    jsi::Value v = getDispatch(rt, name);
+    if (stateBacked_ && v.isObject() && v.asObject(rt).isFunction(rt)) {
+        // Register the composition read when the method is CALLED, not when the
+        // property is fetched (the same contract as the JNI `wrapStateBackedMapReads`).
+        auto inner = std::make_shared<jsi::Function>(v.asObject(rt).asFunction(rt));
+        v = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, n.c_str()), 0,
+            [inner, handle = mapHandle_](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                touchCompositionReadCAbi(handle, /*map=*/true);
+                return inner->callWithThis(r, thisVal.asObject(r), args, count);
+            });
+    }
+    return v;
+}
+
+jsi::Value MapCAbiHost::getDispatch(jsi::Runtime& rt, const jsi::PropNameID& name) {
+    std::string n = name.utf8(rt);
     if (n == "size") {
-        return jsi::Value((double)rdma_mapSize(mapHandle_));
+        RdmaResult res = dispatchStateOp(stateBacked_, /*write=*/false, [handle = mapHandle_]() -> RdmaResult {
+            int32_t v = rdma_mapSize(handle);
+            RdmaResult captured;
+            if (captureCAbiError(captured)) return captured;
+            return RdmaResult::number((double)v);
+        });
+        return rdmaResultToJsiCAbi(rt, res);
+    }
+    // Compile-mangled spellings on a bare host object (`get_size_...`, `get_keys_...`).
+    if (n.rfind("get_size_", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "sizeImpl"), 0,
+            [handle = mapHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    int32_t v = rdma_mapSize(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)v);
+                });
+                return rdmaResultToJsiCAbi(r, res);
+            });
+    }
+    if (n.rfind("get_keys_", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "keys"), 0,
+            [handle = mapHandle_, keyType = keyType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                auto host = std::make_shared<MapViewHost>(handle, 0, keyType, keyType, sb);
+                return jsi::Object::createFromHostObject(r, host);
+            });
+    }
+    if (n.rfind("get_values_", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "values"), 0,
+            [handle = mapHandle_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                auto host = std::make_shared<MapViewHost>(handle, 1, valueType, valueType, sb);
+                return jsi::Object::createFromHostObject(r, host);
+            });
+    }
+    if (n.rfind("get_entries_", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "entries"), 0,
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                auto host = std::make_shared<MapEntrySetHost>(handle, keyType, valueType, sb);
+                return jsi::Object::createFromHostObject(r, host);
+            });
     }
     if (n.rfind("get", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "get"), 1,
-            [handle = mapHandle_, keyType = keyType_, valueType = valueType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value::undefined();
                 void* key = jsiToHandle(r, args[0], keyType);
-                void* value = rdma_mapGet(handle, key);
-                return wrapTypedHandle(r, value, valueType);
+                RdmaResult res = dispatchStateOp(sb, false, [handle, key, valueType]() -> RdmaResult {
+                    void* value = rdma_mapGet(handle, key);
+                    if (key) rdma_disposeStableRef(key);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return value ? RdmaResult::hostValue(value, valueType) : RdmaResult::null();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
-    if (n.rfind("set", 0) == 0 || n.rfind("put", 0) == 0) {
+    if (n == "set" || n.rfind("set_", 0) == 0 || n == "put" || n.rfind("put_", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "set"), 2,
-            [handle = mapHandle_, keyType = keyType_, valueType = valueType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 2) return jsi::Value::undefined();
                 void* key = jsiToHandle(r, args[0], keyType);
                 void* value = jsiToHandle(r, args[1], valueType);
-                rdma_mapPut(handle, key, value);
-                return jsi::Value::undefined();
+                // Kotlin `MutableMap.put`/`set` returns the previous value (`V?`)
+                // (parity with the JNI backend, audit #16).
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, key, value, valueType]() -> RdmaResult {
+                    void* previous = rdma_mapPut(handle, key, value);
+                    if (key) rdma_disposeStableRef(key);
+                    if (value) rdma_disposeStableRef(value);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return previous ? RdmaResult::hostValue(previous, valueType) : RdmaResult::null();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
-    if (n.rfind("remove", 0) == 0) {
+    if (n == "remove" || n.rfind("remove_", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "remove"), 1,
-            [handle = mapHandle_, keyType = keyType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                if (count < 1) return jsi::Value(false);
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 1) return jsi::Value::null();
                 void* key = jsiToHandle(r, args[0], keyType);
-                return jsi::Value(rdma_mapRemove(handle, key));
+                // Kotlin `MutableMap.remove(key)` returns the removed value (`V?`)
+                // (parity with the JNI backend, audit #16).
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, key, valueType]() -> RdmaResult {
+                    void* removed = rdma_mapRemoveEntry(handle, key);
+                    if (key) rdma_disposeStableRef(key);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return removed ? RdmaResult::hostValue(removed, valueType) : RdmaResult::null();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("clear", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "clear"), 0,
-            [handle = mapHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                rdma_mapClear(handle);
-                return jsi::Value::undefined();
+            [handle = mapHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle]() -> RdmaResult {
+                    rdma_mapClear(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::undefined();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
-    if (n.rfind("containsKey", 0) == 0 || n.rfind("has", 0) == 0) {
+    if (n == "containsValue" || n.rfind("containsValue_", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "containsValue"), 1,
+            [handle = mapHandle_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                if (count < 1) return jsi::Value(false);
+                void* value = jsiToHandle(r, args[0], valueType);
+                RdmaResult res = dispatchStateOp(sb, false, [handle, value]() -> RdmaResult {
+                    bool has = rdma_mapContainsValue(handle, value);
+                    if (value) rdma_disposeStableRef(value);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(has);
+                });
+                return rdmaResultToJsiCAbi(r, res);
+            });
+    }
+    if (n == "containsKey" || n.rfind("containsKey_", 0) == 0 || n == "has") {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "containsKey"), 1,
-            [handle = mapHandle_, keyType = keyType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, keyType = keyType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value(false);
                 void* key = jsiToHandle(r, args[0], keyType);
-                return jsi::Value(rdma_mapContainsKey(handle, key));
+                RdmaResult res = dispatchStateOp(sb, false, [handle, key]() -> RdmaResult {
+                    bool has = rdma_mapContainsKey(handle, key);
+                    if (key) rdma_disposeStableRef(key);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(has);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("isEmpty", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "isEmpty"), 0,
-            [handle = mapHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                return jsi::Value(rdma_mapIsEmpty(handle));
+            [handle = mapHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    bool empty = rdma_mapIsEmpty(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(empty);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("sizeImpl", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "sizeImpl"), 0,
-            [handle = mapHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                return jsi::Value((double)rdma_mapSize(handle));
+            [handle = mapHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    int32_t v = rdma_mapSize(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)v);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("keys", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "keys"), 0,
-            [handle = mapHandle_, keyType = keyType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                auto host = std::make_shared<MapViewHost>(handle, 0, keyType, keyType);
+            [handle = mapHandle_, keyType = keyType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                auto host = std::make_shared<MapViewHost>(handle, 0, keyType, keyType, sb);
                 return jsi::Object::createFromHostObject(r, host);
             });
     }
     if (n.rfind("values", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "values"), 0,
-            [handle = mapHandle_, valueType = valueType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                auto host = std::make_shared<MapViewHost>(handle, 1, valueType, valueType);
+            [handle = mapHandle_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                auto host = std::make_shared<MapViewHost>(handle, 1, valueType, valueType, sb);
                 return jsi::Object::createFromHostObject(r, host);
             });
     }
     if (n.rfind("entries", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "entries"), 0,
-            [handle = mapHandle_, keyType = keyType_, valueType = valueType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                auto host = std::make_shared<MapEntrySetHost>(handle, keyType, valueType);
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                auto host = std::make_shared<MapEntrySetHost>(handle, keyType, valueType, sb);
                 return jsi::Object::createFromHostObject(r, host);
             });
     }
     if (n.rfind("forEach", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "forEach"), 1,
-            [handle = mapHandle_, keyType = keyType_, valueType = valueType_](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isObject() || !args[0].asObject(r).isFunction(r)) return jsi::Value::undefined();
                 auto cb = args[0].asObject(r).asFunction(r);
-                int32_t size = rdma_mapSize(handle);
+                RdmaResult sizeRes = dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    int32_t v = rdma_mapSize(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)v);
+                });
+                if (sizeRes.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, sizeRes);
+                int32_t size = (int32_t)sizeRes.num;
                 for (int32_t i = 0; i < size; i++) {
-                    void* k = rdma_mapKeyAt(handle, i);
-                    void* v = rdma_mapValueAt(handle, i);
-                jsi::Value keyV = wrapTypedHandle(r, k, keyType);
-                jsi::Value valV = wrapTypedHandle(r, v, valueType);
-                std::vector<jsi::Value> argv;
-                argv.reserve(2);
-                argv.push_back(std::move(valV));
-                argv.push_back(std::move(keyV));
-                const jsi::Value* argsPtr = argv.data();
-                cb.callWithThis(r, thisVal.asObject(r), argsPtr, argv.size());
+                    void* k = nullptr;
+                    void* v = nullptr;
+                    RdmaResult res = dispatchStateOp(sb, false, [handle, i, &k, &v]() -> RdmaResult {
+                        k = rdma_mapKeyAt(handle, i);
+                        v = rdma_mapValueAt(handle, i);
+                        RdmaResult captured;
+                        if (captureCAbiError(captured)) return captured;
+                        return RdmaResult::undefined();
+                    });
+                    if (res.kind == RdmaResultKind::Error) {
+                        if (k) rdma_disposeStableRef(k);
+                        if (v) rdma_disposeStableRef(v);
+                        return rdmaResultToJsiCAbi(r, res);
+                    }
+                    jsi::Value keyV = wrapTypedHandle(r, k, keyType);
+                    jsi::Value valV = wrapTypedHandle(r, v, valueType);
+                    std::vector<jsi::Value> argv;
+                    argv.reserve(2);
+                    argv.push_back(std::move(valV));
+                    argv.push_back(std::move(keyV));
+                    cb.callWithThis(r, thisVal.asObject(r), static_cast<const jsi::Value*>(argv.data()), argv.size());
                 }
                 return jsi::Value::undefined();
             });
@@ -925,11 +1550,13 @@ jsi::Value MapCAbiHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
     if (n.rfind("putAll", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "putAll"), 1,
-            [handle = mapHandle_, keyType = keyType_, valueType = valueType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isObject()) return jsi::Value::undefined();
                 auto other = args[0].asObject(r);
                 auto entries = mapToEntries(r, other);
                 size_t n = entries.size(r);
+                std::vector<std::pair<void*, void*>> pairs;
+                pairs.reserve(n);
                 for (size_t i = 0; i < n; i++) {
                     auto pair = entries.getValueAtIndex(r, i);
                     if (!pair.isObject() || !pair.asObject(r).isArray(r)) continue;
@@ -937,62 +1564,108 @@ jsi::Value MapCAbiHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
                     if (arr.size(r) < 2) continue;
                     void* k = jsiToHandle(r, arr.getValueAtIndex(r, 0), keyType);
                     void* v = jsiToHandle(r, arr.getValueAtIndex(r, 1), valueType);
-                    rdma_mapPut(handle, k, v);
+                    pairs.emplace_back(k, v);
                 }
-                return jsi::Value::undefined();
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, pairs]() -> RdmaResult {
+                    for (const auto& kv : pairs) {
+                        rdma_mapPut(handle, kv.first, kv.second);
+                        if (kv.first) rdma_disposeStableRef(kv.first);
+                        if (kv.second) rdma_disposeStableRef(kv.second);
+                    }
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::undefined();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     return jsi::Value::undefined();
 }
 
 // A live view over a native Map (`keys`/`values`). `mode` 0 = keys, 1 = values.
-MapViewHost::MapViewHost(void* mapHandle, int mode, const std::string& elementType, const std::string& /*unused*/)
-    : mapHandle_(mapHandle), mode_(mode), elementType_(elementType) {}
+MapViewHost::MapViewHost(void* mapHandle, int mode, const std::string& elementType, const std::string& /*unused*/,
+                         bool stateBacked)
+    : mapHandle_(mapHandle), mode_(mode), elementType_(elementType), stateBacked_(stateBacked) {}
 
 MapViewHost::~MapViewHost() {}
 
 jsi::Value MapViewHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
     std::string n = name.utf8(rt);
     if (n == "size") {
-        return jsi::Value((double)rdma_mapSize(mapHandle_));
+        RdmaResult res = dispatchStateOp(stateBacked_, /*write=*/false, [handle = mapHandle_]() -> RdmaResult {
+            int32_t v = rdma_mapSize(handle);
+            RdmaResult captured;
+            if (captureCAbiError(captured)) return captured;
+            return RdmaResult::number((double)v);
+        });
+        return rdmaResultToJsiCAbi(rt, res);
     }
     if (n.rfind("get", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "get"), 1,
-            [handle = mapHandle_, mode = mode_, elementType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, mode = mode_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isNumber()) return jsi::Value::undefined();
-                void* elem = (mode == 0) ? rdma_mapKeyAt(handle, (int32_t)args[0].getNumber())
-                                         : rdma_mapValueAt(handle, (int32_t)args[0].getNumber());
-                return wrapTypedHandle(r, elem, elementType);
+                void* elem = nullptr;
+                RdmaResult res = dispatchStateOp(sb, false, [handle, mode, index = (int32_t)args[0].getNumber(), &elem]() -> RdmaResult {
+                    elem = (mode == 0) ? rdma_mapKeyAt(handle, index) : rdma_mapValueAt(handle, index);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::undefined();
+                });
+                if (res.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, res);
+                return wrapTypedHandle(r, elem, elemType);
             });
     }
     if (n.rfind("remove", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "remove"), 1,
-            [handle = mapHandle_, mode = mode_, elementType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, mode = mode_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value(false);
-                void* elem = jsiToHandle(r, args[0], elementType);
-                if (mode == 0) return jsi::Value(rdma_mapRemove(handle, elem));
-                return jsi::Value(rdma_mapRemoveValue(handle, elem));
+                void* elem = jsiToHandle(r, args[0], elemType);
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle, mode, elem]() -> RdmaResult {
+                    bool removed = (mode == 0) ? rdma_mapRemove(handle, elem) : rdma_mapRemoveValue(handle, elem);
+                    if (elem) rdma_disposeStableRef(elem);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::boolean(removed);
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("clear", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "clear"), 0,
-            [handle = mapHandle_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                rdma_mapClear(handle);
-                return jsi::Value::undefined();
+            [handle = mapHandle_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                RdmaResult res = dispatchStateOp(sb, /*write=*/true, [handle]() -> RdmaResult {
+                    rdma_mapClear(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::undefined();
+                });
+                return rdmaResultToJsiCAbi(r, res);
             });
     }
     if (n.rfind("toArray", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "toArray"), 0,
-            [handle = mapHandle_, mode = mode_, elementType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                int32_t size = rdma_mapSize(handle);
+            [handle = mapHandle_, mode = mode_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                int32_t size = (int32_t)dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    int32_t v = rdma_mapSize(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)v);
+                }).num;
                 auto arr = jsi::Array(r, size);
                 for (int32_t i = 0; i < size; i++) {
-                    void* elem = (mode == 0) ? rdma_mapKeyAt(handle, i) : rdma_mapValueAt(handle, i);
-                    arr.setValueAtIndex(r, i, wrapTypedHandle(r, elem, elementType));
+                    void* elem = nullptr;
+                    RdmaResult res = dispatchStateOp(sb, false, [handle, mode, i, &elem]() -> RdmaResult {
+                        elem = (mode == 0) ? rdma_mapKeyAt(handle, i) : rdma_mapValueAt(handle, i);
+                        RdmaResult captured;
+                        if (captureCAbiError(captured)) return captured;
+                        return RdmaResult::undefined();
+                    });
+                    if (res.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, res);
+                    arr.setValueAtIndex(r, i, wrapTypedHandle(r, elem, elemType));
                 }
                 return arr;
             });
@@ -1000,61 +1673,112 @@ jsi::Value MapViewHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
     if (n.rfind("iterator", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "iterator"), 0,
-            [handle = mapHandle_, mode = mode_, elementType = elementType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, mode = mode_, elemType = elementType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
                 auto index = std::make_shared<int>(0);
                 auto it = jsi::Object(r);
                 auto hasNextFn = jsi::Function::createFromHostFunction(r, jsi::PropNameID::forAscii(r, "hasNext"), 0,
-                    [handle, index](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
-                        return jsi::Value(*index < rdma_mapSize(handle));
+                    [handle, index, sb](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                        RdmaResult res = dispatchStateOp(sb, false, [handle, index]() -> RdmaResult {
+                            bool more = *index < rdma_mapSize(handle);
+                            RdmaResult captured;
+                            if (captureCAbiError(captured)) return captured;
+                            return RdmaResult::boolean(more);
+                        });
+                        return rdmaResultToJsiCAbi(rr, res);
                     });
                 it.setProperty(r, "hasNext", std::move(hasNextFn));
                 auto nextFn = jsi::Function::createFromHostFunction(r, jsi::PropNameID::forAscii(r, "next"), 0,
-                    [handle, mode, elementType, index](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
-                        if (*index >= rdma_mapSize(handle)) return jsi::Value::undefined();
-                        int32_t i = (*index)++;
-                        void* elem = (mode == 0) ? rdma_mapKeyAt(handle, i) : rdma_mapValueAt(handle, i);
-                        return wrapTypedHandle(rr, elem, elementType);
+                    [handle, mode, elemType, index, sb](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                        void* elem = nullptr;
+                        bool fetched = false;
+                        RdmaResult res = dispatchStateOp(sb, false, [handle, mode, index, &elem, &fetched]() -> RdmaResult {
+                            if (*index >= rdma_mapSize(handle)) return RdmaResult::undefined();
+                            int32_t i = (*index)++;
+                            elem = (mode == 0) ? rdma_mapKeyAt(handle, i) : rdma_mapValueAt(handle, i);
+                            fetched = true;
+                            RdmaResult captured;
+                            if (captureCAbiError(captured)) return captured;
+                            return RdmaResult::undefined();
+                        });
+                        if (res.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(rr, res);
+                        if (!fetched) return jsi::Value::undefined(); // exhausted
+                        return wrapTypedHandle(rr, elem, elemType);
                     });
                 it.setProperty(r, "next", std::move(nextFn));
+                installIteratorAliasesCAbi(r, it, collectionMangledNamesOf(r, /*map=*/true));
                 return it;
             });
     }
     return jsi::Value::undefined();
 }
 
-MapEntrySetHost::MapEntrySetHost(void* mapHandle, const std::string& keyType, const std::string& valueType)
-    : mapHandle_(mapHandle), keyType_(keyType), valueType_(valueType) {}
+MapEntrySetHost::MapEntrySetHost(void* mapHandle, const std::string& keyType, const std::string& valueType,
+                                 bool stateBacked)
+    : mapHandle_(mapHandle), keyType_(keyType), valueType_(valueType), stateBacked_(stateBacked) {}
 
 MapEntrySetHost::~MapEntrySetHost() {}
 
 jsi::Value MapEntrySetHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
     std::string n = name.utf8(rt);
     if (n == "size") {
-        return jsi::Value((double)rdma_mapSize(mapHandle_));
+        RdmaResult res = dispatchStateOp(stateBacked_, /*write=*/false, [handle = mapHandle_]() -> RdmaResult {
+            int32_t v = rdma_mapSize(handle);
+            RdmaResult captured;
+            if (captureCAbiError(captured)) return captured;
+            return RdmaResult::number((double)v);
+        });
+        return rdmaResultToJsiCAbi(rt, res);
     }
     if (n.rfind("get", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "get"), 1,
-            [handle = mapHandle_, keyType = keyType_, valueType = valueType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1 || !args[0].isNumber()) return jsi::Value::undefined();
-                int32_t i = (int32_t)args[0].getNumber();
-                if (i < 0 || i >= rdma_mapSize(handle)) return jsi::Value::undefined();
+                void* k = nullptr;
+                void* v = nullptr;
+                bool fetched = false;
+                RdmaResult res = dispatchStateOp(sb, false, [handle, index = (int32_t)args[0].getNumber(), &k, &v, &fetched]() -> RdmaResult {
+                    if (index < 0 || index >= rdma_mapSize(handle)) return RdmaResult::undefined();
+                    k = rdma_mapKeyAt(handle, index);
+                    v = rdma_mapValueAt(handle, index);
+                    fetched = true;
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::undefined();
+                });
+                if (res.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, res);
+                if (!fetched) return jsi::Value::undefined(); // out of range
                 auto entry = jsi::Object(r);
-                entry.setProperty(r, "key", wrapTypedHandle(r, rdma_mapKeyAt(handle, i), keyType));
-                entry.setProperty(r, "value", wrapTypedHandle(r, rdma_mapValueAt(handle, i), valueType));
+                entry.setProperty(r, "key", wrapTypedHandle(r, k, keyType));
+                entry.setProperty(r, "value", wrapTypedHandle(r, v, valueType));
                 return entry;
             });
     }
     if (n.rfind("toArray", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "toArray"), 0,
-            [handle = mapHandle_, keyType = keyType_, valueType = valueType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                int32_t size = rdma_mapSize(handle);
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                int32_t size = (int32_t)dispatchStateOp(sb, false, [handle]() -> RdmaResult {
+                    int32_t v = rdma_mapSize(handle);
+                    RdmaResult captured;
+                    if (captureCAbiError(captured)) return captured;
+                    return RdmaResult::number((double)v);
+                }).num;
                 auto arr = jsi::Array(r, size);
                 for (int32_t i = 0; i < size; i++) {
+                    void* k = nullptr;
+                    void* v = nullptr;
+                    RdmaResult res = dispatchStateOp(sb, false, [handle, i, &k, &v]() -> RdmaResult {
+                        k = rdma_mapKeyAt(handle, i);
+                        v = rdma_mapValueAt(handle, i);
+                        RdmaResult captured;
+                        if (captureCAbiError(captured)) return captured;
+                        return RdmaResult::undefined();
+                    });
+                    if (res.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, res);
                     auto entry = jsi::Object(r);
-                    entry.setProperty(r, "key", wrapTypedHandle(r, rdma_mapKeyAt(handle, i), keyType));
-                    entry.setProperty(r, "value", wrapTypedHandle(r, rdma_mapValueAt(handle, i), valueType));
+                    entry.setProperty(r, "key", wrapTypedHandle(r, k, keyType));
+                    entry.setProperty(r, "value", wrapTypedHandle(r, v, valueType));
                     arr.setValueAtIndex(r, i, std::move(entry));
                 }
                 return arr;
@@ -1063,21 +1787,40 @@ jsi::Value MapEntrySetHost::get(jsi::Runtime& rt, const jsi::PropNameID& name) {
     if (n.rfind("iterator", 0) == 0) {
         return jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, "iterator"), 0,
-            [handle = mapHandle_, keyType = keyType_, valueType = valueType_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            [handle = mapHandle_, keyType = keyType_, valueType = valueType_, sb = stateBacked_](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
                 auto index = std::make_shared<int>(0);
                 auto it = jsi::Object(r);
                 auto hasNextFn = jsi::Function::createFromHostFunction(r, jsi::PropNameID::forAscii(r, "hasNext"), 0,
-                    [handle, index](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
-                        return jsi::Value(*index < rdma_mapSize(handle));
+                    [handle, index, sb](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                        RdmaResult res = dispatchStateOp(sb, false, [handle, index]() -> RdmaResult {
+                            bool more = *index < rdma_mapSize(handle);
+                            RdmaResult captured;
+                            if (captureCAbiError(captured)) return captured;
+                            return RdmaResult::boolean(more);
+                        });
+                        return rdmaResultToJsiCAbi(rr, res);
                     });
                 it.setProperty(r, "hasNext", std::move(hasNextFn));
                 auto nextFn = jsi::Function::createFromHostFunction(r, jsi::PropNameID::forAscii(r, "next"), 0,
-                    [handle, keyType, valueType, index](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
-                        if (*index >= rdma_mapSize(handle)) return jsi::Value::undefined();
-                        int32_t i = (*index)++;
+                    [handle, keyType, valueType, index, sb](jsi::Runtime& rr, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+                        void* k = nullptr;
+                        void* v = nullptr;
+                        bool fetched = false;
+                        RdmaResult res = dispatchStateOp(sb, false, [handle, index, &k, &v, &fetched]() -> RdmaResult {
+                            if (*index >= rdma_mapSize(handle)) return RdmaResult::undefined();
+                            int32_t i = (*index)++;
+                            k = rdma_mapKeyAt(handle, i);
+                            v = rdma_mapValueAt(handle, i);
+                            fetched = true;
+                            RdmaResult captured;
+                            if (captureCAbiError(captured)) return captured;
+                            return RdmaResult::undefined();
+                        });
+                        if (res.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(rr, res);
+                        if (!fetched) return jsi::Value::undefined(); // exhausted
                         auto entry = jsi::Object(rr);
-                        entry.setProperty(rr, "key", wrapTypedHandle(rr, rdma_mapKeyAt(handle, i), keyType));
-                        entry.setProperty(rr, "value", wrapTypedHandle(rr, rdma_mapValueAt(handle, i), valueType));
+                        entry.setProperty(rr, "key", wrapTypedHandle(rr, k, keyType));
+                        entry.setProperty(rr, "value", wrapTypedHandle(rr, v, valueType));
                         return entry;
                     });
                 it.setProperty(r, "next", std::move(nextFn));
@@ -1110,9 +1853,9 @@ void* buildMapHandleFromJs(jsi::Runtime& rt, jsi::Object& obj, const std::string
 
 // Morphs a plugin-created Kotlin/JS `Map` into a proxy map backed by the C ABI
 // handle. Mirrors morphListCAbi: stores the MapCAbiHost on the object and installs
-// forwarding wrappers for the plain and mangled storage methods.
-void morphMapCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& keyType, const std::string& valueType) {
-    auto proxy = std::make_shared<MapCAbiHost>(handle, keyType, valueType);
+// plain and mangled method aliases.
+void morphMapCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::string& keyType, const std::string& valueType, bool stateBacked) {
+    auto proxy = std::make_shared<MapCAbiHost>(handle, keyType, valueType, stateBacked);
     obj.setProperty(rt, "__rdma_proxy", jsi::Object::createFromHostObject(rt, proxy));
 
     auto installPlain = [&rt, &obj](const char* name, size_t arity) {
@@ -1138,48 +1881,62 @@ void morphMapCAbi(jsi::Runtime& rt, jsi::Object& obj, void* handle, const std::s
     installPlain("entries", 0);
     installPlain("forEach", 1);
     installPlain("putAll", 1);
+    installPlain("containsValue", 1);
 
-    auto forwardMangled = [&rt, &obj](const std::string& mangled, const char* plain) {
-        obj.setProperty(rt, mangled.c_str(), jsi::Function::createFromHostFunction(
-            rt, jsi::PropNameID::forAscii(rt, mangled.c_str()), 2,
-            [plain](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-                auto target = thisVal.asObject(r).getProperty(r, plain);
-                if (!target.isObject() || !target.asObject(r).isFunction(r)) return jsi::Value::undefined();
-                return target.asObject(r).asFunction(r).callWithThis(r, thisVal.asObject(r), args, count);
-            }));
-    };
-
+    // The morphed object's own Kotlin/JS prototype names are the name set to alias.
     auto objectCtor = rt.global().getPropertyAsObject(rt, "Object");
     auto getPrototypeOf = objectCtor.getPropertyAsFunction(rt, "getPrototypeOf");
     jsi::Object proto = getPrototypeOf.call(rt, jsi::Value(rt, obj)).asObject(rt);
-    auto names = proto.getPropertyNames(rt);
-    size_t n = names.size(rt);
+    auto protoNames = proto.getPropertyNames(rt);
+    size_t n = protoNames.size(rt);
+    std::vector<std::string> names;
+    names.reserve(n);
     for (size_t i = 0; i < n; i++) {
-        std::string name = names.getValueAtIndex(rt, i).getString(rt).utf8(rt);
-        if (name.rfind("get_size_", 0) == 0) {
-            forwardMangled(name, "sizeImpl");
-        } else if (name.rfind("get_keys_", 0) == 0) {
-            forwardMangled(name, "keys");
-        } else if (name.rfind("get_values_", 0) == 0) {
-            forwardMangled(name, "values");
-        } else if (name.rfind("get_entries_", 0) == 0) {
-            forwardMangled(name, "entries");
-        } else if (name.rfind("get_", 0) == 0) {
-            forwardMangled(name, "get");
-        } else if (name.rfind("put_", 0) == 0) {
-            forwardMangled(name, "set");
-        } else if (name.rfind("remove_", 0) == 0) {
-            forwardMangled(name, "remove");
-        } else if (name.rfind("clear_", 0) == 0) {
-            forwardMangled(name, "clear");
-        } else if (name.rfind("containsKey_", 0) == 0) {
-            forwardMangled(name, "containsKey");
-        } else if (name.rfind("isEmpty_", 0) == 0) {
-            forwardMangled(name, "isEmpty");
-        } else if (name.rfind("putAll_", 0) == 0) {
-            forwardMangled(name, "putAll");
+        names.push_back(protoNames.getValueAtIndex(rt, i).getString(rt).utf8(rt));
+    }
+    installMangledAliasesCAbi(rt, obj, names, /*map=*/true);
+}
+
+// Iterator objects speak the same compile-mangled Kotlin protocol
+// (`hasNext_...`/`next_...`/`remove_...`) — install the aliases from the same
+// discovered name set (parity with the JNI `installIteratorMangledForwards`).
+static void installIteratorAliasesCAbi(jsi::Runtime& rt, jsi::Object& it, const std::vector<std::string>& names) {
+    static const std::pair<const char*, const char*> kTable[] = {
+        {"hasNext_", "hasNext"},
+        {"next_", "next"},
+        {"remove_", "remove"},
+    };
+    for (const std::string& name : names) {
+        for (const auto& entry : kTable) {
+            if (name.rfind(entry.first, 0) == 0) {
+                jsi::Value target = it.getProperty(rt, entry.second);
+                if (target.isObject() && target.asObject(rt).isFunction(rt)) {
+                    it.setProperty(rt, name.c_str(), std::move(target));
+                }
+                break;
+            }
         }
     }
+}
+
+// The plugin-facing object over a kernel-created state collection
+// (`mutableStateListOf`/`mutableStateMapOf`, docs/design/type_descriptors.md):
+// the same plain + mangled method surface a morphed plugin collection gets
+// (`morphListCAbi`/`morphMapCAbi`), fed from the guest bridge name table
+// (`RDMA.listMethodNames`) since a fresh object has no Kotlin/JS prototype of its
+// own — parity with the JNI `populateListHandle` + `installListMangledForwards`.
+static jsi::Object createStateListHandleCAbi(jsi::Runtime& rt, void* snapHandle, const std::string& elemDesc) {
+    jsi::Object obj(rt);
+    morphListCAbi(rt, obj, snapHandle, elemDesc, /*stateBacked=*/true);
+    installMangledAliasesCAbi(rt, obj, collectionMangledNamesOf(rt, /*map=*/false), /*map=*/false);
+    return obj;
+}
+
+static jsi::Object createStateMapHandleCAbi(jsi::Runtime& rt, void* snapHandle, const std::string& keyDesc, const std::string& valueDesc) {
+    jsi::Object obj(rt);
+    morphMapCAbi(rt, obj, snapHandle, keyDesc, valueDesc, /*stateBacked=*/true);
+    installMangledAliasesCAbi(rt, obj, collectionMangledNamesOf(rt, /*map=*/true), /*map=*/true);
+    return obj;
 }
 
 void* jsiToHandle(jsi::Runtime& rt, const jsi::Value& v, const std::string& elementType) {
@@ -1191,13 +1948,13 @@ void* jsiToHandle(jsi::Runtime& rt, const jsi::Value& v, const std::string& elem
         auto obj = v.asObject(rt);
         if (obj.isHostObject(rt)) {
             auto host = std::dynamic_pointer_cast<ListCAbiHost>(obj.getHostObject(rt));
-            if (host) return host->listHandle();
+            if (host) return rdma_cloneHandle(host->listHandle());
         }
         {
             auto p = obj.getProperty(rt, "__rdma_proxy");
             if (p.isObject()) {
                 auto h = std::dynamic_pointer_cast<ListCAbiHost>(p.asObject(rt).getHostObject(rt));
-                if (h) return h->listHandle();
+                if (h) return rdma_cloneHandle(h->listHandle());
             }
         }
         const std::string nested = nestedElementType(elementType);
@@ -1211,64 +1968,100 @@ void* jsiToHandle(jsi::Runtime& rt, const jsi::Value& v, const std::string& elem
             }
             return rdma_listCreate(handles.data(), (int32_t)handles.size());
         }
-        // Kotlin/JS List (ArrayList): wraps a backing JS array in an own field.
-        auto names = obj.getPropertyNames(rt);
-        size_t n = names.size(rt);
-        for (size_t i = 0; i < n; i++) {
-            auto name = names.getValueAtIndex(rt, i).getString(rt).utf8(rt);
-            auto val = obj.getProperty(rt, name.c_str());
-            if (val.isObject() && val.asObject(rt).isArray(rt)) {
-                auto backing = val.asObject(rt).asArray(rt);
-                size_t m = backing.size(rt);
-                std::vector<void*> handles;
-                handles.reserve(m);
-                for (size_t j = 0; j < m; j++) {
-                    handles.push_back(jsiToHandle(rt, backing.getValueAtIndex(rt, j), nested));
+        // Kotlin/JS List (ArrayList): the same discovery order as the JNI backend's
+        // `materializeArray` (ListHandle.cpp) — an indexable `length`/`size`
+        // wrapper, the unmangled backing field `array_1`, else the first
+        // array-valued own property.
+        jsi::Array backing(rt, 0);
+        size_t len = 0;
+        int path = 0; // 0=none, 2=length/size, 3=backing array
+        auto lp = obj.getProperty(rt, "length");
+        if (!lp.isNumber()) lp = obj.getProperty(rt, "size");
+        if (lp.isNumber()) {
+            len = (size_t)lp.getNumber();
+            path = 2;
+        } else {
+            auto array1 = obj.getProperty(rt, "array_1");
+            if (array1.isObject() && array1.asObject(rt).isArray(rt)) {
+                backing = array1.asObject(rt).asArray(rt);
+                len = backing.size(rt);
+                path = 3;
+            } else {
+                auto names = obj.getPropertyNames(rt);
+                size_t n = names.size(rt);
+                for (size_t i = 0; i < n; i++) {
+                    auto name = names.getValueAtIndex(rt, i).getString(rt).utf8(rt);
+                    auto val = obj.getProperty(rt, name.c_str());
+                    if (val.isObject() && val.asObject(rt).isArray(rt)) {
+                        backing = val.asObject(rt).asArray(rt);
+                        len = backing.size(rt);
+                        path = 3;
+                        break;
+                    }
                 }
-                return rdma_listCreate(handles.data(), (int32_t)handles.size());
             }
         }
-        return nullptr;
+        if (path == 0) return nullptr;
+        std::vector<void*> handles;
+        handles.reserve(len);
+        for (size_t i = 0; i < len; i++) {
+            jsi::Value elem = (path == 2)
+                ? obj.getProperty(rt, std::to_string(i).c_str())
+                : jsi::Value(rt, backing.getValueAtIndex(rt, i));
+            handles.push_back(jsiToHandle(rt, elem, nested));
+        }
+        return rdma_listCreate(handles.data(), (int32_t)handles.size());
     }
     if (isMapElementType(elementType)) {
         if (!v.isObject()) return nullptr;
         auto obj = v.asObject(rt);
         if (obj.isHostObject(rt)) {
             auto host = std::dynamic_pointer_cast<MapCAbiHost>(obj.getHostObject(rt));
-            if (host) return host->mapHandle();
+            if (host) return rdma_cloneHandle(host->mapHandle());
         }
         {
             auto p = obj.getProperty(rt, "__rdma_proxy");
             if (p.isObject()) {
                 auto h = std::dynamic_pointer_cast<MapCAbiHost>(p.asObject(rt).getHostObject(rt));
-                if (h) return h->mapHandle();
+                if (h) return rdma_cloneHandle(h->mapHandle());
             }
         }
         auto kv = parseMapBody(elementType.substr(4));
         return buildMapHandleFromJs(rt, obj, kv.first, kv.second);
     }
-    if (v.isNumber()) {
-        if (elementType == "kotlin.Long") return rdma_boxLong((int64_t)v.getNumber());
-        if (elementType == "kotlin.Double" || elementType == "kotlin.Float") return rdma_boxDouble(v.getNumber());
-        return rdma_boxInt((int32_t)v.getNumber());
+    // Leaf: the descriptor's declared type (the `?`/`!` marks stripped first —
+    // `MyEnum!` is an enum leaf, `kotlin.Long?` is a nullable Long). Scalar/enum
+    // leaves follow the DESCRIPTOR, not the value's shape: a foreign value raises
+    // instead of being coerced (the JNI `jsiToJobject` follows the same
+    // descriptor-first order — the two backends must not drift).
+    std::string fqn = elementType.substr(0, elementType.find_first_of("?!"));
+    bool isEnum = elementType.find('!') != std::string::npos;
+    if (isEnum) {
+        // The entry crosses as its name string (types.md): rebuild it kernel-side
+        // through the enum's `valueOf` bridge, so an invalid name surfaces as the
+        // kernel's error instead of a wrong entry.
+        if (!v.isString()) throwTypeErrorCAbi(rt, "expected the enum entry name string for " + fqn);
+        return enumValueOfCAbi(rt, fqn, v.getString(rt).utf8(rt));
     }
-    if (v.isBool()) return rdma_boxBoolean(v.getBool());
-    if (v.isString()) return rdma_boxString(v.getString(rt).utf8(rt).c_str());
+    void* scalar = boxLeafValueCAbi(rt, v, fqn);
+    if (scalar) return scalar;
     if (v.isObject()) {
-        auto obj = v.asObject(rt);
+        jsi::Object obj = v.asObject(rt);
         if (obj.hasNativeState(rt)) {
             auto ns = obj.getNativeState(rt);
             auto objState = std::dynamic_pointer_cast<RdmaObjectNativeStateCAbi>(ns);
-            if (objState) return objState->handle();
+            if (objState && objState->handle()) return rdma_cloneHandle(objState->handle());
         }
         if (obj.isHostObject(rt)) {
             auto host = std::dynamic_pointer_cast<ListCAbiHost>(obj.getHostObject(rt));
-            if (host) return host->listHandle();
+            if (host) return rdma_cloneHandle(host->listHandle());
             auto mapHost = std::dynamic_pointer_cast<MapCAbiHost>(obj.getHostObject(rt));
-            if (mapHost) return mapHost->mapHandle();
+            if (mapHost) return rdma_cloneHandle(mapHost->mapHandle());
         }
     }
-    return nullptr;
+    // Unknown leaves keep the runtime-dispatch boxer (pre-descriptor behavior,
+    // e.g. callback-id lists) — the same fallback as the JNI `jsiToJobject`.
+    return boxJsiValue(rt, v);
 }
 
 // ------------------------------------------------------------- content/scope
@@ -1404,19 +2197,88 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
     rdma.setProperty(rt, "setComposerEmpty", std::move(setEmptyFn));
 
     auto mutableStateOfFn = jsi::Function::createFromHostFunction(
-        rt, jsi::PropNameID::forAscii(rt, "mutableStateOf"), 1,
+        rt, jsi::PropNameID::forAscii(rt, "mutableStateOf"), 2,
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
             if (count < 1) return jsi::Value::undefined();
-            void* boxed = boxJsiValue(r, args[0]);
-            RdmaResult result = rdmaCallUi([boxed]() -> RdmaResult {
-                void* state = rdma_mutableStateOf(boxed);
+            // The channel's value type descriptor is baked in by the plugin bridge
+            // (docs/design/type_descriptors.md) and fixed at channel creation.
+            std::string descRaw = (count > 1 && args[1].isString())
+                ? args[1].getString(r).utf8(r)
+                : "kotlin.Any";
+            TypeDesc desc = TypeDesc::parseOrAny(descRaw);
+            void* boxed = boxStateValueCAbi(r, args[0], desc);
+            // Typed channels accept `null` initial values on nullable states. The
+            // shim consumes the boxed initial (the state keeps the value object).
+            RdmaResult result = rdmaCallUi([boxed, descRaw]() -> RdmaResult {
+                void* state = rdma_mutableStateOf(boxed, descRaw.c_str());
                 if (boxed) rdma_disposeStableRef(boxed);
                 if (!state) return RdmaResult::undefined();
-                return RdmaResult::stateRef(state);
+                return RdmaResult::stateRef(state, descRaw);
             });
             return rdmaResultToJsiCAbi(r, result);
         });
     rdma.setProperty(rt, "mutableStateOf", std::move(mutableStateOfFn));
+
+    // Snapshot collections (docs/design/type_descriptors.md#state-semantics): the
+    // guest passes its materialized values; the kernel copies them into a
+    // `SnapshotStateList`/`SnapshotStateMap` and returns a state-backed proxy, so
+    // mutation through the proxy schedules a recomposition. The element typing
+    // rides in the channel's type descriptor (`list:<elem>`, `map:<k>:<v>`).
+    auto mutableStateListOfFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "mutableStateListOf"), 2,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 1 || !args[0].isObject()) return jsi::Value::undefined();
+            std::string descRaw = (count > 1 && args[1].isString())
+                ? args[1].getString(r).utf8(r)
+                : "list:kotlin.Any";
+            TypeDesc d = TypeDesc::parseOrAny(descRaw);
+            std::string elemDesc = (d.kind == TypeDesc::LIST && d.elem) ? d.elem->serialize() : "kotlin.Any";
+            void* source = jsiToHandle(r, args[0], "list:" + elemDesc);
+            // The snapshot collection is created inside the UI thread's active
+            // compose world — the same contract as the `mutableStateOf` factory:
+            // a record created on the JS thread's implicit writer lives in a
+            // not-yet-applied snapshot and the composition's reads reject it
+            // (docs/design/type_descriptors.md#state-semantics).
+            void* snap = nullptr;
+            RdmaResult result = rdmaCallUi([source, &snap]() -> RdmaResult {
+                snap = rdma_mutableStateListOf(source);
+                if (source) rdma_disposeStableRef(source);
+                RdmaResult captured;
+                if (captureCAbiError(captured)) return captured;
+                return RdmaResult::undefined();
+            });
+            if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
+            if (!snap) return jsi::Value::undefined();
+            return createStateListHandleCAbi(r, snap, elemDesc);
+        });
+    rdma.setProperty(rt, "mutableStateListOf", std::move(mutableStateListOfFn));
+
+    auto mutableStateMapOfFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "mutableStateMapOf"), 2,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 1 || !args[0].isObject()) return jsi::Value::undefined();
+            std::string descRaw = (count > 1 && args[1].isString())
+                ? args[1].getString(r).utf8(r)
+                : "map:kotlin.Any:kotlin.Any";
+            TypeDesc d = TypeDesc::parseOrAny(descRaw);
+            std::string keyDesc = (d.kind == TypeDesc::MAP && d.key) ? d.key->serialize() : "kotlin.Any";
+            std::string valueDesc = (d.kind == TypeDesc::MAP && d.value) ? d.value->serialize() : "kotlin.Any";
+            void* source = jsiToHandle(r, args[0], "map:" + keyDesc + ":" + valueDesc);
+            // Created inside the UI thread's active compose world (see the list
+            // factory above and `mutableStateOf`).
+            void* snap = nullptr;
+            RdmaResult result = rdmaCallUi([source, &snap]() -> RdmaResult {
+                snap = rdma_mutableStateMapOf(source);
+                if (source) rdma_disposeStableRef(source);
+                RdmaResult captured;
+                if (captureCAbiError(captured)) return captured;
+                return RdmaResult::undefined();
+            });
+            if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
+            if (!snap) return jsi::Value::undefined();
+            return createStateMapHandleCAbi(r, snap, keyDesc, valueDesc);
+        });
+    rdma.setProperty(rt, "mutableStateMapOf", std::move(mutableStateMapOfFn));
 
     auto registerBlockFn = jsi::Function::createFromHostFunction(
         rt, jsi::PropNameID::forAscii(rt, "registerBlock"), 2,

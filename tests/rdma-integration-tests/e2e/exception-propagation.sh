@@ -103,10 +103,16 @@ step_5_a2_bundle_load() {
     head -c 64 /dev/urandom > "$bad"
     adb push "$bad" /data/local/tmp/bad.hbc >/dev/null
     adb shell "run-as $APP_ID mkdir -p files/rdma && run-as $APP_ID cp /data/local/tmp/bad.hbc files/rdma/bad.hbc"
+    adb shell rm -f /data/local/tmp/bad.hbc
     adb logcat -c
     adb shell am force-stop "$APP_ID"
     adb shell am start -n "$APP_ID/.MainActivity" >/dev/null
     wait_logcat "RDMA" "re-sync unavailable: Compiling JS failed"
+    # NOTE: the corrupt bundle is app-data residue (`adb install -r` keeps data):
+    # left behind, every later app launch re-surfaces the BundleLoadException from
+    # `nativeIsReady()` and a re-sync thread may lose the one-shot race and give up
+    # entirely (silently skipping updates). Remove the test artifact.
+    adb shell "run-as $APP_ID rm -f files/rdma/bad.hbc"
 }
 
 main() {

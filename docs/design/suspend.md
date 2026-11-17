@@ -82,6 +82,9 @@ chooses its real dispatcher via `withContext(...)`.
 - C++ keeps a `completionId → typeDescriptor` map (registered when `_<name>Async` is
   invoked), so the result is marshalled by type: primitives, `@RDMA` (`wrapAny` /
   `create<X>Wrapper`), `List`/`Map` (`createListHandle` / `createMapHandle`), nested.
+  The descriptor is the shared erased-channel mechanism described in
+  [type_descriptors.md](type_descriptors.md) — grammar, invariants and the `Long`
+  policy live there.
 - After the resume the id and its registered block are freed (`freeBlock`).
 
 The plugin bridge is a single `suspendCoroutine`:

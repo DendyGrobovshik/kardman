@@ -36,9 +36,13 @@ import org.jetbrains.kotlin.fir.symbols.impl.FirConstructorSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirEnumEntrySymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirNamedFunctionSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirPropertySymbol
+import io.github.dendygrobovshik.kardman.types.RdmaTypeDescFormat
 import org.jetbrains.kotlin.fir.types.ConeClassLikeType
+import org.jetbrains.kotlin.fir.types.ConeKotlinType
 import org.jetbrains.kotlin.fir.types.coneTypeSafe
+import org.jetbrains.kotlin.fir.types.isMarkedNullable
 import org.jetbrains.kotlin.fir.types.resolvedType
+import org.jetbrains.kotlin.fir.types.type
 import org.jetbrains.kotlin.diagnostics.DiagnosticReporter
 import org.jetbrains.kotlin.diagnostics.reportOn
 import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
@@ -260,6 +264,29 @@ object RdmaPluginWidgetCallChecker : FirExpressionChecker<FirFunctionCall>(MppCh
         val path = filePathOf(context) ?: return
         val bridgeName = RdmaPluginTransformState.bridgeNameFor(fqn)
         RdmaPluginTransformState.addEdit(path, nameSrc.startOffset, nameSrc.endOffset, bridgeName)
+
+        if (fqn !in RdmaPluginTransformState.stateFactoryFqns) return
+        // The state factory opens an erased value channel: bake the channel's type
+        // descriptor (docs/design/type_descriptors.md) from the call's static type
+        // into the rewritten call — `rdmaMutableStateOf(<value>, typeDesc = "<desc>")`.
+        // A type that yields no descriptor is a compile error: an erased channel
+        // without a descriptor would recreate guess-by-shape.
+        val src = expression.source ?: return
+        val desc = stateChannelDescOf(fqn, expression)
+        if (desc == null) {
+            reporter.reportOn(
+                src,
+                FirErrors.UNSUPPORTED,
+                "kardman state requires a concrete allowed value type — primitives, @RDMA classes/enums, " +
+                    "List/Map of those ('Any'/'dynamic'/function types and nullable collections are not " +
+                    "supported yet; docs/design/type_descriptors.md)",
+            )
+            return
+        }
+        val text = RdmaPluginTransformState.textOf(path)
+        val insertAt = text.lastIndexOf(')', src.endOffset - 1)
+        if (insertAt <= nameSrc.endOffset) return // unexpected call shape; leave the rename only
+        RdmaPluginTransformState.addEdit(path, insertAt, insertAt, ", typeDesc = \"$desc\"")
     }
 }
 
@@ -445,3 +472,82 @@ object RdmaPluginEnumFunctionChecker : FirExpressionChecker<FirFunctionCall>(Mpp
 }
 
 private fun String.escapeForJs(): String = replace("\\", "\\\\").replace("\"", "\\\"")
+
+// ---- state channel descriptors (docs/design/type_descriptors.md)
+
+private val statePrimitiveFqns = setOf(
+    "kotlin.Int", "kotlin.Long", "kotlin.Float", "kotlin.Double", "kotlin.Boolean", "kotlin.String",
+)
+private val stateListFqns = setOf(
+    "kotlin.collections.List", "kotlin.collections.MutableList",
+    "kotlin.collections.ArrayList", "java.util.ArrayList",
+)
+private val stateMapFqns = setOf(
+    "kotlin.collections.Map", "kotlin.collections.MutableMap",
+    "java.util.Map", "java.util.LinkedHashMap", "java.util.HashMap",
+)
+
+/**
+ * The type descriptor of the channel opened by a state factory call, derived from
+ * the call's static result type: `mutableStateOf(x)` yields `MutableState<T>`'s `T`,
+ * `mutableStateListOf`/`mutableStateMapOf` yield `list:<elem>`/`map:<k>:<v>` from
+ * their `SnapshotStateList<T>`/`SnapshotStateMap<K, V>` result. Null = the type
+ * cannot open an erased channel.
+ */
+private fun stateChannelDescOf(fqn: String, expression: FirFunctionCall): String? {
+    if (fqn == "androidx.compose.runtime.mutableIntStateOf") {
+        return RdmaTypeDescFormat.leaf("kotlin.Int")
+    }
+    val result = expression.resolvedType as? ConeClassLikeType ?: return null
+    return when (fqn) {
+        "androidx.compose.runtime.mutableStateListOf" -> {
+            val elem = stateTypeDescOf(result.typeArguments.getOrNull(0)?.type ?: return null)
+                ?: return null
+            RdmaTypeDescFormat.list(elem)
+        }
+        "androidx.compose.runtime.mutableStateMapOf" -> {
+            val k = stateTypeDescOf(result.typeArguments.getOrNull(0)?.type ?: return null)
+                ?: return null
+            val v = stateTypeDescOf(result.typeArguments.getOrNull(1)?.type ?: return null)
+                ?: return null
+            RdmaTypeDescFormat.map(k, v)
+        }
+        else -> {
+            val valueType = result.typeArguments.getOrNull(0)?.type
+                ?: expression.argumentList.arguments.firstOrNull()?.resolvedType
+            stateTypeDescOf(valueType ?: return null)
+        }
+    }
+}
+
+private fun stateTypeDescOf(type: ConeKotlinType): String? {
+    val classType = type as? ConeClassLikeType ?: return null
+    val fqn = classType.lookupTag.classId.asSingleFqName().asString()
+    val nullable = type.isMarkedNullable
+    return when {
+        fqn in statePrimitiveFqns -> RdmaTypeDescFormat.leaf(fqn, nullable)
+        RdmaPluginTransformState.isEnumQualifiedName(fqn) ->
+            RdmaTypeDescFormat.leaf(fqn, nullable, isEnum = true)
+        RdmaPluginTransformState.isClassQualifiedName(fqn) ->
+            RdmaTypeDescFormat.leaf(fqn, nullable)
+        // `EmptyList`/`EmptyMap` used to deserialize to `list:kotlin.Any`/`map:kotlin.Any:kotlin.Any`,
+        // silently reviving the pre-descriptor runtime-dispatch path on the state channel. Now they
+        // fall through to `null` (a compile error) since a state value must have a concrete element
+        // type. Use `mutableStateOf<List<T>>(emptyList())` / `mutableStateOf<Map<K, V>>(emptyMap())`.
+        fqn in stateListFqns -> {
+            if (nullable) return null // nullable collection channels map poorly in the leaf-suffix grammar
+            val elem = stateTypeDescOf(classType.typeArguments.getOrNull(0)?.type ?: return null)
+                ?: return null
+            RdmaTypeDescFormat.list(elem)
+        }
+        fqn in stateMapFqns -> {
+            if (nullable) return null
+            val k = stateTypeDescOf(classType.typeArguments.getOrNull(0)?.type ?: return null)
+                ?: return null
+            val v = stateTypeDescOf(classType.typeArguments.getOrNull(1)?.type ?: return null)
+                ?: return null
+            RdmaTypeDescFormat.map(k, v)
+        }
+        else -> null
+    }
+}

@@ -30,6 +30,11 @@ struct ListNativeState : public jsi::NativeState {
     // plugin-created `ArrayList` is morphed. Empty when the proxy wraps a
     // kernel-created list (the native list is the source of truth for mutability).
     std::string checkIsMutable_;
+    // True when the native list is a kernel `SnapshotStateList` created by
+    // `RDMA.mutableStateListOf`: mutation through the proxy then schedules a
+    // recomposition, and proxy operations during composition register the
+    // snapshot read first (docs/design/type_descriptors.md#state-semantics).
+    bool stateBacked_ = false;
 
     ListNativeState(JavaVM* jvm, jobject globalRef, const std::string& elemType)
         : jvm_(jvm), globalListRef_(globalRef), elementType_(elemType) {}
@@ -53,16 +58,18 @@ struct ListNativeState : public jsi::NativeState {
 
 // Setup NativeState + the full plain `List`/`MutableList` API as HostFunctions +
 // the `size` getter. `elementType` is a recursive descriptor: a primitive or @RDMA
-// FQN, or `list:<elem>` for a nested list.
-void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject globalListRef, const std::string& elementType);
+// FQN, or `list:<elem>` for a nested list. `stateBacked` marks a kernel
+// `SnapshotStateList` handle (see ListNativeState::stateBacked_).
+void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject globalListRef, const std::string& elementType, bool stateBacked = false);
 
 // Discover the storage methods of a Kotlin/JS `ArrayList` on its prototype and
 // replace them on `obj` with wrappers that forward to the native list. Called only
 // for plugin-created lists, after `populateListHandle`.
 void morphArrayList(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, const std::string& elementType);
 
-// Create a fresh ListHandle JSI object wrapping a JVM ArrayList
-jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType);
+// Create a fresh ListHandle JSI object wrapping a JVM ArrayList (or a kernel
+// `SnapshotStateList` when `stateBacked` is set — docs/design/type_descriptors.md).
+jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType, bool stateBacked = false);
 
 // Materialize JS Array → JVM ArrayList + mutate JS object into permanent ListHandle.
 // Recursively materializes nested lists when `elementType` is a `list:<elem>` descriptor.

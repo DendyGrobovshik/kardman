@@ -19,6 +19,7 @@ import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
 import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
+import io.github.dendygrobovshik.kardman.types.RdmaTypeDescFormat
 import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
@@ -84,6 +85,11 @@ class CppGenerator(
     }
 
     private fun jniReturnSignature(type: RdmaTypeRef): String = jniSignature(type)
+
+    /** [JniTypeMapper.JniType.fromJsi] with the argument index (`%d`) and the
+     *  enclosing host function's runtime parameter name (`%r`) substituted. */
+    private fun JniTypeMapper.JniType.jsExtract(idx: Int, rtName: String): String =
+        fromJsi.replace("%d", idx.toString()).replace("%r", rtName)
 
     /** FQN of the generated suspend-wrapper facade (`<pkg>.RdmaSuspendBridgeKt`), or null if none. */
     private fun suspendFacade(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>): String? {
@@ -453,7 +459,7 @@ ${info.className}NativeState::~${info.className}NativeState() {
                 prop.type == "kotlin.Int" -> "return jsi::Value((double)env->CallIntMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
                 prop.type == "kotlin.Boolean" -> "return jsi::Value(env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
                 prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "return jsi::Value(env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
-                prop.type == "kotlin.Long" -> "return jsi::Value((double)env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
+                prop.type == "kotlin.Long" -> "return rdmaLongToJs(r, (long long)env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name})); // guarded crossing"
                 else -> "return jsi::Value::undefined();"
             }
             out.write("""
@@ -481,7 +487,7 @@ static jsi::Value ${info.className}_${getterName}(jsi::Runtime& r, JavaVM* jvm, 
                     prop.type == "kotlin.Int" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jint)args[0].getNumber());"
                     prop.type == "kotlin.Boolean" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getBool());"
                     prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getNumber());"
-                    prop.type == "kotlin.Long" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jlong)args[0].getNumber());"
+                    prop.type == "kotlin.Long" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jlong)rdmaCheckedJLong(r, args[0])); // guarded crossing"
                     prop.type == "kotlin.String" -> "auto jstr = env->NewStringUTF(args[0].getString(r).utf8(r).c_str()); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, jstr); env->DeleteLocalRef(jstr);"
                     isEnumType(prop.type) -> {
                         val enumName = prop.type.substringAfterLast('.')
@@ -552,11 +558,11 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                             else -> "0.0"
                         }
                         out.write("    ${type.cppType} cpp_${param.name} = $zero;\n")
-                        out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = ${type.fromJsi.replace("%d", idx.toString())}; } else { mask |= (1 << $idx); }\n")
+                        out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = ${type.jsExtract(idx, "r")}; } else { mask |= (1 << $idx); }\n")
                     } else if (param.nullable) {
-                        out.write("    ${type.cppType} cpp_${param.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.fromJsi.replace("%d", idx.toString())});\n")
+                        out.write("    ${type.cppType} cpp_${param.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.jsExtract(idx, "r")});\n")
                     } else {
-                        val extractExpr = type.fromJsi.replace("%d", idx.toString())
+                        val extractExpr = type.jsExtract(idx, "r")
                         out.write("    ${type.cppType} cpp_${param.name} = $extractExpr;\n")
                     }
                 } else if (param.isList) {
@@ -687,7 +693,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     "kotlin.Int" -> out.write("    return jsi::Value((double)result);\n")
                     "kotlin.Boolean" -> out.write("    return jsi::Value(result);\n")
                     "kotlin.Double", "kotlin.Float" -> out.write("    return jsi::Value(result);\n")
-                    "kotlin.Long" -> out.write("    return jsi::Value((double)result);\n")
+                    "kotlin.Long" -> out.write("    return rdmaLongToJs(r, (long long)result); // guarded crossing\n")
                     else -> {
                         if (method.isList) {
                             out.write("    if (jret != nullptr) {\n")
@@ -794,11 +800,11 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                             "kotlin.Boolean" -> "false"
                             else -> "0.0"
                         }
-                        val extract = type.fromJsi.replace("%d", idx.toString())
+                        val extract = type.jsExtract(idx, "rt")
                         out.write("    ${type.cppType} cpp_${param.name} = $zero;\n")
                         out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = $extract; } else { mask |= (1 << $idx); }\n")
                     } else {
-                        val extract = type.fromJsi.replace("%d", idx.toString())
+                        val extract = type.jsExtract(idx, "rt")
                         out.write("    ${type.cppType} cpp_${param.name} = $extract;\n")
                     }
                 } else if (param.isList) {
@@ -1308,17 +1314,18 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
                     "bool" -> "    bool cpp_${p.name} = false;\n"
                     "int" -> "    int cpp_${p.name} = 0;\n"
                     "long" -> "    long cpp_${p.name} = 0;\n"
+                    "long long" -> "    long long cpp_${p.name} = 0;\n"
                     "double" -> "    double cpp_${p.name} = 0.0;\n"
                     "float" -> "    float cpp_${p.name} = 0.0f;\n"
                     else -> "    ${type.cppType} cpp_${p.name} = ${type.cppType}();\n"
                 }
                 return decl +
-                    "    if (!args[$idx].isUndefined()) { cpp_${p.name} = ${type.fromJsi.replace("%d", idx.toString())}; } else { mask |= (1 << $maskBit); }\n"
+                    "    if (!args[$idx].isUndefined()) { cpp_${p.name} = ${type.jsExtract(idx, "r")}; } else { mask |= (1 << $maskBit); }\n"
             }
             if (p.nullable) {
-                return "    ${type.cppType} cpp_${p.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.fromJsi.replace("%d", idx.toString())});\n"
+                return "    ${type.cppType} cpp_${p.name} = args[$idx].isNull() ? ${type.cppType}() : (${type.jsExtract(idx, "r")});\n"
             }
-            return "    ${type.cppType} cpp_${p.name} = ${type.fromJsi.replace("%d", idx.toString())};\n"
+            return "    ${type.cppType} cpp_${p.name} = ${type.jsExtract(idx, "r")};\n"
         }
         if (isEnumType(p.type)) {
             val enumName = p.type.substringAfterLast('.')
@@ -1395,8 +1402,8 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
     }
 
     private fun methodTypeDesc(m: MethodInfo): String = when {
-        m.isList -> "list:${m.listElementType ?: "kotlin.Any"}"
-        m.isMap -> "map:${m.mapKeyType ?: "kotlin.Any"}:${m.mapValueType ?: "kotlin.Any"}"
+        m.isList -> RdmaTypeDescFormat.list(m.listElementType ?: "kotlin.Any")
+        m.isMap -> RdmaTypeDescFormat.map(m.mapKeyType ?: "kotlin.Any", m.mapValueType ?: "kotlin.Any")
         else -> m.returnType
     }
 
@@ -1511,6 +1518,9 @@ $nullCheck    auto cstr = env->GetStringUTFChars(jret, nullptr);
                 }
                 val wrap = when (static.type) {
                     "kotlin.Boolean" -> "$call"
+                    // Guarded Long crossing: the helper returns a jsi::Value already
+                    // (moved into the outer Value; docs/design/type_descriptors.md).
+                    "kotlin.Long" -> "rdmaLongToJs(r, (long long)($call))"
                     else -> "(double)$call"
                 }
                 """
@@ -1566,9 +1576,9 @@ $body}
                             else -> "0.0"
                         }
                         "    ${jt.cppType} cpp_${p.name} = $zero;\n" +
-                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())}; } else { mask |= (1 << $maskBit); }\n"
+                            "    if (!args[$i].isUndefined()) { cpp_${p.name} = ${jt.jsExtract(i, "r")}; } else { mask |= (1 << $maskBit); }\n"
                     } else {
-                        "    ${jt.cppType} cpp_${p.name} = ${jt.fromJsi.replace("%d", i.toString())};\n"
+                        "    ${jt.cppType} cpp_${p.name} = ${jt.jsExtract(i, "r")};\n"
                     }
                 }
             }
@@ -1651,11 +1661,13 @@ $body}
         is RdmaType.UnitType -> ""
     }
 
+    // Renders a `RdmaTypeRef` as a type descriptor (docs/design/type_descriptors.md):
+    // leaves carry the `?`/`!` marks, nesting goes through the shared grammar builder.
     private fun typeName(type: RdmaTypeRef): String = when (val t = type.type) {
-        is RdmaType.Primitive -> t.fqn
-        is RdmaType.Ref -> t.fqn
-        is RdmaType.ListType -> "list:" + typeName(t.element)
-        is RdmaType.MapType -> "map:" + typeName(t.key) + ":" + typeName(t.value)
+        is RdmaType.Primitive -> RdmaTypeDescFormat.leaf(t.fqn, type.nullable)
+        is RdmaType.Ref -> RdmaTypeDescFormat.leaf(t.fqn, type.nullable, isEnumType(t.fqn))
+        is RdmaType.ListType -> RdmaTypeDescFormat.list(typeName(t.element))
+        is RdmaType.MapType -> RdmaTypeDescFormat.map(typeName(t.key), typeName(t.value))
         is RdmaType.UnitType -> "kotlin.Unit"
         is RdmaType.FunctionType -> "kotlin.Any"
     }
@@ -1679,7 +1691,7 @@ $body}
                 "kotlin.Int" -> "    auto result = env->CallStaticIntMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value((double)result);\n"
                 "kotlin.Boolean" -> "    auto result = env->CallStaticBooleanMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value(result);\n"
                 "kotlin.Double", "kotlin.Float" -> "    auto result = env->CallStaticDoubleMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value(result);\n"
-                "kotlin.Long" -> "    auto result = env->CallStaticLongMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value((double)result);\n"
+                "kotlin.Long" -> "    auto result = env->CallStaticLongMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return rdmaLongToJs(r, (long long)result); // guarded crossing\n"
                 else -> "    return jsi::Value::undefined();\n"
             }
             is RdmaType.Ref -> {

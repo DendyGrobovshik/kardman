@@ -16,8 +16,10 @@
 #include "RdmaCompose.h"
 #include "RdmaComposerProxy.h"
 #include "RdmaRuntime.h"
+#include "RdmaTypeDesc.h"
 #include "ListHandle.h"
 #include "MapHandle.h"
+#include "RdmaNativeState.h"
 
 #include <jsi/jsi.h>
 #include <jni.h>
@@ -65,7 +67,7 @@ static int64_t g_nextContinuationId = 1;
 // True on the Hermes thread while content/scope blocks are executing (i.e. during
 // composition). State reads performed in this window rendezvous to the UI thread so
 // that Compose's snapshot read observer records the dependency.
-static thread_local bool g_inComposition = false;
+thread_local bool g_inComposition = false;
 
 static UserBridgeInstaller g_userBridge = nullptr;
 static UserBridgeJniInit g_userBridgeJniInit = nullptr;
@@ -96,55 +98,256 @@ jsi::Value wrapAny(jsi::Runtime& rt, HostContext jvm, jobject obj) {
 
 // -------------------------------------------------------- suspend completion
 
-// Consumes one descriptor at `pos`: kind 0 = leaf (a = fqn), kind 1 = list
-// (a = element descriptor), kind 2 = map (a = key descriptor, b = value
-// descriptor). Returns the index just past the consumed descriptor.
-static size_t parseTypeDesc(const std::string& d, size_t pos, int& kind, std::string& a, std::string& b) {
-    if (d.compare(pos, 5, "list:") == 0) {
-        int k; std::string ka, kb;
-        size_t end = parseTypeDesc(d, pos + 5, k, ka, kb);
-        kind = 1;
-        a = d.substr(pos + 5, end - (pos + 5));
-        return end;
+// Kernel-side keep of a plugin value for one `@RDMA` class leaf: the handle points
+// at the kernel object itself (docs/design/type_descriptors.md — state holds the
+// object, no new identity implied).
+static jobject rdmaBoxObjectLeaf(jsi::Runtime& rt, const jsi::Value& v);
+
+[[noreturn]] static void throwTypeError(jsi::Runtime& rt, const std::string& message);
+
+// Strict scalar/`@RDMA` boxing for one descriptor leaf (flags already stripped):
+// `Int`/`Long`/`Double`/`Float`/`Boolean`/`String` and `@RDMA` handles. A value
+// that does not fit the leaf raises a cross-runtime error — no silent coercion.
+// Used by state writes and collection element materialization (which carries the
+// same leaves inside its `elementType` strings). `@RDMA enum` leaves are handled by
+// the channel-specific paths (an enum needs its `valueOf`, see boxStateValue).
+jobject rdmaBoxLeafValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, const std::string& fqn) {
+    if (fqn == "kotlin.Long") {
+        // The plugin's `Long(low, high)` object (or an integral JS number), exact
+        // in all 64 bits (docs/design/type_descriptors.md#long-policy).
+        long long lv = rdmaCheckedJLong(rt, v);
+        jclass cls = env->FindClass("java/lang/Long");
+        jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(J)Ljava/lang/Long;");
+        jobject r = env->CallStaticObjectMethod(cls, valueOf, (jlong)lv);
+        env->DeleteLocalRef(cls);
+        return r;
     }
-    if (d.compare(pos, 4, "map:") == 0) {
-        int kk; std::string kka, kkb;
-        size_t keyEnd = parseTypeDesc(d, pos + 4, kk, kka, kkb);
-        int vk; std::string vka, vkb;
-        size_t end = parseTypeDesc(d, keyEnd, vk, vka, vkb);
-        kind = 2;
-        a = d.substr(pos + 4, keyEnd - (pos + 4));
-        b = d.substr(keyEnd, end - keyEnd);
-        return end;
+    if (fqn == "kotlin.Int" || fqn == "kotlin.Double" || fqn == "kotlin.Float") {
+        if (!v.isNumber()) throwTypeError(rt, "expected a number (" + fqn + ") at the boundary");
+        double dv = v.getNumber();
+        if (fqn == "kotlin.Int") {
+            if (!(dv >= -2147483648.0 && dv <= 2147483647.0) || (double)(long long)dv != dv) {
+                throwTypeError(rt, "value " + std::to_string(dv) + " does not fit " + fqn);
+            }
+            jclass cls = env->FindClass("java/lang/Integer");
+            jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(I)Ljava/lang/Integer;");
+            jobject r = env->CallStaticObjectMethod(cls, valueOf, (jint)dv);
+            env->DeleteLocalRef(cls);
+            return r;
+        }
+        if (fqn == "kotlin.Double") {
+            jclass cls = env->FindClass("java/lang/Double");
+            jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(D)Ljava/lang/Double;");
+            jobject r = env->CallStaticObjectMethod(cls, valueOf, (jdouble)dv);
+            env->DeleteLocalRef(cls);
+            return r;
+        }
+        jclass cls = env->FindClass("java/lang/Float");
+        jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(F)Ljava/lang/Float;");
+        jobject r = env->CallStaticObjectMethod(cls, valueOf, (jfloat)dv);
+        env->DeleteLocalRef(cls);
+        return r;
     }
-    size_t colon = d.find(':', pos);
-    size_t end = (colon == std::string::npos) ? d.size() : colon;
-    kind = 0;
-    a = d.substr(pos, end - pos);
-    return end;
+    if (fqn == "kotlin.Boolean") {
+        if (!v.isBool()) throwTypeError(rt, "expected a Boolean value at the boundary");
+        jclass cls = env->FindClass("java/lang/Boolean");
+        jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(Z)Ljava/lang/Boolean;");
+        jobject r = env->CallStaticObjectMethod(cls, valueOf, (jboolean)v.getBool());
+        env->DeleteLocalRef(cls);
+        return r;
+    }
+    if (fqn == "kotlin.String") {
+        if (!v.isString()) throwTypeError(rt, "expected a String value at the boundary");
+        std::string s = v.getString(rt).utf8(rt);
+        return env->NewStringUTF(s.c_str());
+    }
+    // `@RDMA` class leaf (and unknown leafs): the plugin-side value is the object's
+    // handle; the caller stores the kernel object itself.
+    return rdmaBoxObjectLeaf(rt, v);
 }
 
-// Marshals the kernel-returned `value` (a JVM object) into a jsi::Value using the
-// type descriptor. Lists/maps become native-backed proxies; everything else goes
-// through `wrapAny` (primitives/String/@RDMA/Unit).
-static jsi::Value marshalSuspendResult(jsi::Runtime& rt, JavaVM* jvm, jobject value, const std::string& desc) {
+static jobject rdmaBoxObjectLeaf(jsi::Runtime& rt, const jsi::Value& v) {
+    if (v.isObject()) {
+        jsi::Object o = v.asObject(rt);
+        if (o.hasNativeState(rt)) {
+            auto ns = std::dynamic_pointer_cast<RdmaObjectNativeState>(o.getNativeState(rt));
+            if (ns) return ns->getObject();
+        }
+    }
+    return nullptr;
+}
+
+// Builds the cross-runtime error for a type-marshal violation and throws it into
+// JS. See docs/design/type_descriptors.md: a value that does not fit its channel's
+// type descriptor is a loud error, never a silent coercion or drop.
+[[noreturn]] static void throwTypeError(jsi::Runtime& rt, const std::string& message) {
+    rdmaThrowTypeError(rt, message); // shared construction (RdmaJsLong.h) — no drift
+}
+
+// Marshals a kernel-side `value` (a JVM object) into a jsi::Value according to the
+// type descriptor of its channel (docs/design/type_descriptors.md): leaves go
+// through `wrapAny` (primitives/String/enum-as-name/`@RDMA`/Unit), collections
+// become native-backed proxies. `Long` values outside the exact JS range are
+// rejected by the leaf path instead of rounding.
+static jsi::Value marshalByTypeDesc(jsi::Runtime& rt, JavaVM* jvm, jobject value, const std::string& desc) {
     if (!value) return jsi::Value::null();
     JNIEnv* env = getEnv(jvm);
     if (!env) return jsi::Value::undefined();
-    int kind; std::string a, b;
-    parseTypeDesc(desc, 0, kind, a, b);
-    if (kind == 0 && a == "kotlin.Unit") {
-        return jsi::Value::undefined();
+    TypeDesc d = TypeDesc::parseOrAny(desc);
+    switch (d.kind) {
+        case TypeDesc::LIST: {
+            jobject global = env->NewGlobalRef(value);
+            return createListHandle(rt, jvm, global, d.elem->serialize());
+        }
+        case TypeDesc::MAP: {
+            jobject global = env->NewGlobalRef(value);
+            return createMapHandle(rt, jvm, global, d.key->serialize(), d.value->serialize());
+        }
+        case TypeDesc::LEAF:
+        default:
+            if (d.fqn == "kotlin.Unit") return jsi::Value::undefined();
+            return wrapAny(rt, jvm, value);
     }
-    if (kind == 1) {
-        jobject global = env->NewGlobalRef(value);
-        return createListHandle(rt, jvm, global, a);
+}
+
+// Resolves an application class at call time, on any thread. `FindClass` only sees
+// app classes on Java-created threads (a native-attached thread resolves with the
+// boot loader — see RdmaJni.cpp), so the app's context ClassLoader captured at
+// cache init does the lookup. Returns a new local reference, or null when the
+// class cannot be resolved.
+static jclass findAppClass(JNIEnv* env, const std::string& fqn) {
+    if (g_composeCache.appClassLoader && g_composeCache.classLoaderLoadClass) {
+        std::string dotted = fqn;
+        for (char& c : dotted) if (c == '/') c = '.';
+        jstring name = env->NewStringUTF(dotted.c_str());
+        jobject cls = env->CallObjectMethod(g_composeCache.appClassLoader, g_composeCache.classLoaderLoadClass, name);
+        env->DeleteLocalRef(name);
+        if (env->ExceptionCheck() || !cls) {
+            env->ExceptionClear();
+            if (cls) env->DeleteLocalRef(cls);
+            return nullptr;
+        }
+        return (jclass)cls;
     }
-    if (kind == 2) {
-        jobject global = env->NewGlobalRef(value);
-        return createMapHandle(rt, jvm, global, a, b);
+    return env->FindClass(fqn.c_str());
+}
+
+// Boxes the enum entry name string into the concrete JVM enum via the enum class's
+// `valueOf(String)`. `fqn` should be the enum class FQN (e.g. `com.example.HttpMethod`).
+// Returns the entry as a new local reference the caller owns. Raises a cross-runtime
+// error on a wrong-shaped input or a missing `valueOf(String)` (docs/types.md).
+// Shared by state writes and collection element materialization — no drift between them.
+jobject rdmaBoxEnumValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, const std::string& fqn) {
+    if (!v.isString()) throwTypeError(rt, "expected the enum entry name string for " + fqn);
+    std::string name = v.getString(rt).utf8(rt);
+    std::string internal = fqn;
+    for (char& c : internal) if (c == '.') c = '/';
+    jclass cls = findAppClass(env, internal);
+    if (!cls || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        if (cls) env->DeleteLocalRef(cls);
+        throwTypeError(rt, "unknown enum type " + fqn);
     }
-    return wrapAny(rt, jvm, value);
+    // `valueOf`'s exact return type is the enum class itself, not `java.lang.Enum`
+    // — the JNI signature must spell the concrete FQN (`(Ljava/lang/String;)Lcom/example/MyEnum;`),
+    // else GetStaticMethodID finds nothing and every enum write throws (audit #24).
+    std::string valueOfSig = "(Ljava/lang/String;)L" + internal + ";";
+    jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", valueOfSig.c_str());
+    if (!valueOf || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        throwTypeError(rt, "enum " + fqn + " has no valueOf(String)");
+    }
+    jstring jname = env->NewStringUTF(name.c_str());
+    jobject r = env->CallStaticObjectMethod(cls, valueOf, jname);
+    env->DeleteLocalRef(jname);
+    env->DeleteLocalRef(cls);
+    checkAndThrowJs(env, rt);
+    return r;
+}
+
+// Converts a plugin-side value into a JVM object according to the channel's type
+// descriptor (docs/design/type_descriptors.md). Strict by contract: a value that
+// does not fit the descriptor raises a cross-runtime error (`throwTypeError`), and
+// `null` is a value only on nullable channels. The kernel side never coerces or
+// silently drops a write.
+//
+// Ownership: every non-null return is a NEW **local** reference the caller owns and
+// must release with `DeleteLocalRef` (nullable `nullptr` needs no release). Held
+// kernel references (`globalListRef_`/`globalMapRef_`/`RdmaObjectNativeState`) are
+// returned as a fresh local so callers never touch a borrowed ref (audit #1/#2).
+static jobject boxStateValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, const TypeDesc& d) {
+    // `kotlin.Unit` is a channel's "no-value": an `undefined` write or initial is legal
+    // (audit #27) and materializes as `null` (the kernel state only holds "unit"-bearing
+    // values). Everything else still goes through the strict null-shape rule below.
+    if (d.kind == TypeDesc::LEAF && d.fqn == "kotlin.Unit") return nullptr;
+    if (v.isNull() || v.isUndefined()) {
+        if (d.nullable) return nullptr;
+        throwTypeError(rt, "null is not a value of the non-nullable state type " + d.serialize());
+    }
+    switch (d.kind) {
+        case TypeDesc::LIST: {
+            if (!v.isObject()) throwTypeError(rt, "expected a List value for " + d.serialize());
+            jsi::Object o = v.asObject(rt);
+            if (o.hasNativeState(rt)) {
+                auto ns = std::dynamic_pointer_cast<ListNativeState>(o.getNativeState(rt));
+                if (ns) return env->NewLocalRef(ns->globalListRef_); // kernel list: same object
+            }
+            // materializeArray returns an owned global; hand back an owned local instead.
+            jobject g = materializeArray(env, rt, g_composeCache.jvm, o, d.elem->serialize());
+            if (!g) return nullptr;
+            jobject local = env->NewLocalRef(g);
+            env->DeleteGlobalRef(g);
+            return local;
+        }
+        case TypeDesc::MAP: {
+            if (!v.isObject()) throwTypeError(rt, "expected a Map value for " + d.serialize());
+            jsi::Object o = v.asObject(rt);
+            if (o.hasNativeState(rt)) {
+                auto ns = std::dynamic_pointer_cast<MapNativeState>(o.getNativeState(rt));
+                if (ns) return env->NewLocalRef(ns->globalMapRef_);
+            }
+            jobject g = materializeMap(env, rt, g_composeCache.jvm, o, d.key->serialize(), d.value->serialize());
+            if (!g) return nullptr;
+            jobject local = env->NewLocalRef(g);
+            env->DeleteGlobalRef(g);
+            return local;
+        }
+        case TypeDesc::LEAF:
+        default:
+            break;
+    }
+
+    const std::string& fqn = d.fqn;
+    if (d.isEnum) {
+        return rdmaBoxEnumValue(env, rt, v, fqn);
+    }
+    if (fqn == "kotlin.Int" || fqn == "kotlin.Long" ||
+        fqn == "kotlin.Double" || fqn == "kotlin.Float") {
+        // Scalar leaves share the strict boundary boxer with collection elements
+        // (shape checks included; Long accepts its Long object, see RdmaJsLong.h).
+        return rdmaBoxLeafValue(env, rt, v, fqn);
+    }
+    if (fqn == "kotlin.Boolean" || fqn == "kotlin.String" || fqn == "kotlin.Unit") {
+        return rdmaBoxLeafValue(env, rt, v, fqn);
+    }
+    // `kotlin.Any` is not reachable on a state channel: the plugin compiler's `stateTypeDescOf`
+    // rejects `Any`/`Any?`/function/`dynamic` states at compile time, and `EmptyList`/`EmptyMap`
+    // no longer collapse to `list:kotlin.Any`/`map:kotlin.Any:kotlin.Any`. If it somehow leaks
+    // in, fall through to the loud type error below: no silent-mismatch dispatch on a typed
+    // channel (docs/design/type_descriptors.md).
+
+    // `@RDMA` class leaf: the plugin-side value is the object's handle; the state
+    // stores the kernel object itself (identity/lifetime rules stay the crossing
+    // default — see docs/design/type_descriptors.md#non-goals).
+    if (v.isObject()) {
+        jsi::Object o = v.asObject(rt);
+        if (o.hasNativeState(rt)) {
+            auto ns = std::dynamic_pointer_cast<RdmaObjectNativeState>(o.getNativeState(rt));
+            if (ns) return env->NewLocalRef(ns->getObject());
+        }
+    }
+    throwTypeError(rt, "value does not fit the state type " + d.serialize());
 }
 
 void rdmaRegisterSuspendResultType(int64_t completionId, const std::string& typeDesc) {
@@ -192,6 +395,9 @@ static bool initComposeJniCache(JNIEnv* env) {
     g_composeCache.composerCompanionField = env->GetStaticFieldID(g_composeCache.composerClass, "Companion", "Landroidx/compose/runtime/Composer$Companion;");
 
     g_composeCache.effectsKt = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/RdmaEffectsKt");
+    g_composeCache.stateFactory = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/RdmaStateFactory");
+    g_composeCache.stateFactoryNewList = env->GetStaticMethodID(g_composeCache.stateFactory, "newListFrom", "(Ljava/util/ArrayList;)Ljava/lang/Object;");
+    g_composeCache.stateFactoryNewMap = env->GetStaticMethodID(g_composeCache.stateFactory, "newMapFrom", "(Ljava/util/LinkedHashMap;)Ljava/lang/Object;");
     g_composeCache.sideEffect = env->GetStaticMethodID(g_composeCache.effectsKt, "sideEffect", "(JLandroidx/compose/runtime/Composer;I)V");
     g_composeCache.disposableEffect = env->GetStaticMethodID(g_composeCache.effectsKt, "disposableEffect", "([Ljava/lang/Object;JLandroidx/compose/runtime/Composer;I)Z");
 
@@ -200,6 +406,29 @@ static bool initComposeJniCache(JNIEnv* env) {
 
     g_composeCache.objectClass = cacheClass(env, "java/lang/Object");
     g_composeCache.objectCtor = env->GetMethodID(g_composeCache.objectClass, "<init>", "()V");
+
+    // Capture the app's context ClassLoader for call-time lookups of app classes
+    // on native-attached threads (see ComposeJniCache::appClassLoader).
+    if (!g_composeCache.appClassLoader) {
+        jclass threadCls = env->FindClass("java/lang/Thread");
+        jclass loaderCls = env->FindClass("java/lang/ClassLoader");
+        if (threadCls && loaderCls) {
+            jmethodID currentThread = env->GetStaticMethodID(threadCls, "currentThread", "()Ljava/lang/Thread;");
+            jmethodID getContextLoader = env->GetMethodID(threadCls, "getContextClassLoader", "()Ljava/lang/ClassLoader;");
+            jobject thread = currentThread ? env->CallStaticObjectMethod(threadCls, currentThread) : nullptr;
+            jobject loader = thread ? env->CallObjectMethod(thread, getContextLoader) : nullptr;
+            if (loader && !env->ExceptionCheck()) {
+                g_composeCache.appClassLoader = env->NewGlobalRef(loader);
+                g_composeCache.classLoaderLoadClass =
+                    env->GetMethodID(loaderCls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            if (loader) env->DeleteLocalRef(loader);
+            if (thread) env->DeleteLocalRef(thread);
+        }
+        if (threadCls) env->DeleteLocalRef(threadCls);
+        if (loaderCls) env->DeleteLocalRef(loaderCls);
+    }
 
     g_composeCache.jsValueHolderClass = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/JsValueHolder");
     g_composeCache.jsValueHolderCtor = env->GetMethodID(g_composeCache.jsValueHolderClass, "<init>", "(J)V");
@@ -334,7 +563,8 @@ jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o) {
         result = jsi::Value(env->CallDoubleMethod(o, doubleValue));
     } else if (env->IsInstanceOf(o, lng)) {
         jmethodID longValue = env->GetMethodID(lng, "longValue", "()J");
-        result = jsi::Value((double)env->CallLongMethod(o, longValue));
+        jlong lv = env->CallLongMethod(o, longValue);
+        result = rdmaLongToJs(rt, (long long)lv); // plugin's Long object, all 64 bits
     } else if (env->IsInstanceOf(o, flt)) {
         jmethodID floatValue = env->GetMethodID(flt, "floatValue", "()F");
         result = jsi::Value((double)env->CallFloatMethod(o, floatValue));
@@ -394,7 +624,8 @@ RdmaResult classifyBoxedValue(JNIEnv* env, jobject o) {
         r = RdmaResult::number(env->CallDoubleMethod(o, doubleValue));
     } else if (env->IsInstanceOf(o, lng)) {
         jmethodID longValue = env->GetMethodID(lng, "longValue", "()J");
-        r = RdmaResult::number((double)env->CallLongMethod(o, longValue));
+        jlong lv = env->CallLongMethod(o, longValue);
+        r = RdmaResult::i64Value((long long)lv); // full 64 bits, never squeezed through a double
     } else if (env->IsInstanceOf(o, flt)) {
         jmethodID floatValue = env->GetMethodID(flt, "floatValue", "()F");
         r = RdmaResult::number((double)env->CallFloatMethod(o, floatValue));
@@ -557,7 +788,8 @@ bool captureJniError(JNIEnv* e, RdmaResult& out) {
 
 class StateProxyHost : public jsi::HostObject {
 public:
-    StateProxyHost(jobject state) : state_(state) {}
+    StateProxyHost(jobject state, std::string typeDesc)
+        : state_(state), descRaw_(std::move(typeDesc)), desc_(TypeDesc::parseOrAny(descRaw_)) {}
     ~StateProxyHost() override {
         if (state_ && g_composeCache.jvm) {
             JNIEnv* env = getEnv(g_composeCache.jvm);
@@ -572,19 +804,21 @@ public:
         if (n.rfind("get_value", 0) == 0) {
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "get_value"), 0,
-                [state = state_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [state = state_, descRaw = descRaw_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                     if (g_inComposition) {
                         // Rendezvous to the UI thread so Compose's snapshot read
-                        // observer records the dependency on this state.
-                        RdmaResult res = rdmaCallUi([state]() -> RdmaResult {
+                        // observer records the dependency on this state, and carry
+                        // the value back as a descriptor-typed handle: the JS side
+                        // marshals it by the channel's type descriptor.
+                        RdmaResult res = rdmaCallUi([state, descRaw]() -> RdmaResult {
                             JNIEnv* e = getEnv(g_composeCache.jvm);
                             if (!e) return RdmaResult::undefined();
                             jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
                             RdmaResult err;
                             if (captureJniError(e, err)) { if (v) e->DeleteLocalRef(v); return err; }
-                            RdmaResult r2 = classifyBoxedValue(e, v);
+                            jobject global = v ? e->NewGlobalRef(v) : nullptr;
                             if (v) e->DeleteLocalRef(v);
-                            return r2;
+                            return RdmaResult::hostValue(global, descRaw);
                         });
                         return rdmaResultToJsi(r, res);
                     }
@@ -592,7 +826,7 @@ public:
                     if (!e) return jsi::Value::undefined();
                     jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
                     checkAndThrowJs(e, r);
-                    jsi::Value out = unboxJni(e, r, v);
+                    jsi::Value out = marshalByTypeDesc(r, g_composeCache.jvm, v, descRaw);
                     if (v) e->DeleteLocalRef(v);
                     return out;
                 });
@@ -600,16 +834,40 @@ public:
         if (n.rfind("set_value", 0) == 0) {
             auto fn = jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "set_value"), 1,
-                [state = state_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [state = state_, desc = desc_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
                     if (count < 1) return jsi::Value::undefined();
-                    jobject boxed = boxJsi(e, r, args[0]);
-                    if (boxed) {
-                        e->CallVoidMethod(state, g_composeCache.stateSetValue, boxed);
-                        e->DeleteLocalRef(boxed);
-                        checkAndThrowJs(e, r);
+                    // Descriptor-typed and strict: a foreign-typed value raises
+                    // instead of being coerced or silently dropped, and `null` is
+                    // written as a value only on nullable states.
+                    jobject boxed = boxStateValue(e, r, args[0], desc);
+                    if (g_inComposition) {
+                        // Rendezvous write during composition: the write runs inside
+                        // the UI thread's active composition snapshot, so it is visible
+                        // to the same pass' reads and Compose's snapshot system observes
+                        // the change (docs/bridges.md §state). A direct write from the
+                        // Hermes thread would land in the global snapshot that the open
+                        // composition snapshot cannot see.
+                        jobject boxedG = boxed ? e->NewGlobalRef(boxed) : nullptr;
+                        if (boxed) e->DeleteLocalRef(boxed);
+                        RdmaResult res = rdmaCallUi([state, boxedG]() -> RdmaResult {
+                            JNIEnv* e2 = getEnv(g_composeCache.jvm);
+                            if (!e2) return RdmaResult::undefined();
+                            e2->CallVoidMethod(state, g_composeCache.stateSetValue, boxedG);
+                            RdmaResult err;
+                            if (captureJniError(e2, err)) {
+                                if (boxedG) e2->DeleteGlobalRef(boxedG);
+                                return err;
+                            }
+                            if (boxedG) e2->DeleteGlobalRef(boxedG);
+                            return RdmaResult::undefined();
+                        });
+                        return rdmaResultToJsi(r, res); // Error kind rethrows into JS
                     }
+                    e->CallVoidMethod(state, g_composeCache.stateSetValue, boxed);
+                    if (boxed) e->DeleteLocalRef(boxed);
+                    checkAndThrowJs(e, r);
                     return jsi::Value::undefined();
                 });
             return fn;
@@ -620,11 +878,13 @@ public:
     jobject state() const { return state_; }
 
 private:
-    jobject state_; // global ref
+    jobject state_;       // global ref
+    std::string descRaw_; // type descriptor of the state's value channel
+    TypeDesc desc_;       // parsed form, used on writes
 };
 
-jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal) {
-    auto host = std::make_shared<StateProxyHost>(stateGlobal);
+jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal, const std::string& typeDesc) {
+    auto host = std::make_shared<StateProxyHost>(stateGlobal, typeDesc);
     return jsi::Object::createFromHostObject(rt, host);
 }
 
@@ -697,6 +957,7 @@ jsi::Value rdmaResultToJsi(jsi::Runtime& rt, RdmaResult& result) {
         case RdmaResultKind::Null: return jsi::Value::null();
         case RdmaResultKind::Bool: return jsi::Value(result.b);
         case RdmaResultKind::Number: return jsi::Value(result.num);
+        case RdmaResultKind::I64: return rdmaLongToJs(rt, result.i64); // plugin's Long object, exact
         case RdmaResultKind::String: return jsi::String::createFromUtf8(rt, result.str);
         case RdmaResultKind::Empty:
             return g_empty ? jsi::Value(rt, *g_empty) : jsi::Value::undefined();
@@ -709,13 +970,22 @@ jsi::Value rdmaResultToJsi(jsi::Runtime& rt, RdmaResult& result) {
             if (!result.ref) return jsi::Value::null();
             jobject ref = (jobject)result.ref;
             result.ref = nullptr; // ownership transferred to the proxy
-            return makeStateProxy(rt, ref);
+            return makeStateProxy(rt, ref, result.str);
         }
         case RdmaResultKind::ScopeRef: {
             if (!result.ref) return jsi::Value::null();
             jobject ref = (jobject)result.ref;
             result.ref = nullptr; // ownership transferred to the proxy
             return makeScopeUpdateScopeProxy(rt, ref);
+        }
+        case RdmaResultKind::HostValue: {
+            if (!result.ref) return jsi::Value::null();
+            jobject ref = (jobject)result.ref;
+            result.ref = nullptr; // marshal keeps ownership with us
+            jsi::Value out = marshalByTypeDesc(rt, g_composeCache.jvm, ref, result.str);
+            JNIEnv* e2 = getEnv(g_composeCache.jvm);
+            if (e2) e2->DeleteGlobalRef(ref);
+            return out;
         }
         case RdmaResultKind::Error: {
             throwJsException(rt, result.error);
@@ -833,18 +1103,25 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
     rdma.setProperty(rt, "setComposerEmpty", std::move(setEmptyFn));
 
     auto mutableStateOfFn = jsi::Function::createFromHostFunction(
-        rt, jsi::PropNameID::forAscii(rt, "mutableStateOf"), 1,
+        rt, jsi::PropNameID::forAscii(rt, "mutableStateOf"), 2,
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
             JNIEnv* e = getEnv(g_composeCache.jvm);
             if (!e || count < 1) return jsi::Value::undefined();
-            jobject boxed = boxJsi(e, r, args[0]);
-            if (!boxed) return jsi::Value::undefined();
-            jobject boxedG = e->NewGlobalRef(boxed);
-            e->DeleteLocalRef(boxed);
+            // The channel's value type descriptor is baked in by the plugin bridge
+            // (docs/design/type_descriptors.md). Pre-descriptor bundles call with one
+            // argument and keep their old Int/Boolean/String contract.
+            std::string descRaw = (count > 1 && args[1].isString())
+                ? args[1].getString(r).utf8(r)
+                : "kotlin.Any";
+            TypeDesc desc = TypeDesc::parseOrAny(descRaw);
+            jobject boxed = boxStateValue(e, r, args[0], desc);
+            // On typed channels a `null` initial is legal (nullable states).
+            jobject boxedG = boxed ? e->NewGlobalRef(boxed) : nullptr;
+            if (boxed) e->DeleteLocalRef(boxed);
             // SnapshotMutableState must be created on the UI thread inside the active
             // snapshot; creating it on the Hermes thread would bind it to the wrong
             // snapshot (and reads during composition would throw).
-            RdmaResult result = rdmaCallUi([boxedG]() -> RdmaResult {
+            RdmaResult result = rdmaCallUi([boxedG, descRaw]() -> RdmaResult {
                 JNIEnv* e = getEnv(g_composeCache.jvm);
                 if (!e) return RdmaResult::undefined();
                 jobject policy = e->CallStaticObjectMethod(g_composeCache.snapshotStateKt, g_composeCache.structuralEqualityPolicy);
@@ -864,11 +1141,77 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
                 if (!state) return RdmaResult::undefined();
                 jobject global = e->NewGlobalRef(state);
                 e->DeleteLocalRef(state);
-                return RdmaResult::stateRef(global);
+                return RdmaResult::stateRef(global, descRaw);
             });
             return rdmaResultToJsi(r, result);
         });
     rdma.setProperty(rt, "mutableStateOf", std::move(mutableStateOfFn));
+
+    // Snapshot collections (docs/design/type_descriptors.md#state-semantics): the
+    // guest passes its materialized values; the kernel copies them into a
+    // `SnapshotStateList`/`SnapshotStateMap` and returns a state-backed proxy, so
+    // mutation through the proxy schedules a recomposition. The element typing
+    // rides in the channel's type descriptor (`list:<elem>`, `map:<k>:<v>`).
+    auto mutableStateListOfFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "mutableStateListOf"), 2,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            JNIEnv* e = getEnv(g_composeCache.jvm);
+            if (!e || count < 1 || !args[0].isObject()) return jsi::Value::undefined();
+            std::string descRaw = (count > 1 && args[1].isString())
+                ? args[1].getString(r).utf8(r)
+                : "list:kotlin.Any";
+            TypeDesc d = TypeDesc::parseOrAny(descRaw);
+            std::string elemDesc = (d.kind == TypeDesc::LIST && d.elem) ? d.elem->serialize() : "kotlin.Any";
+            jsi::Object values = args[0].asObject(r);
+            // materializeArray returns either an OWNED global (fresh materialization) or a
+            // BORROWED `globalListRef_` (reusing a kernel handle) — only free what we own
+            // (same pattern as `putAll`: audit #2).
+            bool borrowed = false;
+            if (values.hasNativeState(r)) {
+                auto ns = std::dynamic_pointer_cast<ListNativeState>(values.getNativeState(r));
+                if (ns) borrowed = true;
+            }
+            jobject arrayList = materializeArray(e, r, g_composeCache.jvm, values, elemDesc);
+            checkAndThrowJs(e, r);
+            jobject snap = e->CallStaticObjectMethod(g_composeCache.stateFactory, g_composeCache.stateFactoryNewList, arrayList);
+            if (arrayList && !borrowed) e->DeleteGlobalRef(arrayList);
+            checkAndThrowJs(e, r);
+            if (!snap) return jsi::Value::undefined();
+            jobject global = e->NewGlobalRef(snap);
+            e->DeleteLocalRef(snap);
+            return createListHandle(r, g_composeCache.jvm, global, elemDesc, /*stateBacked=*/true);
+        });
+    rdma.setProperty(rt, "mutableStateListOf", std::move(mutableStateListOfFn));
+
+    auto mutableStateMapOfFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "mutableStateMapOf"), 2,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            JNIEnv* e = getEnv(g_composeCache.jvm);
+            if (!e || count < 1 || !args[0].isObject()) return jsi::Value::undefined();
+            std::string descRaw = (count > 1 && args[1].isString())
+                ? args[1].getString(r).utf8(r)
+                : "map:kotlin.Any:kotlin.Any";
+            TypeDesc d = TypeDesc::parseOrAny(descRaw);
+            std::string keyDesc = (d.kind == TypeDesc::MAP && d.key) ? d.key->serialize() : "kotlin.Any";
+            std::string valueDesc = (d.kind == TypeDesc::MAP && d.value) ? d.value->serialize() : "kotlin.Any";
+            jsi::Object values = args[0].asObject(r);
+            // Same borrowed/owned split as `mutableStateListOf` (audit #2).
+            bool borrowed = false;
+            if (values.hasNativeState(r)) {
+                auto ns = std::dynamic_pointer_cast<MapNativeState>(values.getNativeState(r));
+                if (ns) borrowed = true;
+            }
+            jobject javaMap = materializeMap(e, r, g_composeCache.jvm, values, keyDesc, valueDesc);
+            checkAndThrowJs(e, r);
+            jobject snap = e->CallStaticObjectMethod(g_composeCache.stateFactory, g_composeCache.stateFactoryNewMap, javaMap);
+            if (javaMap && !borrowed) e->DeleteGlobalRef(javaMap);
+            checkAndThrowJs(e, r);
+            if (!snap) return jsi::Value::undefined();
+            jobject global = e->NewGlobalRef(snap);
+            e->DeleteLocalRef(snap);
+            return createMapHandle(r, g_composeCache.jvm, global, keyDesc, valueDesc, /*stateBacked=*/true);
+        });
+    rdma.setProperty(rt, "mutableStateMapOf", std::move(mutableStateMapOfFn));
 
     auto registerBlockFn = jsi::Function::createFromHostFunction(
         rt, jsi::PropNameID::forAscii(rt, "registerBlock"), 2,
@@ -1076,7 +1419,7 @@ static void runSuspendResult(jsi::Runtime& rt, jlong completionId, jobject value
     std::string desc = it->second.typeDesc;
     g_suspendContinuations.erase(it);
     try {
-        jsi::Value v = marshalSuspendResult(rt, g_composeCache.jvm, valueGlobal, desc);
+        jsi::Value v = marshalByTypeDesc(rt, g_composeCache.jvm, valueGlobal, desc);
         const jsi::Value* callArgs = &v;
         onResult->call(rt, callArgs, static_cast<size_t>(1));
     } catch (const jsi::JSError& e) {

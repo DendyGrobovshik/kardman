@@ -65,10 +65,11 @@ object RdmaFunctionExtractor {
                 // compiler also nulls `IrValueParameter.defaultValue`, and offset-based default text
                 // drops receiver/qualifier prefixes, so default text is re-parsed from the source.
                 val defaultsByIndex = RdmaDefaultSupport.defaultValuesFromFunctionSource(sourceText ?: "", fn.startOffset, fn.endOffset)
+                val nullableByIndex = RdmaDefaultSupport.declaredNullableFromFunctionSource(sourceText ?: "", fn.startOffset, fn.endOffset)
                 val parameters = fn.parameters
                     .filter { it.kind == IrParameterKind.Regular }
                     .filter { !it.name.asString().startsWith("$") }
-                    .mapIndexed { i, p -> toParameterInfo(p, sourceText, defaultsByIndex[i]) }
+                    .mapIndexed { i, p -> toParameterInfo(p, sourceText, defaultsByIndex[i], nullableByIndex[i]) }
                 val returnType = if (composable) {
                     RdmaTypeRef(RdmaType.UnitType)
                 } else {
@@ -90,6 +91,11 @@ object RdmaFunctionExtractor {
         }
     }
 
+    /** Overrides the IR-derived nullability with the source-declared one (the compose
+     *  lowering widens defaulted parameter types to nullable in the IR). */
+    private fun RdmaTypeRef.declaredNullable(declared: Boolean?): RdmaTypeRef =
+        if (declared == null) this else copy(nullable = declared)
+
     private fun defaultValueText(p: IrValueParameter, sourceText: String?): String? {
         val d = p.defaultValue ?: return null
         if (sourceText == null || d.startOffset < 0 || d.endOffset < d.startOffset || d.endOffset > sourceText.length) return null
@@ -103,16 +109,17 @@ object RdmaFunctionExtractor {
      * so a function type that contains a `Composer` parameter is a content lambda; a function type
      * without one is a plain callback. We record the logical (un-lowered) function type.
      */
-    private fun toParameterInfo(p: IrValueParameter, sourceText: String?, defaultOverride: String? = null): RdmaParameterInfo {
+    private fun toParameterInfo(p: IrValueParameter, sourceText: String?, defaultOverride: String? = null, nullableOverride: Boolean? = null): RdmaParameterInfo {
         val hasDefault = p.defaultValue != null || defaultOverride != null
         val defaultText = defaultOverride ?: defaultValueText(p, sourceText)
-        val simple = p.type as? IrSimpleType ?: return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type), hasDefault = hasDefault, defaultValue = defaultText)
+        val declared = RdmaTypeParser.toRdmaTypeRef(p.type).declaredNullable(nullableOverride)
+        val simple = p.type as? IrSimpleType ?: return RdmaParameterInfo(p.name.asString(), declared, hasDefault = hasDefault, defaultValue = defaultText)
         val fqn = p.type.classFqName?.asString()
         if (fqn == null || !fqn.startsWith("kotlin.Function")) {
-            return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type), hasDefault = hasDefault, defaultValue = defaultText)
+            return RdmaParameterInfo(p.name.asString(), declared, hasDefault = hasDefault, defaultValue = defaultText)
         }
         val args = simple.arguments.mapNotNull { it.typeOrNull }
-        if (args.isEmpty()) return RdmaParameterInfo(p.name.asString(), RdmaTypeParser.toRdmaTypeRef(p.type), hasDefault = hasDefault, defaultValue = defaultText)
+        if (args.isEmpty()) return RdmaParameterInfo(p.name.asString(), declared, hasDefault = hasDefault, defaultValue = defaultText)
         val composerIdx = args.dropLast(1).indexOfFirst { it.classFqName?.asString() == COMPOSER_FQN }
         return if (composerIdx >= 0) {
             val userParams = args.subList(0, composerIdx).map { RdmaTypeParser.toRdmaTypeRef(it) }

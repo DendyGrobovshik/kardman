@@ -19,6 +19,7 @@ import io.github.dendygrobovshik.kardman.types.ConstructorInfo
 import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
+import io.github.dendygrobovshik.kardman.types.RdmaEnumInfo
 import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
@@ -30,9 +31,13 @@ import kotlin.test.assertFalse
 
 class CAbiKotlinGeneratorTest {
 
-    private fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo> = emptyList()): String {
+    private fun generate(
+        classInfos: List<RdmaClassInfo>,
+        functions: List<RdmaFunctionInfo> = emptyList(),
+        enums: List<RdmaEnumInfo> = emptyList(),
+    ): String {
         val out = ByteArrayOutputStream()
-        CAbiKotlinGenerator("", "com.example.kernel") { _, _ -> out }.generate(classInfos, functions)
+        CAbiKotlinGenerator("", "com.example.kernel") { _, _ -> out }.generate(classInfos, functions, enums)
         return out.toString("UTF-8")
     }
 
@@ -104,5 +109,25 @@ class CAbiKotlinGeneratorTest {
         assertContains(kotlin, "self.fetch(id)")
         assertContains(kotlin, "rdmaRegisterFunction(\"rdma_SuspendService_fetchAsync\"")
         assertFalse(kotlin.contains("fun rdma_SuspendService_fetch("))
+    }
+
+    @Test
+    fun `enum members generate ordinal valueOf and valueOfHandle bridges`() {
+        val enum = RdmaEnumInfo(
+            packageName = "com.example.kernel",
+            enumName = "HttpMethod",
+            qualifiedName = "com.example.kernel.HttpMethod",
+            entries = listOf("GET", "POST"),
+        )
+        val kotlin = generate(emptyList(), emptyList(), listOf(enum))
+        assertContains(kotlin, "fun rdma_HttpMethod_ordinal(entryName: CPointer<ByteVar>?): Int")
+        assertContains(kotlin, "fun rdma_HttpMethod_valueOf(entryName: CPointer<ByteVar>?): CPointer<ByteVar>?")
+        // The handle bridge rebuilds the ENTRY as an owned StableRef handle — the
+        // descriptor-driven enum write on iOS resolves it at runtime.
+        assertContains(kotlin, "fun rdma_HttpMethod_valueOfHandle(entryName: CPointer<ByteVar>?): COpaquePointer?")
+        assertContains(kotlin, "com.example.kernel.HttpMethod.valueOf(entryName?.toKString() ?: \"\").handle()")
+        assertContains(kotlin, "rdmaRegisterFunction(\"rdma_HttpMethod_valueOfHandle\"")
+        // Registered under the canonical descriptor lookup key as well.
+        assertContains(kotlin, "rdmaRegisterFunction(\"rdma_enum_valueOf:com.example.kernel.HttpMethod\"")
     }
 }

@@ -58,10 +58,21 @@ object RdmaPluginTransformState {
     private val composeBridgeable = setOf(
         "androidx.compose.runtime.mutableStateOf",
         "androidx.compose.runtime.mutableIntStateOf",
+        "androidx.compose.runtime.mutableStateListOf",
+        "androidx.compose.runtime.mutableStateMapOf",
         "androidx.compose.runtime.SideEffect",
         "androidx.compose.runtime.DisposableEffect",
         "androidx.compose.runtime.LaunchedEffect",
         "androidx.compose.runtime.rememberCoroutineScope",
+    )
+
+    /** State factories: each call opens an erased value channel and therefore must
+     *  carry the channel's type descriptor (docs/design/type_descriptors.md). */
+    val stateFactoryFqns = setOf(
+        "androidx.compose.runtime.mutableStateOf",
+        "androidx.compose.runtime.mutableIntStateOf",
+        "androidx.compose.runtime.mutableStateListOf",
+        "androidx.compose.runtime.mutableStateMapOf",
     )
 
     fun configure(
@@ -130,6 +141,8 @@ object RdmaPluginTransformState {
         runRdmaAppFqn -> "rdmaRunApp"
         "androidx.compose.runtime.mutableStateOf" -> "rdmaMutableStateOf"
         "androidx.compose.runtime.mutableIntStateOf" -> "rdmaMutableIntStateOf"
+        "androidx.compose.runtime.mutableStateListOf" -> "rdmaMutableStateListOf"
+        "androidx.compose.runtime.mutableStateMapOf" -> "rdmaMutableStateMapOf"
         "androidx.compose.runtime.SideEffect" -> "rdmaSideEffect"
         "androidx.compose.runtime.DisposableEffect" -> "rdmaDisposableEffect"
         "androidx.compose.runtime.LaunchedEffect" -> "rdmaLaunchedEffect"
@@ -171,7 +184,11 @@ object RdmaPluginTransformState {
 
     /** Drops edits fully inside `[start, end)` — used by whole-span rewrites that cover nested expressions. */
     fun removeEditsWithin(path: String, start: Int, end: Int) {
-        edits[path]?.removeAll { it.start >= start && it.end <= end }
+        // Half-open containment: an edit must START inside the span. A zero-width
+        // edit at `end` (e.g. the state factory's `, typeDesc = ...` insert next to
+        // a nested constructor rewrite) sits on the boundary, not inside it, and
+        // must survive the nested rewrite.
+        edits[path]?.removeAll { it.start >= start && it.start < end && it.end <= end }
     }
 
     /** True if an existing edit fully covers `[start, end)` (a whole-span rewrite above this expression). */

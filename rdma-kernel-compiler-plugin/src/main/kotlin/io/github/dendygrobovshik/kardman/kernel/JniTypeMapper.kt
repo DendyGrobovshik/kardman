@@ -20,6 +20,12 @@ object JniTypeMapper {
         val jniSignature: String,
         val cppType: String,
         val jniType: String,
+        /**
+         * JSI extraction template. `%d` is the argument index, `%s` the C++ value
+         * expression, and `%r` the enclosing host function's `jsi::Runtime&`
+         * parameter name (emitted functions name it `r` or `rt` — each consumer
+         * substitutes its own, so the templates cannot drift from either context).
+         */
         val fromJsi: String,
         val toJsi: String,
         val fromJni: String,
@@ -38,10 +44,13 @@ object JniTypeMapper {
         ),
         "kotlin.Long" to JniType(
             jniSignature = "J",
-            cppType = "long",
+            cppType = "long long",
             jniType = "jlong",
-            fromJsi = "(long)args[%d].getNumber()",
-            toJsi = "facebook::jsi::Value((double)%s)",
+            // Guarded crossings (docs/design/type_descriptors.md): a JS number holds
+            // every Long exactly only within ±2^53, so both directions raise instead
+            // of rounding silently.
+            fromJsi = "rdmaCheckedJLong(%r, args[%d])",
+            toJsi = "rdmaLongToJs(%r, %s)",
             fromJni = "",
             toJni = "",
         ),
@@ -76,8 +85,8 @@ object JniTypeMapper {
             jniSignature = "Ljava/lang/String;",
             cppType = "std::string",
             jniType = "jstring",
-            fromJsi = "args[%d].getString(rt).utf8(rt)",
-            toJsi = "facebook::jsi::String::createFromUtf8(rt, %s)",
+            fromJsi = "args[%d].getString(%r).utf8(%r)",
+            toJsi = "facebook::jsi::String::createFromUtf8(%r, %s)",
             fromJni = "env->GetStringUTFChars(%s, nullptr)",
             toJni = "env->NewStringUTF(%s.c_str())",
         ),

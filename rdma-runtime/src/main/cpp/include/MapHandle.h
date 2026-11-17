@@ -31,6 +31,9 @@ struct MapNativeState : public jsi::NativeState {
     // plugin-created `HashMap` is morphed. Empty when the proxy wraps a
     // kernel-created map (the native map is the source of truth for mutability).
     std::string checkIsMutable_;
+    // True when the native map is a kernel `SnapshotStateMap` created by
+    // `RDMA.mutableStateMapOf` (docs/design/type_descriptors.md#state-semantics).
+    bool stateBacked_ = false;
 
     MapNativeState(JavaVM* jvm, jobject globalRef, const std::string& keyType, const std::string& valueType)
         : jvm_(jvm), globalMapRef_(globalRef), keyType_(keyType), valueType_(valueType) {}
@@ -54,16 +57,18 @@ struct MapNativeState : public jsi::NativeState {
 
 // Setup NativeState + the full plain `Map`/`MutableMap` API as HostFunctions +
 // the `size` getter. `keyType`/`valueType` are recursive descriptors (a primitive
-// or @RDMA FQN, `list:<elem>`, or `map:<key>:<value>`).
-void populateMapHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject globalMapRef, const std::string& keyType, const std::string& valueType);
+// or @RDMA FQN, `list:<elem>`, or `map:<key>:<value>`). `stateBacked` marks a
+// kernel `SnapshotStateMap` handle (see MapNativeState::stateBacked_).
+void populateMapHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject globalMapRef, const std::string& keyType, const std::string& valueType, bool stateBacked = false);
 
 // Discover the storage methods of a Kotlin/JS `HashMap`/`LinkedHashMap` on its
 // prototype and replace them on `obj` with wrappers that forward to the native
 // map. Called only for plugin-created maps, after `populateMapHandle`.
 void morphHashMap(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, const std::string& keyType, const std::string& valueType);
 
-// Create a fresh MapHandle JSI object wrapping a JVM Map.
-jsi::Object createMapHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalMapRef, const std::string& keyType, const std::string& valueType);
+// Create a fresh MapHandle JSI object wrapping a JVM Map (or a kernel
+// `SnapshotStateMap` when `stateBacked` is set — docs/design/type_descriptors.md).
+jsi::Object createMapHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalMapRef, const std::string& keyType, const std::string& valueType, bool stateBacked = false);
 
 // Materialize a JS map → JVM HashMap/LinkedHashMap + mutate the JS object into a
 // permanent MapHandle. Recursively materializes nested lists/maps using the

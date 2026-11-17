@@ -45,6 +45,11 @@ class ComposeAllowlistTest {
             "androidx.compose.runtime.DisposableEffectScope.onDispose",
             "androidx.compose.runtime.LaunchedEffect",
             "androidx.compose.runtime.rememberCoroutineScope",
+            // Snapshot collections (docs/design/type_descriptors.md#state-semantics).
+            "androidx.compose.runtime.mutableStateListOf",
+            "androidx.compose.runtime.mutableStateMapOf",
+            "androidx.compose.runtime.SnapshotStateList",
+            "androidx.compose.runtime.SnapshotStateMap",
         )
         for (fqn in allowed) {
             assertTrue(ComposeAllowlist.isAllowed(fqn), "$fqn should be allowed")
@@ -64,12 +69,23 @@ class ComposeAllowlistTest {
     }
 
     @Test
+    fun `allows snapshot collection members`() {
+        // The `mutableStateListOf`/`mutableStateMapOf` rewrites return these types;
+        // their standard List/Map API crosses to the collection proxy.
+        val allowed = listOf(
+            "androidx.compose.runtime.SnapshotStateList.add",
+            "androidx.compose.runtime.SnapshotStateList.removeAt",
+            "androidx.compose.runtime.SnapshotStateMap.put",
+            "androidx.compose.runtime.snapshots.SnapshotStateList.get",
+        )
+        for (fqn in allowed) assertTrue(ComposeAllowlist.isAllowed(fqn), fqn)
+    }
+
+    @Test
     fun `rejects unsupported compose symbols`() {
         val rejected = listOf(
             "androidx.compose.runtime.derivedStateOf",
             "androidx.compose.runtime.collectAsState",
-            "androidx.compose.runtime.mutableStateListOf",
-            "androidx.compose.runtime.mutableStateMapOf",
             "androidx.compose.runtime.compositionLocalOf",
             "androidx.compose.runtime.staticCompositionLocalOf",
             "androidx.compose.runtime.CompositionLocalProvider",

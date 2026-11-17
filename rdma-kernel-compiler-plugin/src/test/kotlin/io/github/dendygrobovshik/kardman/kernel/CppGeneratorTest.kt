@@ -318,6 +318,30 @@ class CppGeneratorTest {
         }
     }
 
+    @Test
+    fun `scalar params extract with the host function's runtime parameter name`() {
+        // `fromJsi` templates carry a `%r` runtime placeholder: the extract must
+        // name the enclosing host function's `jsi::Runtime&` parameter (`r` for
+        // bridge host functions), never a hardcoded `rt` — that once broke every
+        // generated `Long` parameter at compile time.
+        val fn = RdmaFunctionInfo(
+            name = "echoLong",
+            qualifiedName = "com.example.kernel.echoLong",
+            facadeClass = "com.example.kernel.LongDemoKt",
+            composable = false,
+            parameters = listOf(RdmaParameterInfo("value", RdmaTypeRef(RdmaType.Primitive("kotlin.Long")))),
+            returnType = RdmaTypeRef(RdmaType.Primitive("kotlin.Long")),
+            suspend = false,
+        )
+        val generated = generate(emptyList(), listOf(fn))
+        val bridge = generated["RdmaBridge.cpp"] ?: error("RdmaBridge.cpp not generated")
+
+        assertContains(bridge, "rdma_fn_echoLong(jsi::Runtime& r,")
+        assertContains(bridge, "rdmaCheckedJLong(r, args[0])")
+        assertContains(bridge, "rdmaLongToJs(r,")
+        assertFalse(bridge.contains("rdmaCheckedJLong(rt,"), "template leaked the wrong runtime name")
+    }
+
     private fun createPerson() = RdmaClassInfo(
         packageName = "com.example.kernel", className = "Person",
         qualifiedName = "com.example.kernel.Person",

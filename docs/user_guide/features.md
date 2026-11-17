@@ -199,9 +199,24 @@ fun main() {
 
 Allowed in the plugin: `@Composable` functions/lambdas, `remember { ... }` (with
 keys), `mutableStateOf` + `getValue`/`setValue` (the `var x by ...` delegation),
-the kernel's `@RDMA` widgets, three effects — `SideEffect`, `DisposableEffect` and
-`LaunchedEffect` — and `rememberCoroutineScope()` (all hosted in the kernel, see
-below). `runRdmaApp { ... }` installs the root content.
+`mutableStateListOf`/`mutableStateMapOf`, the kernel's `@RDMA` widgets, three
+effects — `SideEffect`, `DisposableEffect` and `LaunchedEffect` — and
+`rememberCoroutineScope()` (all hosted in the kernel, see below).
+`runRdmaApp { ... }` installs the root content.
+
+State values may be any allowed boundary type — primitives (nullable included),
+`@RDMA` enums (as name strings), `@RDMA` references, `List`/`Map` — with three
+rules:
+
+- the static type must be concrete (`mutableStateOf<Any?>(...)` is a compile error)
+  and is fixed at creation: writing a foreign-typed value raises `RdmaException`,
+  `null` is a normal value on nullable states;
+- `Long` values cross with full 64-bit fidelity (the plugin's `Long` object, not a
+  JS number) and never lose bits;
+- mutation semantics match plain Compose: in-place mutation of a plain collection
+  in state does not recompose (assign a new one), while `mutableStateListOf`/
+  `mutableStateMapOf` mutations do recompose. Details:
+  [type_descriptors.md](../design/type_descriptors.md).
 
 Lambdas matter here. The compiler distinguishes two kinds of function
 parameters on a widget:
@@ -297,18 +312,24 @@ as name strings; `when`/`.name`/`.ordinal`/`valueOf` — see [types.md](../types
 (`LinkedHashMap`/`HashMap`/`emptyMap`; see [collections.md](design/collections.md)),
 lambdas, `Unit` returns; `suspend` functions/methods with timers
 (`delay`/`withTimeoutOrNull`); UI via the base Compose protocol
-(`remember`/`mutableStateOf`/widgets +
+(`remember`/typed `mutableStateOf`/`mutableStateListOf`/`mutableStateMapOf`/widgets +
 content lambdas and callbacks) plus the `SideEffect`, `DisposableEffect` and
 `LaunchedEffect` effects
 and `rememberCoroutineScope` (single-threaded, `Dispatchers.Main`/`.immediate`).
+State values carry the full allowed type set via type descriptors; a foreign-typed
+write raises `RdmaException` rather than corrupting quietly, and `Long` round-trips
+with all 64 bits
+(see [type_descriptors.md](../design/type_descriptors.md)).
 
 **Not yet** — non-`@RDMA` value types (`Array`, data classes), `enum.values()` and
 enum element types inside `List`/`Map`, generics beyond `List<T>`/`MutableList<T>` and `Map<K, V>`/`MutableMap<K, V>`; secondary constructors;
 overloaded methods, extension functions; block-body overrides;
 `derivedStateOf`/`snapshotFlow`, animations and anything else outside the
 allowlist; stable identity for object/`@RDMA` effect keys;
-cross-runtime object identity/`equals`, JNI exception propagation,
-async/Promise returns, batch transfers.
+cross-runtime object identity/`equals`, `List`/`Map` returns on the generic
+callback path and enum/numeric leaf typing inside collections
+([type_descriptors.md](../design/type_descriptors.md#clients)), JNI exception
+propagation, async/Promise returns, batch transfers.
 
 ## Limitations
 

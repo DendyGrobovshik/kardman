@@ -111,6 +111,14 @@ If a required method is missing, the crossing fails with `RdmaException`.
 
 Patched mutators call the original `checkIsMutable` before mutating the native list.
 
+The same mangled-name mapping is installed on **kernel-created** collection proxies
+(suspend/`@RDMA` returns, state-backed snapshot collections) and on the iterator
+objects they hand out: the guest bridge — compiled by the same toolchain as the
+plugin — discovers the exact mangled spellings from its own stdlib instances
+(`RDMA.listMethodNames`/`RDMA.mapMethodNames`) and the runtime installs the
+aliases, so typed Kotlin code works identically on either side of the
+boundary.
+
 The following methods are not patched. They delegate to the storage methods:
 
 `iterator`, `contains`, `indexOf`, `lastIndexOf`, `equals`, `hashCode`, `subList`,

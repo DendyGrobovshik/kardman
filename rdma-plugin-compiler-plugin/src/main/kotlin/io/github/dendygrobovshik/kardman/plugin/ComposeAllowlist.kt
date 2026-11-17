@@ -31,6 +31,14 @@ object ComposeAllowlist {
         "androidx.compose.runtime.remember",
         "androidx.compose.runtime.mutableStateOf",
         "androidx.compose.runtime.mutableIntStateOf",
+        // Snapshot collections: rewritten to the kernel-backed
+        // `rdmaMutableStateListOf`/`rdmaMutableStateMapOf` bridges (the list/map is
+        // a kernel `SnapshotStateList`/`SnapshotStateMap`, so its mutations
+        // recompose — docs/design/type_descriptors.md#state-semantics).
+        "androidx.compose.runtime.mutableStateListOf",
+        "androidx.compose.runtime.mutableStateMapOf",
+        "androidx.compose.runtime.SnapshotStateList",
+        "androidx.compose.runtime.SnapshotStateMap",
         "androidx.compose.runtime.getValue",
         "androidx.compose.runtime.setValue",
         "androidx.compose.runtime.Composer",
@@ -65,9 +73,22 @@ object ComposeAllowlist {
 
     fun isAllowed(fqn: String): Boolean = when {
         fqn in allowedRuntime -> true
+        // Members of the kernel-backed snapshot collections: the rewrites of
+        // `mutableStateListOf`/`mutableStateMapOf` return these, so their standard
+        // List/Map API is exercised through the collection proxy
+        // (docs/design/collections.md). The checker sees the pre-rewrite
+        // resolution, so the members carry the androidx owner FQN.
+        allowedMemberOwners.any { fqn.startsWith("$it.") } -> true
         !fqn.startsWith("androidx.compose") -> true
         else -> false
     }
+
+    private val allowedMemberOwners = setOf(
+        "androidx.compose.runtime.SnapshotStateList",
+        "androidx.compose.runtime.SnapshotStateMap",
+        "androidx.compose.runtime.snapshots.SnapshotStateList",
+        "androidx.compose.runtime.snapshots.SnapshotStateMap",
+    )
 
     fun reason(fqn: String): String {
         val short = fqn.substringAfterLast('.')

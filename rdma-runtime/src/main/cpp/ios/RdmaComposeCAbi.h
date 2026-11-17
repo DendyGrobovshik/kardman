@@ -86,6 +86,23 @@ inline void* rdma_boxString(const char* v) { return ((void* (*)(const char*))rdm
 inline void* rdma_boxObject() { return ((void* (*)())rdma_lookupFunction("rdma_boxObject"))(); }
 inline void* rdma_boxJsValueHolder(int64_t id) { return ((void* (*)(int64_t))rdma_lookupFunction("rdma_boxJsValueHolder"))(id); }
 
+// Returns a NEW owned handle to the same underlying value — for values whose
+// handle is owned by a live JS wrapper but must cross into a store that
+// consumes its handle. Caller owns the returned handle.
+inline void* rdma_cloneHandle(void* handle) { return ((void* (*)(void*))rdma_lookupFunction("rdma_cloneHandle"))(handle); }
+
+// Kernel enum `valueOf` bridges rebuild an entry from its name: the generated
+// per-module shims register a handle bridge under `rdma_enum_valueOf:<fqn>`
+// (CAbiKotlinGenerator.writeEnumMembers). Returns a fresh owned handle, or null
+// when the enum has no registered bridge or the name is invalid — read
+// rdma_takeError() for the kernel-side error before raising.
+inline void* rdma_enumValueOfHandle(const char* fqn, const char* entryName) {
+    std::string key = std::string("rdma_enum_valueOf:") + fqn;
+    void* fn = rdma_lookupFunction(key.c_str());
+    if (!fn) return nullptr;
+    return ((void* (*)(const char*))fn)(entryName);
+}
+
 // Value classification + unboxing (Kotlin Any? -> C++). Read-only.
 inline int32_t rdma_classifyValue(void* handle) { return ((int32_t (*)(void*))rdma_lookupFunction("rdma_classifyValue"))(handle); }
 inline int32_t rdma_valueAsInt(void* h) { return ((int32_t (*)(void*))rdma_lookupFunction("rdma_valueAsInt"))(h); }
@@ -94,6 +111,7 @@ inline double rdma_valueAsDouble(void* h) { return ((double (*)(void*))rdma_look
 inline float rdma_valueAsFloat(void* h) { return ((float (*)(void*))rdma_lookupFunction("rdma_valueAsFloat"))(h); }
 inline bool rdma_valueAsBoolean(void* h) { return ((bool (*)(void*))rdma_lookupFunction("rdma_valueAsBoolean"))(h); }
 inline const char* rdma_valueAsString(void* h) { return ((const char* (*)(void*))rdma_lookupFunction("rdma_valueAsString"))(h); }
+inline const char* rdma_valueAsEnumName(void* h) { return ((const char* (*)(void*))rdma_lookupFunction("rdma_valueAsEnumName"))(h); }
 inline int64_t rdma_valueAsJsValueId(void* h) { return ((int64_t (*)(void*))rdma_lookupFunction("rdma_valueAsJsValueId"))(h); }
 
 // Thread-local Kotlin exception (set by the shim's try/catch wrappers). Returns a
@@ -125,10 +143,21 @@ inline bool rdma_composer_changed(void* key) { return ((bool (*)(void*))rdma_loo
 inline void* rdma_composer_rememberedValue() { return ((void* (*)())rdma_lookupFunction("rdma_composer_rememberedValue"))(); }
 inline void rdma_composer_updateRememberedValue(void* value) { ((void (*)(void*))rdma_lookupFunction("rdma_composer_updateRememberedValue"))(value); }
 
-// State.
-inline void* rdma_mutableStateOf(void* initialValue) { return ((void* (*)(void*))rdma_lookupFunction("rdma_mutableStateOf"))(initialValue); }
+// State. `rdma_mutableStateOf` takes the channel's value type descriptor (fixed
+// at creation): the state handle model it as a carrier (`RdmaTypedState`) so the
+// descriptor travels with the handle. State handles/initial values are only
+// read by the shim (borrowed) — the caller owns them.
+inline void* rdma_mutableStateOf(void* initialValue, const char* typeDesc) {
+    return ((void* (*)(void*, const char*))rdma_lookupFunction("rdma_mutableStateOf"))(initialValue, typeDesc);
+}
+inline const char* rdma_stateTypeDesc(void* stateHandle) { return ((const char* (*)(void*))rdma_lookupFunction("rdma_stateTypeDesc"))(stateHandle); }
 inline void* rdma_stateGetValue(void* stateHandle) { return ((void* (*)(void*))rdma_lookupFunction("rdma_stateGetValue"))(stateHandle); }
 inline void rdma_stateSetValue(void* stateHandle, void* value) { ((void (*)(void*, void*))rdma_lookupFunction("rdma_stateSetValue"))(stateHandle, value); }
+
+// Snapshot collections: copy the borrowed source list/map handle into a
+// `SnapshotStateList`/`SnapshotStateMap`. Caller owns the returned handle.
+inline void* rdma_mutableStateListOf(void* sourceList) { return ((void* (*)(void*))rdma_lookupFunction("rdma_mutableStateListOf"))(sourceList); }
+inline void* rdma_mutableStateMapOf(void* sourceMap) { return ((void* (*)(void*))rdma_lookupFunction("rdma_mutableStateMapOf"))(sourceMap); }
 
 // Scope.
 inline void rdma_scopeUpdateScope(void* scopeHandle, int64_t blockId) { ((void (*)(void*, int64_t))rdma_lookupFunction("rdma_scopeUpdateScope"))(scopeHandle, blockId); }
@@ -150,7 +179,7 @@ jsi::Value wrapAnyCAbi(jsi::Runtime& rt, HostContext ctx, void* handle);
 
 // Proxy factories (state + scope) — the C-ABI equivalents of makeStateProxy /
 // makeScopeUpdateScopeProxy. Take ownership of the passed handle.
-jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle);
+jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle, const std::string& typeDesc = "kotlin.Any");
 jsi::Object makeScopeUpdateScopeProxyCAbi(jsi::Runtime& rt, void* scopeHandle);
 
 // The registered object wrapper (generated `wrapUserObject`). Set via the
@@ -193,7 +222,7 @@ extern int64_t g_nextJsValueId;
 // Generic `Any?` classification used by wrapAnyCAbi and stateValueToJsi.
 enum class CAbiValueKind {
     Null = 0, State = 1, JsValue = 2, Int = 3, Long = 4, Double = 5,
-    Float = 6, Boolean = 7, String = 8, Other = 9, Empty = 10,
+    Float = 6, Boolean = 7, String = 8, Other = 9, Empty = 10, Enum = 11,
 };
 
 } // namespace rdma

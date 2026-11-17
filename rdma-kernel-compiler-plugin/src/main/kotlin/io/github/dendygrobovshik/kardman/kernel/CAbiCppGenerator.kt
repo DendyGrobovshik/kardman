@@ -20,6 +20,7 @@ import io.github.dendygrobovshik.kardman.types.RdmaEnumInfo
 import io.github.dendygrobovshik.kardman.types.RdmaFunctionInfo
 import io.github.dendygrobovshik.kardman.types.RdmaParameterInfo
 import io.github.dendygrobovshik.kardman.types.RdmaType
+import io.github.dendygrobovshik.kardman.types.RdmaTypeDescFormat
 import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
@@ -181,6 +182,7 @@ class CAbiCppGenerator(
 #include <memory>
 #include <string>
 #include "RdmaVtable.h"
+#include "RdmaJsLong.h"
 #include "RdmaNativeStateCAbi.h"
 
 namespace facebook {
@@ -253,7 +255,7 @@ ${info.className}NativeState::~${info.className}NativeState() {
                 prop.type == "kotlin.Int" -> "    return jsi::Value((double)${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
                 prop.type == "kotlin.Boolean" -> "    return jsi::Value(${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
                 prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "    return jsi::Value(${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
-                prop.type == "kotlin.Long" -> "    return jsi::Value((double)${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
+                prop.type == "kotlin.Long" -> "    return rdmaLongToJs(r, (long long)${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
                 else -> "    void* h = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n    return create${rdmaClassByName(prop.type, allClasses)?.className ?: "?"}Wrapper(r, h);\n"
             }
             out.write("""static jsi::Value ${info.className}_$getterName(jsi::Runtime& r, const jsi::Value& thisVal) {
@@ -287,7 +289,7 @@ $body}
                     isEnumType(prop.type) -> { argBlock = ""; argExpr = "args[0].getString(r).utf8(r).c_str()" }
                     prop.type == "kotlin.Int" -> { argBlock = ""; argExpr = "(int32_t)args[0].getNumber()" }
                     prop.type == "kotlin.Boolean" -> { argBlock = ""; argExpr = "args[0].getBool()" }
-                    prop.type == "kotlin.Long" -> { argBlock = ""; argExpr = "(int64_t)args[0].getNumber()" }
+                    prop.type == "kotlin.Long" -> { argBlock = ""; argExpr = "rdmaCheckedJLong(r, args[0])" }
                     prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> { argBlock = ""; argExpr = "args[0].getNumber()" }
                     else -> {
                         argBlock = "    void* v = nullptr;\n" +
@@ -374,7 +376,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                         when (param.type) {
                             "kotlin.Int" -> "(int32_t)args[$idx].getNumber();"
                             "kotlin.Boolean" -> "args[$idx].getBool();"
-                            "kotlin.Long" -> "(int64_t)args[$idx].getNumber();"
+                            "kotlin.Long" -> "rdmaCheckedJLong(r, args[$idx]);"
                             "kotlin.Double", "kotlin.Float" -> "args[$idx].getNumber();"
                             else -> "nullptr;"
                         } + " }\n")
@@ -402,7 +404,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                     method.returnType == "kotlin.Int" -> "    return jsi::Value((double)jret);\n"
                     method.returnType == "kotlin.Boolean" -> "    return jsi::Value(jret);\n"
                     method.returnType == "kotlin.Double" || method.returnType == "kotlin.Float" -> "    return jsi::Value(jret);\n"
-                    method.returnType == "kotlin.Long" -> "    return jsi::Value((double)jret);\n"
+                    method.returnType == "kotlin.Long" -> "    return rdmaLongToJs(r, (long long)jret);\n"
                     else -> {
                         val rdma = rdmaClassByName(method.returnType, allClasses)
                         if (rdma != null) "    return create${rdma.className}Wrapper(r, jret);\n"
@@ -511,7 +513,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                         when (param.type) {
                             "kotlin.Int" -> "(int32_t)args[$idx].getNumber();"
                             "kotlin.Boolean" -> "args[$idx].getBool();"
-                            "kotlin.Long" -> "(int64_t)args[$idx].getNumber();"
+                            "kotlin.Long" -> "rdmaCheckedJLong(rt, args[$idx]);"
                             "kotlin.Double", "kotlin.Float" -> "args[$idx].getNumber();"
                             else -> "nullptr;"
                         } + " }\n")
@@ -893,7 +895,7 @@ $nsClose} // namespace rdma
                         val expr = when (ty.fqn) {
                             "kotlin.Int" -> "(int32_t)args[$idx].getNumber()"
                             "kotlin.Boolean" -> "args[$idx].getBool()"
-                            "kotlin.Long" -> "(int64_t)args[$idx].getNumber()"
+                            "kotlin.Long" -> "rdmaCheckedJLong(r, args[$idx])"
                             else -> "args[$idx].getNumber()"
                         }
                         val decl = "$cType cpp_${p.name}"
@@ -1006,15 +1008,18 @@ $nsClose} // namespace rdma
         "kotlin.String" -> "jsi::String::createFromUtf8(r, $expr);"
         "kotlin.Int" -> "jsi::Value((double)$expr);"
         "kotlin.Boolean" -> "jsi::Value($expr);"
-        "kotlin.Long" -> "jsi::Value((double)$expr);"
+        "kotlin.Long" -> "rdmaLongToJs(r, (long long)$expr);"
         else -> "jsi::Value($expr);"
     }
 
+    // Renders a `RdmaTypeRef` as a type descriptor (docs/design/type_descriptors.md):
+    // leaves carry the `?`/`!` marks, nesting goes through the shared grammar builder.
+    // Keep in lockstep with `CppGenerator.typeName` — same grammar on both backends.
     private fun typeName(t: RdmaTypeRef): String = when (val ty = t.type) {
-        is RdmaType.Primitive -> ty.fqn
-        is RdmaType.Ref -> ty.fqn
-        is RdmaType.ListType -> "list:" + typeName(ty.element)
-        is RdmaType.MapType -> "map:" + typeName(ty.key) + ":" + typeName(ty.value)
+        is RdmaType.Primitive -> RdmaTypeDescFormat.leaf(ty.fqn, t.nullable)
+        is RdmaType.Ref -> RdmaTypeDescFormat.leaf(ty.fqn, t.nullable, isEnumType(ty.fqn))
+        is RdmaType.ListType -> RdmaTypeDescFormat.list(typeName(ty.element))
+        is RdmaType.MapType -> RdmaTypeDescFormat.map(typeName(ty.key), typeName(ty.value))
         is RdmaType.UnitType -> "kotlin.Unit"
         is RdmaType.FunctionType -> "kotlin.Any"
     }
@@ -1102,7 +1107,7 @@ $nsClose} // namespace rdma
                     val expr = when (ty.fqn) {
                         "kotlin.Int" -> "(int32_t)args[$argIdx].getNumber()"
                         "kotlin.Boolean" -> "args[$argIdx].getBool()"
-                        "kotlin.Long" -> "(int64_t)args[$argIdx].getNumber()"
+                        "kotlin.Long" -> "rdmaCheckedJLong(r, args[$argIdx])"
                         else -> "args[$argIdx].getNumber()"
                     }
                     sb.append("    $cType cpp_${p.name} = $zero;\n")
@@ -1179,7 +1184,7 @@ $nsClose} // namespace rdma
             val expr = when (p.type) {
                 "kotlin.Int" -> "(int32_t)args[$argIdx].getNumber()"
                 "kotlin.Boolean" -> "args[$argIdx].getBool()"
-                "kotlin.Long" -> "(int64_t)args[$argIdx].getNumber()"
+                "kotlin.Long" -> "rdmaCheckedJLong(r, args[$argIdx])"
                 else -> "args[$argIdx].getNumber()"
             }
             sb.append("    $cType cpp_${p.name} = $zero;\n")
@@ -1236,8 +1241,8 @@ $nsClose} // namespace rdma
 """
 
     private fun methodTypeDesc(m: MethodInfo): String = when {
-        m.isList -> "list:${m.listElementType ?: "kotlin.Any"}"
-        m.isMap -> "map:${m.mapKeyType ?: "kotlin.Any"}:${m.mapValueType ?: "kotlin.Any"}"
+        m.isList -> RdmaTypeDescFormat.list(m.listElementType ?: "kotlin.Any")
+        m.isMap -> RdmaTypeDescFormat.map(m.mapKeyType ?: "kotlin.Any", m.mapValueType ?: "kotlin.Any")
         else -> m.returnType
     }
 
@@ -1251,7 +1256,7 @@ $nsClose} // namespace rdma
             isEnumType(static.type) -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::String::createFromUtf8(r, jret);\n"
             static.type == "kotlin.Int" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value((double)jret);\n"
             static.type == "kotlin.Boolean" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value(jret);\n"
-            static.type == "kotlin.Long" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value((double)jret);\n"
+            static.type == "kotlin.Long" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return rdmaLongToJs(r, (long long)jret);\n"
             isObjectRef(static.type) -> {
                 val rdma = rdmaClassByName(static.type, allClasses)
                 if (rdma != null) "    void* jret = $call;\n    checkKotlinError(r);\n    return create${rdma.className}Wrapper(r, jret);\n"

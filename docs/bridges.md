@@ -132,6 +132,13 @@ plugin only ever touches it through a `StateProxyHost` (`get_value`/`set_value`)
 How those two operations run differs, and this is the subtlest part of the
 bridge:
 
+- **Value typing** — the proxy is structurally erased (one `get_value`/`set_value`
+  pair for every state), so values marshal by the **type descriptor** registered at
+  state creation from the call site's static type, never by JS value shape
+  ([type_descriptors.md](design/type_descriptors.md)). A write that does not fit the
+  descriptor raises a cross-runtime `RdmaException`; `null` is accepted as a value on
+  a nullable state and rejected on a non-nullable one.
+
 - **Creation and reads** must happen on the UI thread inside the active
   composition snapshot. `RDMA.mutableStateOf` and `StateProxyHost.get_value`
   therefore marshal to the UI thread during composition (a blocking
@@ -155,6 +162,14 @@ The reason writes cannot just reuse the blocking `rdmaCallUi`: an async callback
 runs on the Hermes thread while the UI thread is *not* in a rendezvous, so a
 blocking JS→UI call there is illegal (and is asserted against). Writes are
 therefore posted to the main queue instead.
+
+- **Snapshot collections** — `mutableStateListOf` / `mutableStateMapOf` create a
+  kernel `SnapshotStateList` / `SnapshotStateMap` and hand the plugin the regular
+  collection proxy over it ([collections.md](design/collections.md)). Mutations
+  through the proxy run the snapshot mutators, so they schedule a recomposition by
+  themselves. A plain collection stored in `mutableStateOf` has ordinary value
+  semantics: mutating it in place does not recompose — assign a new value (see
+  [type_descriptors.md](design/type_descriptors.md#state-semantics)).
 
 ## Async callbacks and lambdas
 

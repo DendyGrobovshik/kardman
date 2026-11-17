@@ -138,13 +138,19 @@ import kotlinx.coroutines.launch
 external object RDMA {
     fun registerContent(content: dynamic, pluginId: String)
     fun setComposerEmpty(empty: Any)
-    fun mutableStateOf(value: dynamic): dynamic
+    fun mutableStateOf(value: dynamic, typeDesc: String): dynamic
+    fun mutableStateListOf(elements: dynamic, typeDesc: String): dynamic
+    fun mutableStateMapOf(entries: dynamic, typeDesc: String): dynamic
     fun registerBlock(block: dynamic, pluginId: String): dynamic
     fun sideEffect(blockId: dynamic)
     fun disposableEffect(keys: dynamic, effectFn: dynamic)
     var listKind: ((dynamic) -> Int)?
     var mapKind: ((dynamic) -> Int)?
     var mapToEntries: ((dynamic) -> dynamic)?
+    var longToParts: ((dynamic) -> dynamic)?
+    var longFromParts: ((Int, Int) -> dynamic)?
+    var listMethodNames: (() -> dynamic)?
+    var mapMethodNames: (() -> dynamic)?
 }
 
 fun rdmaListKind(value: Any?): Int = when {
@@ -171,6 +177,39 @@ fun rdmaMapToEntries(value: Any?): dynamic {
     return out
 }
 
+// `Long` crossings (docs/design/type_descriptors.md#long-policy): a Kotlin/JS `Long`
+// is a `Long(low, high)` object, not a JS number. The C++ boundary asks these two
+// converters for its exact halves (and for a Long built from halves), so every Long
+// keeps all 64 bits in both directions and plugin-side Long arithmetic keeps
+// working on returned values. Returns `null` for values that are not a `Long` —
+// the boundary turns that into a loud type error, never a coercion.
+fun rdmaLongToParts(value: Any?): dynamic {
+    if (value !is Long) return null
+    return arrayOf(value.toInt(), (value shr 32).toInt())
+}
+
+fun rdmaLongFromParts(low: Int, high: Int): dynamic {
+    val v: Long = (high.toLong() shl 32) or (low.toLong() and 0xFFFFFFFFL)
+    return v.asDynamic()
+}
+
+// Kotlin/JS spells stdlib collection methods with compile-mangled suffixes (an
+// `add`/`get`-style name plus a signature hash). The kernel-created collection
+// proxies carry plain method names and must forward the mangled spellings too —
+// this bridge (compiled by the same toolchain as the plugin) discovers the exact
+// spellings from its own stdlib instances and hands them to the C++ boundary,
+// which installs the plain and mangled-name aliases (docs/design/collections.md).
+fun rdmaListMethodNames(): dynamic {
+    val sample = arrayListOf<Any?>()
+    val iteratorSample = sample.iterator()
+    return js("(function(l,it){var out=[];var seen={};var push=function(s){for(var p=Object.getPrototypeOf(s);p!=null;p=Object.getPrototypeOf(p)){Object.getOwnPropertyNames(p).forEach(function(n){if(!seen[n]){seen[n]=1;out.push(n);}});}};push(l);push(it);return out;})(sample, iteratorSample)")
+}
+
+fun rdmaMapMethodNames(): dynamic {
+    val sample = linkedMapOf<Any?, Any?>()
+    return js("(function(s){var out=[];var seen={};for(var p=Object.getPrototypeOf(s);p!=null;p=Object.getPrototypeOf(p)){Object.getOwnPropertyNames(p).forEach(function(n){if(!seen[n]){seen[n]=1;out.push(n);}});}return out;})(sample)")
+}
+
 // Installs the collection classifiers on the RDMA bridge. Top-level `val`
 // initializers run in the module init block (before `main`), but Kotlin/JS DCE
 // removes an unreferenced private val; keep it public and reference it from
@@ -179,20 +218,34 @@ val rdmaListKindInstalled = run {
     RDMA.listKind = { value: dynamic -> rdmaListKind(value) }
     RDMA.mapKind = { value: dynamic -> rdmaMapKind(value) }
     RDMA.mapToEntries = { value: dynamic -> rdmaMapToEntries(value) }
+    RDMA.longToParts = { value: dynamic -> rdmaLongToParts(value) }
+    RDMA.longFromParts = { low: Int, high: Int -> rdmaLongFromParts(low, high) }
+    RDMA.listMethodNames = { -> rdmaListMethodNames() }
+    RDMA.mapMethodNames = { -> rdmaMapMethodNames() }
     Unit
 }
 
-fun rdmaMutableStateOf(value: Int): MutableState<Int> =
-    RDMA.mutableStateOf(value).unsafeCast<MutableState<Int>>()
+// State values cross through an erased channel that is typed by the descriptor the
+// compiler bakes into the call site (docs/design/type_descriptors.md); the generic
+// signature infers `T` from the argument so `var x by ...` keeps its static type.
+fun <T> rdmaMutableStateOf(value: T, typeDesc: String): MutableState<T> =
+    RDMA.mutableStateOf(value, typeDesc).unsafeCast<MutableState<T>>()
 
-fun rdmaMutableStateOf(value: Boolean): MutableState<Boolean> =
-    RDMA.mutableStateOf(value).unsafeCast<MutableState<Boolean>>()
+fun <T> rdmaMutableIntStateOf(value: T, typeDesc: String): MutableState<T> =
+    RDMA.mutableStateOf(value, typeDesc).unsafeCast<MutableState<T>>()
 
-fun rdmaMutableStateOf(value: String): MutableState<String> =
-    RDMA.mutableStateOf(value).unsafeCast<MutableState<String>>()
+// Snapshot collections: the kernel creates a `SnapshotStateList`/`SnapshotStateMap`
+// from the given values and hands back a proxy over it, so mutations schedule a
+// recomposition (docs/design/type_descriptors.md#state-semantics).
+fun <T> rdmaMutableStateListOf(vararg elements: T, typeDesc: String): MutableList<T> {
+    rdmaListKindInstalled
+    return RDMA.mutableStateListOf(arrayListOf(*elements), typeDesc).unsafeCast<MutableList<T>>()
+}
 
-fun rdmaMutableIntStateOf(value: Int): MutableState<Int> =
-    RDMA.mutableStateOf(value).unsafeCast<MutableState<Int>>()
+fun <K, V> rdmaMutableStateMapOf(vararg pairs: Pair<K, V>, typeDesc: String): MutableMap<K, V> {
+    rdmaListKindInstalled
+    return RDMA.mutableStateMapOf(linkedMapOf(*pairs), typeDesc).unsafeCast<MutableMap<K, V>>()
+}
 
 fun rdmaSideEffect(block: () -> Unit) {
     RDMA.sideEffect(RDMA.registerBlock(block, "$pluginId"))

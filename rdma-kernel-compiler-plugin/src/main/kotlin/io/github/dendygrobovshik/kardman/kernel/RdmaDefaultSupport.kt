@@ -63,6 +63,37 @@ object RdmaDefaultSupport {
     fun defaultValuesFromFunctionSource(source: String, startOffset: Int, endOffset: Int): Map<Int, String> =
         defaultValuesFromDecl(source, startOffset, endOffset, "fun ")
 
+    /**
+     * Recovers each parameter's DECLARED nullability from the source parameter list
+     * (`text: String` -> false, `title: String?` -> true). The compose lowering widens
+     * defaulted parameter types to nullable in the IR, so the IR type cannot be
+     * trusted for this: the widget's real contract is the source declaration.
+     * Returns a map from parameter index to the declared nullability.
+     */
+    fun declaredNullableFromDecl(source: String, startOffset: Int, endOffset: Int, keyword: String): Map<Int, Boolean> {
+        val start = startOffset.coerceAtLeast(0)
+        val kwIdx = source.indexOf(keyword, start)
+        if (kwIdx < 0 || kwIdx > endOffset) return emptyMap()
+        val open = source.indexOf('(', kwIdx)
+        if (open < 0 || open > endOffset) return emptyMap()
+        val close = matchingParen(source, open) ?: return emptyMap()
+        val params = splitParams(source.substring(open + 1, close))
+        val result = mutableMapOf<Int, Boolean>()
+        params.forEachIndexed { i, p ->
+            val eq = topLevelIndex(p, '=')
+            val typeText = if (eq >= 0) p.substring(0, eq) else p
+            val colon = topLevelIndex(typeText, ':')
+            if (colon >= 0) {
+                result[i] = typeText.substring(colon + 1).trim().endsWith('?')
+            }
+        }
+        return result
+    }
+
+    /** Convenience for top-level functions and methods: locates the `fun <name>(…)` parameter list. */
+    fun declaredNullableFromFunctionSource(source: String, startOffset: Int, endOffset: Int): Map<Int, Boolean> =
+        declaredNullableFromDecl(source, startOffset, endOffset, "fun ")
+
     /** Splits a parameter list on top-level commas (nested `()`, `<>`, `[]`, and `->` arrows do not split). */
     fun splitParams(s: String): List<String> {
         val params = mutableListOf<String>()

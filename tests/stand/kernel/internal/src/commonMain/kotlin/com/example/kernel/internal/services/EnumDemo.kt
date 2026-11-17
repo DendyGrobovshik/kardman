@@ -45,6 +45,9 @@ suspend fun echoMethodSuspend(method: HttpMethod): HttpMethod {
 }
 
 @RDMA
+fun echoMethodList(list: List<HttpMethod>): List<HttpMethod> = list
+
+@RDMA
 fun defaultMethod(): HttpMethod = HttpMethod.POST
 
 @RDMA

@@ -66,6 +66,24 @@ static jobject jsiToJobject(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm,
         jsi::Object obj = v.asObject(rt);
         return materializeMap(env, rt, jvm, obj, kv.first, kv.second);
     }
+    // Scalar/enum leaves follow the descriptor's declared type (the `?`/`!` marks
+    // stripped), NOT the value's shape — same descriptor-first order as the C-ABI
+    // `jsiToHandle`, so the two backends cannot drift. `Long`/`Double`/`Float`
+    // keep their boxing class instead of degrading to Integer, and a value that
+    // does not fit raises instead of being coerced
+    // (docs/design/type_descriptors.md). An enum-marked leaf (`MyEnum!`) rebuilds
+    // the entry via `valueOf` — otherwise the name string would silently become a
+    // `java.lang.String` rather than the enum entry (docs/types.md).
+    std::string fqn = elementType.substr(0, elementType.find_first_of("?!"));
+    bool isEnum = elementType.find('!') != std::string::npos;
+    if (isEnum) {
+        return rdmaBoxEnumValue(env, rt, v, fqn);
+    }
+    if (fqn == "kotlin.Int" || fqn == "kotlin.Long" || fqn == "kotlin.Double" ||
+        fqn == "kotlin.Float" || fqn == "kotlin.Boolean" || fqn == "kotlin.String") {
+        return rdmaBoxLeafValue(env, rt, v, fqn);
+    }
+    // `@RDMA` class leaf: reuse the kernel object behind the plugin-side wrapper.
     if (v.isObject()) {
         jsi::Object eo = v.asObject(rt);
         if (eo.hasNativeState(rt)) {
@@ -77,10 +95,13 @@ static jobject jsiToJobject(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm,
         }
         return nullptr;
     }
+    // Unknown leaves keep the runtime-dispatch boxer (pre-descriptor behavior,
+    // e.g. callback-id lists) — the same fallback as the C-ABI `jsiToHandle`.
     return boxJsi(env, rt, v);
 }
 
-// Wraps a JVM list element into a JS value. Caller owns the local reference `element`.
+// Wraps a JVM list element into a JS value. **Consumes** the caller's local
+// reference `element` (both branches release it) — callers must not delete it.
 static jsi::Value wrapListElement(jsi::Runtime& r, JavaVM* jvm, jobject element, const std::string& elementType) {
     if (!element) return jsi::Value::null();
     JNIEnv* env = getEnv(jvm);
@@ -110,8 +131,58 @@ static std::shared_ptr<ListNativeState> listStateOf(jsi::Runtime& r, const jsi::
     return std::static_pointer_cast<ListNativeState>(obj.getNativeState(r));
 }
 
-void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject globalListRef, const std::string& elementType) {
+// Kotlin/JS mangled-name aliasing (implemented below, next to morphArrayList).
+static void installListMangledForwards(jsi::Runtime& rt, jsi::Object& obj, const std::vector<std::string>& names);
+static std::vector<std::string> listMangledNamesOf(jsi::Runtime& rt);
+static void installIteratorMangledForwards(jsi::Runtime& rt, jsi::Object& it, const std::vector<std::string>& names);
+
+// For a state-backed handle (a kernel `SnapshotStateList`, see ListNativeState) an
+// operation during composition first touches the list's structural state on the UI
+// thread so Compose's snapshot read observer records the dependency — without this,
+// mutations through the proxy would not schedule a recomposition
+// (docs/design/type_descriptors.md#state-semantics). Writes themselves run directly:
+// the JVM snapshot system is thread-safe (the same contract as state `set_value`).
+static void touchCompositionRead(const std::shared_ptr<ListNativeState>& state) {
+    if (!g_inComposition) return;
+    rdmaCallUi([state]() -> RdmaResult {
+        JNIEnv* e = getEnv(state->jvm_);
+        if (!e) return RdmaResult::undefined();
+        jclass cls = e->GetObjectClass(state->globalListRef_);
+        jmethodID sizeMethod = e->GetMethodID(cls, "size", "()I");
+        e->CallIntMethod(state->globalListRef_, sizeMethod);
+        RdmaResult err;
+        if (captureJniError(e, err)) { e->DeleteLocalRef(cls); return err; }
+        e->DeleteLocalRef(cls);
+        return RdmaResult::undefined();
+    });
+}
+
+// Wraps every method of a state-backed proxy so each call registers the composition
+// read first (see touchCompositionRead). The `size` property derives from
+// `sizeImpl`, so listing the method names covers it too.
+static void wrapStateBackedReads(jsi::Runtime& rt, jsi::Object& obj, const std::shared_ptr<ListNativeState>& state) {
+    static const char* kNames[] = {
+        "get", "set", "add", "removeAt", "remove", "removeRange", "removeAll", "retainAll", "addAll",
+        "clear", "sizeImpl", "isEmpty", "contains", "indexOf", "lastIndexOf", "toArray", "toString",
+        "iterator", "subList",
+    };
+    for (const char* name : kNames) {
+        if (!obj.hasProperty(rt, name)) continue;
+        jsi::Value fn = obj.getProperty(rt, name);
+        if (!fn.isObject() || !fn.asObject(rt).isFunction(rt)) continue;
+        auto inner = std::make_shared<jsi::Function>(fn.asObject(rt).asFunction(rt));
+        auto wrapped = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, name), 0,
+            [inner, state](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                touchCompositionRead(state);
+                return inner->callWithThis(r, thisVal.asObject(r), args, count);
+            });
+        obj.setProperty(rt, name, std::move(wrapped));
+    }
+}
+
+void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject globalListRef, const std::string& elementType, bool stateBacked) {
     auto ns = std::make_shared<ListNativeState>(jvm, globalListRef, elementType);
+    ns->stateBacked_ = stateBacked;
     obj.setNativeState(rt, ns);
 
     auto getFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "get"), 1,
@@ -140,8 +211,10 @@ void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject
             jobject value = jsiToJobject(env, r, jvm, args[1], state->elementType_);
             jclass listCls = env->GetObjectClass(state->globalListRef_);
             jmethodID setMethod = env->GetMethodID(listCls, "set", "(ILjava/lang/Object;)Ljava/lang/Object;");
-            env->CallObjectMethod(state->globalListRef_, setMethod, index, value);
-            return jsi::Value::undefined();
+            jobject old = env->CallObjectMethod(state->globalListRef_, setMethod, index, value);
+            // Kotlin `MutableList.set` returns the previous element — return it, not
+            // undefined. `wrapListElement` consumes the `old` local reference.
+            return wrapListElement(r, jvm, old, state->elementType_);
         });
     obj.setProperty(rt, "set", std::move(setFn));
 
@@ -180,8 +253,9 @@ void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject
             jclass listCls = env->GetObjectClass(state->globalListRef_);
             jmethodID removeMethod = env->GetMethodID(listCls, "remove", "(I)Ljava/lang/Object;");
             jobject removed = env->CallObjectMethod(state->globalListRef_, removeMethod, index);
-            if (removed) env->DeleteLocalRef(removed);
-            return jsi::Value::undefined();
+            // Kotlin `MutableList.removeAt` returns the removed element — return it, not
+            // undefined. `wrapListElement` consumes the `removed` local reference.
+            return wrapListElement(r, jvm, removed, state->elementType_);
         });
     obj.setProperty(rt, "removeAt", std::move(removeAtFn));
 
@@ -408,6 +482,11 @@ void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject
             };
             it.setNativeState(r, std::make_shared<ItState>(jvm, listRef));
 
+            // Kotlin consumers call the iterator through the compile-mangled
+            // protocol (docs/design/collections.md); the spellings come from the
+            // same guest-bridge discovery as the list itself.
+            installIteratorMangledForwards(r, it, listMangledNamesOf(r));
+
             return it;
         });
     obj.setProperty(rt, "iterator", std::move(iteratorFn));
@@ -537,6 +616,37 @@ void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject
         });
     obj.setProperty(rt, "retainAll", std::move(retainAllFn));
 
+    // `containsAll` had no plain implementation (audit #10): its mangled spelling
+    // (`containsAll_..._k$`) silently dropped. Delegate to `java.util.List.containsAll`
+    // over the argument converted into a JVM Collection.
+    auto containsAllFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "containsAll"), 1,
+        [jvm](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 1 || !args[0].isObject()) return jsi::Value(false);
+            JNIEnv* env = getEnv(jvm);
+            if (!env) return jsi::Value::undefined();
+            auto thisObj = thisVal.asObject(r);
+            auto state = listStateOf(r, thisObj);
+            auto srcObj = args[0].asObject(r);
+            jobject collection = nullptr;
+            bool borrowed = false;
+            if (srcObj.hasNativeState(r)) {
+                auto s = std::dynamic_pointer_cast<ListNativeState>(srcObj.getNativeState(r));
+                if (s) { collection = s->globalListRef_; borrowed = true; }
+            }
+            if (!collection) collection = materializeArray(env, r, jvm, srcObj, state->elementType_);
+            jclass listCls = env->GetObjectClass(state->globalListRef_);
+            jmethodID containsAllMethod = env->GetMethodID(listCls, "containsAll", "(Ljava/util/Collection;)Z");
+            jboolean has = env->CallBooleanMethod(state->globalListRef_, containsAllMethod, collection);
+            if (!borrowed && collection) env->DeleteGlobalRef(collection);
+            return jsi::Value(has == JNI_TRUE);
+        });
+    obj.setProperty(rt, "containsAll", std::move(containsAllFn));
+
+    // Kotlin/JS typed calls arrive as compile-mangled names; the guest bridge knows
+    // the exact spellings for this toolchain (docs/design/collections.md).
+    if (stateBacked) wrapStateBackedReads(rt, obj, ns);
+    installListMangledForwards(rt, obj, listMangledNamesOf(rt));
+
     rt.global().setProperty(rt, "__rdma_list", jsi::Value(rt, obj));
     rt.evaluateJavaScript(std::make_shared<jsi::StringBuffer>(
         "Object.defineProperty(globalThis.__rdma_list, 'size', {"
@@ -547,15 +657,101 @@ void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject
     rt.global().setProperty(rt, "__rdma_list", jsi::Value::undefined());
 }
 
-// Installs a wrapper on `obj` under `mangledName` that forwards to `plainName`.
-static void forwardMangled(jsi::Runtime& rt, jsi::Object& obj, const std::string& mangledName, const std::string& plainName) {
-    auto fn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, mangledName.c_str()), 2,
-        [plainName](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            auto target = thisVal.asObject(r).getProperty(r, plainName.c_str());
-            if (!target.isObject() || !target.asObject(r).isFunction(r)) return jsi::Value::undefined();
-            return target.asObject(r).asFunction(r).callWithThis(r, thisVal.asObject(r), args, count);
-        });
-    obj.setProperty(rt, mangledName.c_str(), std::move(fn));
+// A Kotlin/JS typed call site emits the compile-mangled method name (`add_1x7w2j_k$`).
+// Alias it directly to the plain host function already installed on `obj` — no wrapper,
+// no per-call `getProperty`: the alias always invokes whatever sits in the `plainName`
+// slot today (whether the plain install or a later `wrapStateBackedReads` overwrite).
+// A missing plain target is a loud install-time error (no quiet correctness hole).
+// (docs/design/type_descriptors.md).
+static void aliasMangled(jsi::Runtime& rt, jsi::Object& obj, const std::string& mangledName, const std::string& plainName) {
+    jsi::Value target = obj.getProperty(rt, plainName.c_str());
+    if (!target.isObject() || !target.asObject(rt).isFunction(rt)) {
+        throw jsi::JSError(rt, std::string("collection proxy: no implementation for '") + plainName + "'");
+    }
+    obj.setProperty(rt, mangledName.c_str(), std::move(target));
+}
+
+// Kotlin/JS spells stdlib list methods with compile-mangled suffixes
+// (`add_1x7w2j_k$`, `get_size_...`); the mapping below forwards them to the plain
+// implementations installed by `populateListHandle`. Both shapes of names feed the
+// SAME table so the morphed-plugin and kernel-created paths cannot drift: morphing
+// reads them from a live Kotlin list's prototype, kernel-created proxies from the
+// guest bridge (`RDMA.listMethodNames`, compiled with the plugin).
+static void installListMangledForwards(jsi::Runtime& rt, jsi::Object& obj, const std::vector<std::string>& names) {
+    static const std::pair<const char*, const char*> kTable[] = {
+        {"get_size_", "sizeImpl"},
+        {"get_", "get"},
+        {"set_", "set"},
+        {"add_", "add"},
+        {"removeAt_", "removeAt"},
+        {"removeRange_", "removeRange"},
+        {"removeAll_", "removeAll"},
+        {"retainAll_", "retainAll"},
+        {"addAll_", "addAll"},
+        {"clear_", "clear"},
+        {"toArray", "toArray"},
+        {"remove_", "remove"},
+        {"containsAll_", "containsAll"},
+        {"contains_", "contains"},
+        {"indexOf_", "indexOf"},
+        {"lastIndexOf_", "lastIndexOf"},
+        {"isEmpty_", "isEmpty"},
+        {"iterator", "iterator"},
+        {"subList_", "subList"},
+    };
+    for (const std::string& name : names) {
+        for (const auto& entry : kTable) {
+            if (name.rfind(entry.first, 0) == 0) {
+                aliasMangled(rt, obj, name, entry.second);
+                break;
+            }
+        }
+    }
+}
+
+// Mangled list method spellings discovered by the guest bridge
+// (`RDMA.listMethodNames`). Cached per runtime once discovered.
+static std::vector<std::string> listMangledNamesOf(jsi::Runtime& rt) {
+    static std::vector<std::string> cached;
+    static bool computed = false;
+    if (computed) return cached;
+    auto rdma = rt.global().getProperty(rt, "RDMA");
+    if (!rdma.isObject()) return cached;
+    auto fn = rdma.asObject(rt).getProperty(rt, "listMethodNames");
+    if (!fn.isObject() || !fn.asObject(rt).isFunction(rt)) return cached;
+    jsi::Value res = fn.asObject(rt).asFunction(rt).call(rt);
+    if (!res.isObject() || !res.asObject(rt).isArray(rt)) return cached;
+    jsi::Array arr = res.asObject(rt).getArray(rt);
+    size_t n = arr.size(rt);
+    std::vector<std::string> out;
+    for (size_t i = 0; i < n; i++) {
+        jsi::Value v = arr.getValueAtIndex(rt, i);
+        if (v.isString()) out.push_back(v.getString(rt).utf8(rt));
+    }
+    if (!out.empty()) {
+        cached = out;
+        computed = true;
+    }
+    return cached;
+}
+
+// The iterator objects handed out by the plain `iterator` implementation speak the
+// same compile-mangled Kotlin protocol (`hasNext_...`/`next_...`) — install the
+// aliases for those spellings too, from the same discovered name set.
+static void installIteratorMangledForwards(jsi::Runtime& rt, jsi::Object& it, const std::vector<std::string>& names) {
+    static const std::pair<const char*, const char*> kTable[] = {
+        {"hasNext_", "hasNext"},
+        {"next_", "next"},
+        {"remove_", "remove"},
+    };
+    for (const std::string& name : names) {
+        for (const auto& entry : kTable) {
+            if (name.rfind(entry.first, 0) == 0) {
+                aliasMangled(rt, it, name, entry.second);
+                break;
+            }
+        }
+    }
 }
 
 void morphArrayList(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, const std::string& elementType) {
@@ -565,35 +761,26 @@ void morphArrayList(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, const std::
     jsi::Object proto = getPrototypeOf.call(rt, jsi::Value(rt, obj)).asObject(rt);
 
     auto state = listStateOf(rt, obj);
-    auto names = proto.getPropertyNames(rt);
-    size_t n = names.size(rt);
+    auto nameArray = proto.getPropertyNames(rt);
+    size_t n = nameArray.size(rt);
+    std::vector<std::string> names;
+    names.reserve(n);
     for (size_t i = 0; i < n; i++) {
-        std::string name = names.getValueAtIndex(rt, i).getString(rt).utf8(rt);
+        names.push_back(nameArray.getValueAtIndex(rt, i).getString(rt).utf8(rt));
+    }
+    for (const std::string& name : names) {
         if (name.rfind("checkIsMutable_", 0) == 0) {
             state->checkIsMutable_ = name;
-        } else if (name.rfind("get_size_", 0) == 0) {
-            forwardMangled(rt, obj, name, "sizeImpl");
-        } else if (name.rfind("get_", 0) == 0) {
-            forwardMangled(rt, obj, name, "get");
-        } else if (name.rfind("set_", 0) == 0) {
-            forwardMangled(rt, obj, name, "set");
-        } else if (name.rfind("add_", 0) == 0) {
-            forwardMangled(rt, obj, name, "add");
-        } else if (name.rfind("removeAt_", 0) == 0) {
-            forwardMangled(rt, obj, name, "removeAt");
-        } else if (name.rfind("removeRange_", 0) == 0) {
-            forwardMangled(rt, obj, name, "removeRange");
-        } else if (name.rfind("clear_", 0) == 0) {
-            forwardMangled(rt, obj, name, "clear");
-        } else if (name.rfind("toArray", 0) == 0) {
-            forwardMangled(rt, obj, name, "toArray");
         }
     }
+    // Same mangled-alias table as kernel-created proxies (see
+    // installListMangledForwards) — the two paths cannot drift.
+    installListMangledForwards(rt, obj, names);
 }
 
-jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType) {
+jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType, bool stateBacked) {
     auto listObj = jsi::Object(rt);
-    populateListHandle(rt, jvm, listObj, globalListRef, elementType);
+    populateListHandle(rt, jvm, listObj, globalListRef, elementType, stateBacked);
     return listObj;
 }
 

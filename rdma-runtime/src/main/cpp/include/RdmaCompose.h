@@ -25,6 +25,7 @@
 #include "RdmaNativeState.h"
 #include "RdmaPlatform.h"
 #include "RdmaException.h"
+#include "RdmaJsLong.h"
 
 namespace facebook {
 namespace rdma {
@@ -46,6 +47,13 @@ struct ComposeJniCache {
     jmethodID mutableStateOf = nullptr;
     jmethodID structuralEqualityPolicy = nullptr;
 
+    // io.github.dendygrobovshik.kardman.runtime.RdmaStateFactory — snapshot
+    // collections backing for `mutableStateListOf`/`mutableStateMapOf`
+    // (docs/design/type_descriptors.md#state-semantics).
+    jclass stateFactory = nullptr;
+    jmethodID stateFactoryNewList = nullptr;
+    jmethodID stateFactoryNewMap = nullptr;
+
     jclass composerCompanion = nullptr;
     jmethodID getEmpty = nullptr;
     jfieldID composerCompanionField = nullptr;
@@ -60,6 +68,14 @@ struct ComposeJniCache {
     // boolean indicating whether the passed block id was adopted by a fresh
     // observer (used by the JSI bridge to release an unused block).
     jmethodID disposableEffect = nullptr;
+
+    // The app's context ClassLoader, captured at cache init (a Java-created thread).
+    // `FindClass` cannot see application classes on threads attached from native
+    // code (they resolve with the boot loader — see RdmaJni.cpp), so call-time
+    // lookups of app classes (e.g. `@RDMA` enum classes during descriptor
+    // marshalling, docs/design/type_descriptors.md) go through `loadClass`.
+    jobject appClassLoader = nullptr;
+    jmethodID classLoaderLoadClass = nullptr;
 
     jclass function2Class = nullptr;
     jclass scopeBlockClass = nullptr;
@@ -96,6 +112,9 @@ extern ComposeJniCache g_composeCache;
 // Hermes thread) to capture the composer into a UI-bound compose op. Owned by the
 // content/scope task (not by this global).
 extern jobject g_currentComposer;
+// True while plugin composition runs on this thread (proxy read registration for
+// state-backed handles, see ListHandle/MapHandle and docs/design/type_descriptors.md).
+extern thread_local bool g_inComposition;
 
 // Initializes all JNI caches required by the compose bridge, the composer proxy
 // and the user bridge. MUST run on the UI thread (app-class FindClass requires
@@ -187,6 +206,19 @@ RdmaExceptionInfo fromJniThrowable(JNIEnv* env, jthrowable t);
 // thread immediately after a Call*Method into host code.
 void checkAndThrowJs(JNIEnv* env, jsi::Runtime& rt);
 
+// Strict boxing for one descriptor leaf (flags stripped): `Int`/`Long`/`Double`/
+// `Float`/`Boolean`/`String` and `@RDMA` handles. Raises a cross-runtime error on
+// a value that does not fit the leaf instead of coercing (state writes and
+// collection element materialization share this path — docs/design/type_descriptors.md).
+jobject rdmaBoxLeafValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, const std::string& fqn);
+
+// Boxes the enum entry name string into the concrete JVM enum via the enum class's
+// `valueOf(String)`. `fqn` must be the enum class FQN (e.g. `com.example.HttpMethod`).
+// Returns the enum entry as a new local reference the caller owns. Raises a
+// cross-runtime error when `v` is not a string or `valueOf(String)` is not found.
+// Used by state writes and collection element materialization (docs/design/types.md).
+jobject rdmaBoxEnumValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, const std::string& fqn);
+
 // Captures a pending JNI exception into an Error result (returns false if none).
 // For UI-thread compose ops returning their result through RdmaResult.
 bool captureJniError(JNIEnv* e, RdmaResult& out);
@@ -195,7 +227,11 @@ bool captureJniError(JNIEnv* e, RdmaResult& out);
 // the given JS block id. Callable from any attached thread (uses cached jclass).
 jobject createRdmaFunction(JNIEnv* env, int arity, jlong id);
 
-jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal);
+// State proxy over a kernel `SnapshotMutableState`, typed by the channel's type
+// descriptor (docs/design/type_descriptors.md). Pre-descriptor plugin bundles call
+// `RDMA.mutableStateOf` without a descriptor and keep their old Int/Boolean/String
+// contract (`typeDesc` defaults to the runtime-dispatch `kotlin.Any`).
+jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal, const std::string& typeDesc = "kotlin.Any");
 
 jobject stateProxyJObject(jsi::Runtime& rt, const jsi::Value& v);
 

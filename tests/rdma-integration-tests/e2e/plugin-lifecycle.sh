@@ -34,6 +34,14 @@ NEWPLUG_SRC="$ROOT_DIR/tests/stand/plugin/itest/newplug/src/kotlin/com/example/p
 USER_ITEST_SRC="$ROOT_DIR/tests/stand/kernel/user/itest/src/commonMain/kotlin/com/example/kernel/user/itest/Itest.kt"
 ALICE_TAGLINE_SRC="$ROOT_DIR/tests/stand/kernel/user/alice/src/commonMain/kotlin/com/example/kernel/user/alice/Tagline.kt"
 
+# The exception crash-test plugins (itest/exceptions{,2}) throw through `content`
+# and kill the app; the lifecycle handshake below runs against a LIVE app
+# (broadcast re-sync + store delivery). They are temporarily opted out of the bake
+# (rdmaBakeInApp=false) and restored afterwards — the same mechanism
+# suspend-behavior.sh uses.
+EXCEPTIONS_1="$ROOT_DIR/tests/stand/plugin/itest/exceptions"
+EXCEPTIONS_2="$ROOT_DIR/tests/stand/plugin/itest/exceptions2"
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -57,6 +65,25 @@ wait_logcat() { # wait_logcat <tag> <substring>
 broadcast_resync() { # broadcast_resync <pluginId> <version> [builtAgainst]
     local id="$1" version="$2" builtAgainst="${3:-2}"
     adb shell am broadcast -a "$RESYNC_ACTION" --es pluginId "$id" --ei version "$version" --ei builtAgainst "$builtAgainst" >/dev/null
+}
+
+drop_exception_plugins() {
+    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_1/gradle.properties"
+    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_2/gradle.properties"
+}
+
+restore_exception_plugins() {
+    rm -f "$EXCEPTIONS_1/gradle.properties" "$EXCEPTIONS_2/gradle.properties"
+}
+
+# Steps 4/8 rewrite fixture kernel sources in-place (Itest/Tagline/NewPlug) to stage
+# store deliveries; un-restore they poison every later build in the repo. Restore the
+# pristine repo copies so this script keeps its "the repo is never mutated" promise.
+restore_fixture_sources() {
+    git -C "$ROOT_DIR" checkout -- \
+        tests/stand/kernel/user/alice/src/commonMain/kotlin/com/example/kernel/user/alice/Tagline.kt \
+        tests/stand/kernel/user/itest/src/commonMain/kotlin/com/example/kernel/user/itest/Itest.kt \
+        tests/stand/plugin/itest/newplug/src/kotlin/com/example/plugin/itest/NewPlug.kt
 }
 
 store_start() {
@@ -270,6 +297,11 @@ step_6_static_release_new_app() {
     run_gradle :tests:stand:androidApp:assembleDebug
     adb install -r "$ROOT_DIR/tests/stand/androidApp/build/outputs/apk/debug/androidApp-debug.apk"
     adb shell am force-stop "$APP_ID"
+    # The buffer must be cleared before launch: `wait_logcat` matches the buffer, and
+    # a stale "Runtime ready" from an earlier process would let the steps race ahead of
+    # the freshly started app (whose re-sync may not have drained its one-shot
+    # BundleLoadException yet).
+    adb logcat -c
     adb shell am start -n "$APP_ID/.MainActivity" >/dev/null
     wait_logcat "RDMA" "Runtime ready"
 }
@@ -324,6 +356,8 @@ step_9_manual_polyfill_delivered() {
 
 cleanup() {
     store_stop
+    restore_exception_plugins
+    restore_fixture_sources
     rm -rf "$IT_DIR"
 }
 trap cleanup EXIT
@@ -332,6 +366,7 @@ main() {
     adb_dev
     mkdir -p "$VERSIONS_DIR"
 
+    drop_exception_plugins
     store_start
 
     step_0_static_release

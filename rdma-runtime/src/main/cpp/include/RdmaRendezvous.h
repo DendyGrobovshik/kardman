@@ -43,9 +43,12 @@ enum class RdmaResultKind {
     Null,
     Bool,
     Number,
+    I64,        // a kernel `Long` value in all 64 bits (`i64`); JS side wraps it
+                // into the plugin's Long object (docs/design/type_descriptors.md#long-policy)
     String,
     StateRef,   // host handle to a MutableState (ownership transferred)
     ScopeRef,   // host handle to a ScopeUpdateScope (ownership transferred)
+    HostValue,  // boxed kernel value (ownership transferred) + type descriptor in `str`
     Empty,      // Compose `Companion.Empty`
     JsValueId,  // id into g_jsValues
     Error,      // the UI op threw a host exception (carried in `error`)
@@ -58,15 +61,29 @@ struct RdmaResult {
     std::string str;
     void* ref = nullptr; // host handle (jobject on Android, StableRef on Apple); ownership transferred to the JS thread
     int64_t id = 0;
+    int64_t i64 = 0; // kernel `Long` payload for the I64 kind
     RdmaExceptionInfo error; // for Error kind
 
     static RdmaResult undefined() { return RdmaResult{}; }
     static RdmaResult null() { RdmaResult r; r.kind = RdmaResultKind::Null; return r; }
     static RdmaResult boolean(bool v) { RdmaResult r; r.kind = RdmaResultKind::Bool; r.b = v; return r; }
     static RdmaResult number(double v) { RdmaResult r; r.kind = RdmaResultKind::Number; r.num = v; return r; }
+    // A kernel `Long` in all 64 bits; never squeezed through a double
+    // (docs/design/type_descriptors.md#long-policy).
+    static RdmaResult i64Value(int64_t v) { RdmaResult r; r.kind = RdmaResultKind::I64; r.i64 = v; return r; }
     static RdmaResult string(std::string v) { RdmaResult r; r.kind = RdmaResultKind::String; r.str = std::move(v); return r; }
-    static RdmaResult stateRef(void* v) { RdmaResult r; r.kind = RdmaResultKind::StateRef; r.ref = v; return r; }
+    // Host handle to a MutableState (ownership transferred). The state's value type
+    // descriptor rides in `str` so the proxy marshals writes/reads accordingly.
+    static RdmaResult stateRef(void* v, std::string typeDesc = "") {
+        RdmaResult r; r.kind = RdmaResultKind::StateRef; r.ref = v; r.str = std::move(typeDesc); return r;
+    }
     static RdmaResult scopeRef(void* v) { RdmaResult r; r.kind = RdmaResultKind::ScopeRef; r.ref = v; return r; }
+    // A boxed kernel value (jobject global ref on Android, StableRef on Apple) plus
+    // its type descriptor (`str`) — transported from the UI thread and marshalled
+    // by descriptor on the JS thread (docs/design/type_descriptors.md).
+    static RdmaResult hostValue(void* v, std::string typeDesc) {
+        RdmaResult r; r.kind = RdmaResultKind::HostValue; r.ref = v; r.str = std::move(typeDesc); return r;
+    }
     static RdmaResult empty() { RdmaResult r; r.kind = RdmaResultKind::Empty; return r; }
     static RdmaResult jsValueId(int64_t v) { RdmaResult r; r.kind = RdmaResultKind::JsValueId; r.id = v; return r; }
     static RdmaResult fromError(RdmaExceptionInfo e) { RdmaResult r; r.kind = RdmaResultKind::Error; r.error = std::move(e); return r; }};

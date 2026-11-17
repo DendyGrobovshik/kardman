@@ -36,7 +36,9 @@ allowed types below.
 ## Semantics
 
 - **Primitives** cross the boundary by copy. After the call, later mutations on one side
-  are not visible on the other.
+  are not visible on the other. `Long` crossing is always exact: it travels as the
+  plugin's 64-bit `Long` value (not a JS number), so it never rounds — see
+  [type_descriptors.md](design/type_descriptors.md#long-policy).
 - **`@RDMA` enum** crosses by copy as the entry's name string. Entry references in the
   plugin are rewritten to string literals (`HttpMethod.GET` -> `"GET"`), so `when`
   compiles to plain JS string equality against the kernel-returned name — no RDMA
@@ -66,6 +68,28 @@ allowed types below.
   the kernel receives its id and invokes it through JNI; a lambda's return value is
   marshaled exactly like a function's return value.
 - **Unit** is a return-only type (void).
+
+## State values
+
+A plugin `MutableState` is a kernel `SnapshotMutableState` reached through an erased
+proxy, so its value type is carried by a **type descriptor** baked at the call site
+rather than by the value itself (see [type_descriptors.md](design/type_descriptors.md)).
+Every allowed type above can be a state value: the primitives (nullable variants
+included), `@RDMA enum` (as name strings, `valueOf`-validated on write), `@RDMA`
+class references (the kernel object is kept alive by the state; no cross-runtime
+identity is implied), `List` and `Map` (plain collections, see below), and `Unit`
+is not.
+
+- **The static type must be concrete** — `mutableStateOf<Any?>(...)` or a `dynamic`
+  initial value is a compile error in the plugin.
+- **The type is fixed at creation.** A write of a value that does not fit the
+  descriptor raises `RdmaException` — never a silent coercion or drop. `null` is a
+  value: it is accepted on a nullable state and rejected on a non-nullable one.
+- **Mutation semantics match plain Compose.** Mutating a plain `List`/`Map` held in
+  `mutableStateOf` in place does not schedule a recomposition (the value reference is
+  unchanged); assign a new collection to trigger. `mutableStateListOf` /
+  `mutableStateMapOf` are backed by `SnapshotStateList` / `SnapshotStateMap`, so their
+  mutations do trigger.
 
 ## Invariant
 
@@ -125,7 +149,8 @@ upgrade that changes the interface fails fast.
 |---|---|
 | `@Composable` | composable functions / lambdas |
 | `remember { ... }` (with keys) | keys go through `changed` |
-| `mutableStateOf` | rewritten to `rdmaMutableStateOf` |
+| `mutableStateOf` | rewritten to `rdmaMutableStateOf` (typed by a descriptor, see [type_descriptors.md](design/type_descriptors.md)) |
+| `mutableStateListOf` / `mutableStateMapOf` | rewritten to `rdmaMutableStateListOf` / `rdmaMutableStateMapOf` (snapshot collections) |
 | `var x by ...` (`getValue`/`setValue`) | state delegation |
 | `SideEffect { ... }` | rewritten to `rdmaSideEffect` (kernel-hosted) |
 | `DisposableEffect(keys) { ... }` | rewritten to `rdmaDisposableEffect` (kernel-hosted) |

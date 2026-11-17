@@ -27,6 +27,8 @@ import androidx.compose.runtime.Composer
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.ScopeUpdateScope
 import androidx.compose.runtime.cache
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import kotlin.native.EagerInitialization
 import kotlin.native.concurrent.ThreadLocal
@@ -146,6 +148,7 @@ fun rdma_classifyValue(handle: COpaquePointer?): Int {
     val v = handle?.obj<Any>()
     return when (v) {
         null -> 0
+        is RdmaTypedState -> 1
         is MutableState<*> -> 1
         is JsValueHolder -> 2
         is Int -> 3
@@ -155,6 +158,8 @@ fun rdma_classifyValue(handle: COpaquePointer?): Int {
         is Boolean -> 7
         is String -> 8
         Composer.Empty -> 10
+        // `@RDMA` enum entries cross as their name string (types.md).
+        is Enum<*> -> 11
         else -> 9
     }
 }
@@ -183,7 +188,19 @@ fun rdmaToKString(cstr: CPointer<ByteVar>?): String = cstr?.toKString() ?: ""
 fun rdma_valueAsString(handle: COpaquePointer): CPointer<ByteVar>? =
     rdmaStringToCStr(handle.obj<Any>() as String)
 
+/** `@RDMA` enum entries cross as their name string (types.md). */
+fun rdma_valueAsEnumName(handle: COpaquePointer): CPointer<ByteVar>? =
+    rdmaStringToCStr((handle.obj<Any>() as Enum<*>).name)
+
 fun rdma_valueAsJsValueId(handle: COpaquePointer): Long = (handle.obj<Any>() as JsValueHolder).id
+
+/**
+ * Returns a NEW owned handle to the same underlying value. Use when a handle
+ * extracted from a live JS wrapper (whose StableRef is owned by that wrapper)
+ * must cross into a store that consumes its handle.
+ */
+fun rdma_cloneHandle(handle: COpaquePointer): COpaquePointer =
+    StableRef.create(handle.obj<Any>()).asCPointer()
 
 // ---------------------------------------------------------- array / list access
 
@@ -201,9 +218,12 @@ fun rdma_listGet(listHandle: COpaquePointer, index: Int): COpaquePointer? {
     return elem?.handle()
 }
 
-fun rdma_listSet(listHandle: COpaquePointer, index: Int, valueHandle: COpaquePointer?) {
+fun rdma_listSet(listHandle: COpaquePointer, index: Int, valueHandle: COpaquePointer?): COpaquePointer? {
     @Suppress("UNCHECKED_CAST")
-    (listHandle.obj<Any>() as MutableList<Any?>)[index] = valueHandle?.obj<Any>()
+    val list = listHandle.obj<Any>() as MutableList<Any?>
+    val previous = list.set(index, valueHandle?.obj<Any>())
+    // Kotlin `MutableList.set` returns the previous element (parity with the JNI backend).
+    return previous?.handle()
 }
 
 fun rdma_listAdd(listHandle: COpaquePointer, valueHandle: COpaquePointer?) {
@@ -211,9 +231,10 @@ fun rdma_listAdd(listHandle: COpaquePointer, valueHandle: COpaquePointer?) {
     (listHandle.obj<Any>() as MutableList<Any?>).add(valueHandle?.obj<Any>())
 }
 
-fun rdma_listRemoveAt(listHandle: COpaquePointer, index: Int) {
+fun rdma_listRemoveAt(listHandle: COpaquePointer, index: Int): COpaquePointer? {
     @Suppress("UNCHECKED_CAST")
-    (listHandle.obj<Any>() as MutableList<Any?>).removeAt(index)
+    // Kotlin `MutableList.removeAt` returns the removed element (parity with the JNI backend).
+    return (listHandle.obj<Any>() as MutableList<Any?>).removeAt(index)?.handle()
 }
 
 fun rdma_listClear(listHandle: COpaquePointer) {
@@ -258,6 +279,8 @@ fun rdma_listCreate(handles: CPointer<LongVar>?, count: Int): COpaquePointer {
         val raw = p?.pointed?.value ?: 0L
         val h: COpaquePointer? = if (raw == 0L) null else raw.toCPointer<CPointed>()
         list.add(h?.let { it.obj<Any>() })
+        // `rdma_listCreate` CONSUMES its element handles (they were created for it).
+        if (h != null) rdma_disposeStableRef(h)
         p = p?.plus(1)
     }
     return list.handle()
@@ -297,6 +320,9 @@ fun rdma_listRetainAll(listHandle: COpaquePointer, otherHandle: COpaquePointer):
     return (listHandle.obj<Any>() as MutableList<Any?>).retainAll(otherHandle.obj<Collection<Any?>>())
 }
 
+fun rdma_listContainsAll(listHandle: COpaquePointer, otherHandle: COpaquePointer): Boolean =
+    listHandle.obj<List<Any?>>().containsAll(otherHandle.obj<Collection<Any?>>())
+
 fun rdma_arrayCreate(handles: CPointer<LongVar>?, count: Int): COpaquePointer {
     val arr = arrayOfNulls<Any?>(count)
     var p = handles
@@ -318,15 +344,27 @@ fun rdma_mapGet(mapHandle: COpaquePointer, keyHandle: COpaquePointer?): COpaqueP
     return value?.handle()
 }
 
-fun rdma_mapPut(mapHandle: COpaquePointer, keyHandle: COpaquePointer?, valueHandle: COpaquePointer?) {
+fun rdma_mapPut(mapHandle: COpaquePointer, keyHandle: COpaquePointer?, valueHandle: COpaquePointer?): COpaquePointer? {
     @Suppress("UNCHECKED_CAST")
-    (mapHandle.obj<Any>() as MutableMap<Any?, Any?>)[keyHandle?.obj<Any>()] = valueHandle?.obj<Any>()
+    val map = mapHandle.obj<Any>() as MutableMap<Any?, Any?>
+    val previous = map.put(keyHandle?.obj<Any>(), valueHandle?.obj<Any>())
+    // Kotlin `MutableMap.put`/`set` returns the previous value (`V?`) — parity with the JNI backend.
+    return previous?.handle()
 }
 
 fun rdma_mapRemove(mapHandle: COpaquePointer, keyHandle: COpaquePointer?): Boolean {
     @Suppress("UNCHECKED_CAST")
     return (mapHandle.obj<Any>() as MutableMap<Any?, Any?>).remove(keyHandle?.obj<Any>()) != null
 }
+
+/** Kotlin `MutableMap.remove(key)` returns the removed value (`V?`), not a boolean. */
+fun rdma_mapRemoveEntry(mapHandle: COpaquePointer, keyHandle: COpaquePointer?): COpaquePointer? {
+    @Suppress("UNCHECKED_CAST")
+    return (mapHandle.obj<Any>() as MutableMap<Any?, Any?>).remove(keyHandle?.obj<Any>())?.handle()
+}
+
+fun rdma_mapContainsValue(mapHandle: COpaquePointer, valueHandle: COpaquePointer?): Boolean =
+    mapHandle.obj<Map<Any?, Any?>>().containsValue(valueHandle?.obj<Any>())
 
 fun rdma_mapClear(mapHandle: COpaquePointer) {
     @Suppress("UNCHECKED_CAST")
@@ -366,6 +404,9 @@ fun rdma_mapCreate(keys: CPointer<LongVar>?, values: CPointer<LongVar>?, count: 
         val kh: COpaquePointer? = if (kraw == 0L) null else kraw.toCPointer<CPointed>()
         val vh: COpaquePointer? = if (vraw == 0L) null else vraw.toCPointer<CPointed>()
         map[kh?.let { it.obj<Any>() }] = vh?.let { it.obj<Any>() }
+        // `rdma_mapCreate` CONSUMES its key/value handles (they were created for it).
+        if (kh != null) rdma_disposeStableRef(kh)
+        if (vh != null) rdma_disposeStableRef(vh)
         kp = kp?.plus(1)
         vp = vp?.plus(1)
     }
@@ -441,19 +482,67 @@ fun rdma_composer_updateRememberedValue(value: COpaquePointer?) {
 
 // --------------------------------------------------------------------- state
 
-fun rdma_mutableStateOf(initialValue: COpaquePointer?): COpaquePointer =
-    rdmaCaptureError(initialValue ?: rdma_boxObject()) { mutableStateOf(initialValue?.obj<Any>()).handle() }
+/**
+ * A state channel carrier: the plugin-side `MutableState` plus its value type
+ * descriptor (docs/design/type_descriptors.md). The descriptor travels inside
+ * the state handle (like Android's `hostValue(global, descRaw)`), so the C++
+ * value transport re-wraps state proxies with their exact channel type and no
+ * side registry is needed.
+ */
+class RdmaTypedState(val state: MutableState<Any?>, val typeDesc: String)
+
+// Both a [RdmaTypedState] and a raw remembered `MutableState` are addressable.
+@Suppress("UNCHECKED_CAST")
+private fun stateOf(stateHandle: COpaquePointer): MutableState<Any?>? =
+    when (val v = stateHandle.obj<Any>()) {
+        is RdmaTypedState -> v.state
+        is MutableState<*> -> v as MutableState<Any?>
+        else -> null
+    }
+
+/**
+ * Creates a typed state channel. The caller owns the returned handle (disposed
+ * by the state proxy); [initialValue] is only read. The descriptor is fixed at
+ * channel creation (docs/design/type_descriptors.md).
+ */
+fun rdma_mutableStateOf(initialValue: COpaquePointer?, typeDesc: CPointer<ByteVar>?): COpaquePointer =
+    rdmaCaptureError(initialValue ?: rdma_boxObject()) {
+        val desc = rdmaToKString(typeDesc).ifEmpty { "kotlin.Any" }
+        RdmaTypedState(mutableStateOf(initialValue?.obj<Any>()), desc).handle()
+    }
+
+/** The type descriptor of a state handle created by [rdma_mutableStateOf]. */
+fun rdma_stateTypeDesc(stateHandle: COpaquePointer): CPointer<ByteVar>? =
+    rdmaStringToCStr((stateHandle.obj<Any>() as? RdmaTypedState)?.typeDesc ?: "")
 
 fun rdma_stateGetValue(stateHandle: COpaquePointer): COpaquePointer? =
-    rdmaCaptureError(null) { stateHandle.obj<MutableState<*>>().value?.handle() }
+    rdmaCaptureError(null) { stateOf(stateHandle)?.value?.handle() }
 
 fun rdma_stateSetValue(stateHandle: COpaquePointer, value: COpaquePointer?) {
-    @Suppress("UNCHECKED_CAST")
     rdmaCaptureError(Unit) {
-        val state = stateHandle.obj<MutableState<Any?>>()
-        state.value = value?.obj<Any>()
+        stateOf(stateHandle)?.value = value?.obj<Any>()
     }
 }
+
+/**
+ * Snapshot collections (`mutableStateListOf`/`mutableStateMapOf`,
+ * docs/design/type_descriptors.md#state-semantics). The source handle is only
+ * read (the caller keeps ownership) and its elements are copied into the
+ * snapshot collection; the returned handle owns the snapshot collection.
+ */
+fun rdma_mutableStateListOf(sourceHandle: COpaquePointer?): COpaquePointer =
+    rdmaCaptureError(rdma_boxObject()) {
+        val list = mutableStateListOf<Any?>()
+        sourceHandle?.let { list.addAll(it.obj<List<Any?>>()) }
+        list.handle()
+    }
+
+fun rdma_mutableStateMapOf(sourceHandle: COpaquePointer?): COpaquePointer =
+    rdmaCaptureError(rdma_boxObject()) {
+        val map = mutableStateMapOf<Any?, Any?>()
+        sourceHandle?.let { map.putAll(it.obj<Map<Any?, Any?>>()) }
+        map.handle()
+    }
 
 // --------------------------------------------------------------------- scope
 
@@ -502,7 +591,9 @@ private val _register = run {
     rdmaRegisterFunction("rdma_valueAsFloat", staticCFunction(::rdma_valueAsFloat))
     rdmaRegisterFunction("rdma_valueAsBoolean", staticCFunction(::rdma_valueAsBoolean))
     rdmaRegisterFunction("rdma_valueAsString", staticCFunction(::rdma_valueAsString))
+    rdmaRegisterFunction("rdma_valueAsEnumName", staticCFunction(::rdma_valueAsEnumName))
     rdmaRegisterFunction("rdma_valueAsJsValueId", staticCFunction(::rdma_valueAsJsValueId))
+    rdmaRegisterFunction("rdma_cloneHandle", staticCFunction(::rdma_cloneHandle))
     rdmaRegisterFunction("rdma_arraySize", staticCFunction(::rdma_arraySize))
     rdmaRegisterFunction("rdma_arrayGet", staticCFunction(::rdma_arrayGet))
     rdmaRegisterFunction("rdma_listSize", staticCFunction(::rdma_listSize))
@@ -528,11 +619,14 @@ private val _register = run {
     rdmaRegisterFunction("rdma_listAddAllAt", staticCFunction(::rdma_listAddAllAt))
     rdmaRegisterFunction("rdma_listRemoveAll", staticCFunction(::rdma_listRemoveAll))
     rdmaRegisterFunction("rdma_listRetainAll", staticCFunction(::rdma_listRetainAll))
+    rdmaRegisterFunction("rdma_listContainsAll", staticCFunction(::rdma_listContainsAll))
     rdmaRegisterFunction("rdma_arrayCreate", staticCFunction(::rdma_arrayCreate))
     rdmaRegisterFunction("rdma_mapSize", staticCFunction(::rdma_mapSize))
     rdmaRegisterFunction("rdma_mapGet", staticCFunction(::rdma_mapGet))
     rdmaRegisterFunction("rdma_mapPut", staticCFunction(::rdma_mapPut))
     rdmaRegisterFunction("rdma_mapRemove", staticCFunction(::rdma_mapRemove))
+    rdmaRegisterFunction("rdma_mapRemoveEntry", staticCFunction(::rdma_mapRemoveEntry))
+    rdmaRegisterFunction("rdma_mapContainsValue", staticCFunction(::rdma_mapContainsValue))
     rdmaRegisterFunction("rdma_mapClear", staticCFunction(::rdma_mapClear))
     rdmaRegisterFunction("rdma_mapContainsKey", staticCFunction(::rdma_mapContainsKey))
     rdmaRegisterFunction("rdma_mapIsEmpty", staticCFunction(::rdma_mapIsEmpty))
@@ -559,8 +653,11 @@ private val _register = run {
     rdmaRegisterFunction("rdma_composer_rememberedValue", staticCFunction(::rdma_composer_rememberedValue))
     rdmaRegisterFunction("rdma_composer_updateRememberedValue", staticCFunction(::rdma_composer_updateRememberedValue))
     rdmaRegisterFunction("rdma_mutableStateOf", staticCFunction(::rdma_mutableStateOf))
+    rdmaRegisterFunction("rdma_stateTypeDesc", staticCFunction(::rdma_stateTypeDesc))
     rdmaRegisterFunction("rdma_stateGetValue", staticCFunction(::rdma_stateGetValue))
     rdmaRegisterFunction("rdma_stateSetValue", staticCFunction(::rdma_stateSetValue))
+    rdmaRegisterFunction("rdma_mutableStateListOf", staticCFunction(::rdma_mutableStateListOf))
+    rdmaRegisterFunction("rdma_mutableStateMapOf", staticCFunction(::rdma_mutableStateMapOf))
     rdmaRegisterFunction("rdma_scopeUpdateScope", staticCFunction(::rdma_scopeUpdateScope))
     rdmaRegisterFunction("rdma_sideEffect", staticCFunction(::rdma_sideEffect))
     rdmaRegisterFunction("rdma_disposableEffect", staticCFunction(::rdma_disposableEffect))

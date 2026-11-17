@@ -54,12 +54,12 @@ class RdmaWidgetGenerator(
         abstract val hasDefault: Boolean
         abstract val defaultValue: String?
 
-        data class Value(override val name: String, val jvmType: String, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
+        data class Value(override val name: String, val jvmType: String, override val hasDefault: Boolean = false, override val defaultValue: String? = null, val nullable: Boolean = false) : Param()
         data class Ref(override val name: String, val fqn: String, val nullable: Boolean, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
         data class Content(override val name: String, val arity: Int, val paramTypes: List<RdmaTypeRef>, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
         data class Callback(override val name: String, val arity: Int, val paramTypes: List<RdmaTypeRef>, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
-        data class ListVal(override val name: String, val elemFqn: String, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
-        data class ListHandle(override val name: String, val arity: Int, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
+        data class ListVal(override val name: String, val elemFqn: String, override val hasDefault: Boolean = false, override val defaultValue: String? = null, val nullable: Boolean = false) : Param()
+        data class ListHandle(override val name: String, val arity: Int, override val hasDefault: Boolean = false, override val defaultValue: String? = null, val nullable: Boolean = false) : Param()
     }
 
     private fun simpleName(fqn: String): String = fqn.substringAfterLast('.')
@@ -78,12 +78,12 @@ class RdmaWidgetGenerator(
             fnType != null -> Param.Callback(p.name, fnType.parameters.size, fnType.parameters, p.hasDefault, p.defaultValue)
             listType != null -> {
                 val elem = listType.element.type
-                if (elem is RdmaType.FunctionType) Param.ListHandle(p.name, elem.parameters.size, p.hasDefault, p.defaultValue)
-                else Param.ListVal(p.name, valueFqn(elem), p.hasDefault, p.defaultValue)
+                if (elem is RdmaType.FunctionType) Param.ListHandle(p.name, elem.parameters.size, p.hasDefault, p.defaultValue, p.type.nullable)
+                else Param.ListVal(p.name, valueFqn(elem), p.hasDefault, p.defaultValue, p.type.nullable)
             }
             p.type.type is RdmaType.Ref ->
                 Param.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable, p.hasDefault, p.defaultValue)
-            else -> Param.Value(p.name, valueFqn(p.type.type), p.hasDefault, p.defaultValue)
+            else -> Param.Value(p.name, valueFqn(p.type.type), p.hasDefault, p.defaultValue, p.type.nullable)
         }
     }
 
@@ -208,23 +208,28 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
         }
     }
 
-    /** The raw (un-resolved) Kotlin type of a parameter as it appears in the entry signature. */
+    /**
+     * The raw (un-resolved) Kotlin type of a parameter as it appears in the entry
+     * signature. Raws are nullable: the host passes `null`/0 for an omitted
+     * parameter and the mask selects the default (or asserts non-null below) —
+     * the public widget's own parameter types are unchanged.
+     */
     private fun rawKotlinType(p: Param): String = when (p) {
-        is Param.Value -> kotlinType(p.jvmType)
-        is Param.Ref -> "${simpleName(p.fqn)}${if (p.nullable) "?" else ""}"
+        is Param.Value -> "${kotlinType(p.jvmType)}?"
+        is Param.Ref -> "${simpleName(p.fqn)}?"
         is Param.Content, is Param.Callback -> "Long" // block id
-        is Param.ListVal -> "List<${listKotlinType(p.elemFqn)}>"
-        is Param.ListHandle -> "List<Long>" // block ids
+        is Param.ListVal -> "List<${listKotlinType(p.elemFqn)}>?"
+        is Param.ListHandle -> "List<Long>?" // block ids
     }
 
     /** The Kotlin type of a parameter's resolved value (default applied). */
     private fun resolvedType(p: Param): String = when (p) {
-        is Param.Value -> kotlinType(p.jvmType)
+        is Param.Value -> "${kotlinType(p.jvmType)}${if (p.nullable) "?" else ""}"
         is Param.Ref -> "${simpleName(p.fqn)}${if (p.nullable) "?" else ""}"
         is Param.Content -> "@Composable ${lambdaType(p.arity, p.paramTypes)}"
         is Param.Callback -> lambdaType(p.arity, p.paramTypes)
-        is Param.ListVal -> "List<${listKotlinType(p.elemFqn)}>"
-        is Param.ListHandle -> "List<() -> Unit>"
+        is Param.ListVal -> "List<${listKotlinType(p.elemFqn)}>${if (p.nullable) "?" else ""}"
+        is Param.ListHandle -> "List<() -> Unit>${if (p.nullable) "?" else ""}"
     }
 
     private fun lambdaType(arity: Int, paramTypes: List<RdmaTypeRef>): String {
@@ -263,8 +268,12 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 
     private fun resolvedExpr(p: Param, i: Int): String {
         val raw = RdmaDefaultSupport.raw(i)
+        // The raw is nullable (an omitted argument arrives as `null`); the resolved
+        // value asserts non-null where the parameter type is non-null — a caller that
+        // omits a value without a default gets a loud error instead of a null leak.
+        val rawOrAssert = if (resolvedNullable(p)) raw else "$raw!!"
         val converted = when (p) {
-            is Param.Value, is Param.Ref, is Param.ListVal -> raw
+            is Param.Value, is Param.Ref, is Param.ListVal -> rawOrAssert
             is Param.Content -> when (p.arity) {
                 0 -> "{ RdmaComposeHost.nativeInvokeScopeBlock($raw, currentComposer, 0) }"
                 1 -> "{ p0 -> RdmaComposeHost.nativeInvokeScopeBlock1($raw, currentComposer, 0, p0) }"
@@ -278,7 +287,10 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
                 "{ $lambdaParams -> RdmaComposeHost.nativeInvokeCallback($raw, arrayOf<Any?>($array)) }"
             }
             is Param.ListHandle -> when (p.arity) {
-                0 -> "$raw.map { { RdmaComposeHost.nativeInvokeCallback(it, emptyArray<Any?>()) } }"
+                0 -> {
+                    val access = if (resolvedNullable(p)) "$raw?" else "$raw!!"
+                    "$access.map { { RdmaComposeHost.nativeInvokeCallback(it, emptyArray<Any?>()) } }"
+                }
                 else -> error("List callback arity ${p.arity} is not supported (only 0)")
             }
         }
@@ -288,6 +300,14 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
         } else {
             converted
         }
+    }
+
+    private fun resolvedNullable(p: Param): Boolean = when (p) {
+        is Param.Value -> p.nullable
+        is Param.Ref -> p.nullable
+        is Param.ListVal -> p.nullable
+        is Param.ListHandle -> p.nullable
+        is Param.Content, is Param.Callback -> false
     }
 
     // ---------------------------------------------------------------- C++ glue
@@ -448,7 +468,8 @@ $cleanups
                     "                jint cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? (jint)args[$i].getNumber() : 0;\n" +
                         maskLine()
                 "kotlin.Long" ->
-                    "                jlong cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? (jlong)args[$i].getNumber() : 0;\n" +
+                    "                jlong cpp_p$i = 0;\n" +
+                        "                if (${notUndef()}count > $i && args[$i].isNumber()) cpp_p$i = (jlong)rdmaCheckedJLong(r, args[$i]); // guarded crossing\n" +
                         maskLine()
                 "kotlin.Boolean" ->
                     "                jboolean cpp_p$i = count > $i && ${notUndef()}args[$i].isBool() ? args[$i].getBool() : false;\n" +

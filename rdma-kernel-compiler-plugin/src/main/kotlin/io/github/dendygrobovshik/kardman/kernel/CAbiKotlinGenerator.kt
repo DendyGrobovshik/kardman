@@ -114,6 +114,9 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
 
     private var enumFqns: Set<String> = emptySet()
     private var enumInfos: List<RdmaEnumInfo> = emptyList()
+    // Extra registry aliases (lookup key -> generated symbol), e.g. the
+    // `rdma_enum_valueOf:<fqn>` keys the generic runtime resolves by descriptor.
+    private val extraRegistryKeys = mutableListOf<Pair<String, String>>()
 
     private fun isEnumType(typeName: String): Boolean = typeName in enumFqns
 
@@ -534,13 +537,20 @@ $resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
     /**
      * Kotlin/Native enum member bridges exposed through the function-pointer registry:
      * `<Enum>_ordinal(entryName)` and `<Enum>_valueOf(entryName)`. Both validate through
-     * `valueOf`, so an invalid name surfaces as a kernel-side error.
+     * `valueOf`, so an invalid name surfaces as a kernel-side error. The
+     * `<Enum>_valueOfHandle(entryName)` bridge additionally rebuilds the ENTRY as an
+     * owned StableRef handle — the generic C-ABI runtime pulls it up by the channel's
+     * type descriptor (`rdma_enumValueOfHandle`, docs/design/type_descriptors.md) to
+     * marshal `@RDMA` enum state values and collection elements on iOS. It is
+     * registered both under its symbol and under the canonical
+     * `rdma_enum_valueOf:<fqn>` lookup key.
      */
     private fun writeEnumMembers(out: BufferedWriter, enums: List<RdmaEnumInfo>, registered: MutableList<String>) {
         for (e in enums) {
             val fqn = e.qualifiedName
             val ordinalName = cName(e.enumName + "_ordinal")
             val valueOfName = cName(e.enumName + "_valueOf")
+            val valueOfHandleName = cName(e.enumName + "_valueOfHandle")
             out.write("""
 fun $ordinalName(entryName: CPointer<ByteVar>?): Int {
     return rdmaCaptureError(0) { $fqn.valueOf(entryName?.toKString() ?: "").ordinal }
@@ -550,9 +560,15 @@ fun $valueOfName(entryName: CPointer<ByteVar>?): CPointer<ByteVar>? {
     return rdmaCaptureError(null) { rdmaStringToCStr($fqn.valueOf(entryName?.toKString() ?: "").name) }
 }
 
+fun $valueOfHandleName(entryName: CPointer<ByteVar>?): COpaquePointer? {
+    return rdmaCaptureError(null) { $fqn.valueOf(entryName?.toKString() ?: "").handle() }
+}
+
 """)
             registered += ordinalName
             registered += valueOfName
+            registered += valueOfHandleName
+            extraRegistryKeys += "rdma_enum_valueOf:$fqn" to valueOfHandleName
         }
     }
 
@@ -574,8 +590,8 @@ $branches
 
     private fun writeRegistration(out: BufferedWriter, registered: List<String>) {
         if (registered.isEmpty()) return
-        val calls = registered.joinToString("\n") { name ->
-            "    rdmaRegisterFunction(\"$name\", staticCFunction(::$name))"
+        val calls = (registered.map { it to it } + extraRegistryKeys).joinToString("\n") { (key, symbol) ->
+            "    rdmaRegisterFunction(\"$key\", staticCFunction(::$symbol))"
         }
         out.write("""
 @EagerInitialization
