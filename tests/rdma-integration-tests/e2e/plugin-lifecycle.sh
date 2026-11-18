@@ -33,14 +33,8 @@ NEWPLUG=":tests:stand:plugin:itest:newplug"
 NEWPLUG_SRC="$ROOT_DIR/tests/stand/plugin/itest/newplug/src/kotlin/com/example/plugin/itest/NewPlug.kt"
 USER_ITEST_SRC="$ROOT_DIR/tests/stand/kernel/user/itest/src/commonMain/kotlin/com/example/kernel/user/itest/Itest.kt"
 ALICE_TAGLINE_SRC="$ROOT_DIR/tests/stand/kernel/user/alice/src/commonMain/kotlin/com/example/kernel/user/alice/Tagline.kt"
+HOTFIX_SRC="$ROOT_DIR/tests/stand/kernel/internal/src/commonMain/kotlin/com/example/kernel/internal/services/Hotfix.kt"
 
-# The exception crash-test plugins (itest/exceptions{,2}) throw through `content`
-# and kill the app; the lifecycle handshake below runs against a LIVE app
-# (broadcast re-sync + store delivery). They are temporarily opted out of the bake
-# (rdmaBakeInApp=false) and restored afterwards — the same mechanism
-# suspend-behavior.sh uses.
-EXCEPTIONS_1="$ROOT_DIR/tests/stand/plugin/itest/exceptions"
-EXCEPTIONS_2="$ROOT_DIR/tests/stand/plugin/itest/exceptions2"
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -67,19 +61,11 @@ broadcast_resync() { # broadcast_resync <pluginId> <version> [builtAgainst]
     adb shell am broadcast -a "$RESYNC_ACTION" --es pluginId "$id" --ei version "$version" --ei builtAgainst "$builtAgainst" >/dev/null
 }
 
-drop_exception_plugins() {
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_1/gradle.properties"
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_2/gradle.properties"
-}
-
-restore_exception_plugins() {
-    rm -f "$EXCEPTIONS_1/gradle.properties" "$EXCEPTIONS_2/gradle.properties"
-}
-
 # Steps 4/8 rewrite fixture kernel sources in-place (Itest/Tagline/NewPlug) to stage
 # store deliveries; un-restore they poison every later build in the repo. Restore the
 # pristine repo copies so this script keeps its "the repo is never mutated" promise.
 restore_fixture_sources() {
+    [ -f "$IT_DIR/Hotfix.kt.orig" ] && cp "$IT_DIR/Hotfix.kt.orig" "$HOTFIX_SRC"
     git -C "$ROOT_DIR" checkout -- \
         tests/stand/kernel/user/alice/src/commonMain/kotlin/com/example/kernel/user/alice/Tagline.kt \
         tests/stand/kernel/user/itest/src/commonMain/kotlin/com/example/kernel/user/itest/Itest.kt \
@@ -154,9 +140,9 @@ step_0_static_release() {
     step "0: static release the kernel from empty versions"
     generation_release "g1" "legacy-single-generation"
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "static-release" "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-0"
+    release "static-release" "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-0"
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "static-release" "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-0"
+    release "static-release" "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-0"
 }
 
 # 1) Compile + launch the app (with the built-in kernel + plugins baked in).
@@ -242,7 +228,7 @@ fun itestPlaceholder(): String = "placeholder"
 fun itestGreeting(): String = "hello-from-itest-kernel"
 EOF
     run_gradle :tests:stand:kernel:user:itest:compileAndroidMain
-    local analysis="$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json"
+    local analysis="$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/kernel_manifest_android.json"
     local polyfillOut="$IT_DIR/polyfill-f"
     release "dynamic-release" "$analysis" "$polyfillOut"
     local h
@@ -292,7 +278,7 @@ step_5_load_updated_bundles() {
 # 6) Static release: bake the accumulated kernel into native, rebuild + relaunch.
 step_6_static_release_new_app() {
     step "6: static release (bump H, bake native)"
-    local analysis="$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json"
+    local analysis="$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/kernel_manifest_android.json"
     release "static-release" "$analysis" "$IT_DIR/polyfill-s"
     run_gradle :tests:stand:androidApp:assembleDebug
     adb install -r "$ROOT_DIR/tests/stand/androidApp/build/outputs/apk/debug/androidApp-debug.apk"
@@ -330,7 +316,7 @@ import io.github.dendygrobovshik.kardman.Polyfill
 internal fun aliceTagline_polyfill(): String = "alice-polyfill"
 EOF
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    local analysis="$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json"
+    local analysis="$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json"
     local polyfillOut="$IT_DIR/polyfill-r"
     release "dynamic-release" "$analysis" "$polyfillOut"
     if [ -f "$polyfillOut/polyfill.hbc" ]; then
@@ -350,13 +336,136 @@ step_9_manual_polyfill_delivered() {
     wait_logcat "RDMA" "polyfill R:user_alice evaluated"
 }
 
+# 10) Hotfix a native function (docs/design/runtime_rework.md §6): change only the body
+# of `hotfixTarget` (internal module, baked natively since step 0; untouched by the steps above). The F polyfill carries just that
+# function; its callers stay native. The plugin calls the native `callHotfixTarget`
+# (Hermes thread) and composes the kernel widget `HotfixProbe` (UI thread); both
+# native callers must run the hotfix through its slot.
+step_10_hotfix_native_function() {
+    step "10: hotfix a natively-called function (slot)"
+    cp "$HOTFIX_SRC" "$IT_DIR/Hotfix.kt.orig"
+    python3 - "$HOTFIX_SRC" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = 'fun hotfixTarget(tag: String): String = "native-v1:$tag"'
+assert old in s, "fixture changed"
+open(p, "w").write(s.replace(old, 'fun hotfixTarget(tag: String): String = "hotfix-v2:$tag"'))
+PY
+    run_gradle :tests:stand:kernel:internal:compileAndroidMain
+    local analysis="$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json"
+    local polyfillOut="$IT_DIR/polyfill-hotfix"
+    release "dynamic-release" "$analysis" "$polyfillOut"
+    [ -f "$polyfillOut/polyfill.hbc" ] || fail "expected an F polyfill bundle for the hotfix"
+    # The store serves `F:<module>:<hostVersion>`; the stand host always reports
+    # MainActivity.DEMO_HOST_VERSION (2), not the changelog's current H.
+    seed_bundle "F:internal:2" "$polyfillOut/polyfill.hbc"
+    cat > "$NEWPLUG_SRC" <<'EOF'
+package com.example.plugin.itest
+
+import androidx.compose.runtime.Composable
+import com.example.kernel.internal.Column
+import com.example.kernel.internal.Text
+import com.example.kernel.internal.runRdmaApp
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.example.kernel.internal.services.HotfixProbe
+import com.example.kernel.internal.services.callHotfixTarget
+import com.example.kernel.internal.services.callHotfixTargetInBackground
+import com.example.kernel.internal.services.holdPluginThread
+
+@Composable
+fun NewPlugContent() {
+    var io by remember { mutableStateOf("pending") }
+    var timeout by remember { mutableStateOf("pending") }
+    LaunchedEffect(Unit) {
+        // A background thread calls the hotfix: switches to the plugin thread and waits.
+        callHotfixTargetInBackground("io") { result ->
+            io = result
+            // Now keep the plugin thread busy past the 5 s timeout: the second background
+            // call must fail loudly instead of hanging.
+            callHotfixTargetInBackground("timeout") { t -> timeout = t }
+            holdPluginThread(6500)
+        }
+    }
+    Column {
+        Text("HOTFIX_HERMES " + callHotfixTarget())
+        HotfixProbe()
+        Text("IO_HOTFIX " + io)
+        Text("IO_TIMEOUT " + timeout)
+    }
+}
+
+fun main() {
+    runRdmaApp { NewPlugContent() }
+}
+EOF
+    local hbc="$IT_DIR/newplug-v3.hbc"
+    build_plugin_bundle "$hbc"
+    local hash version
+    read -r hash version <<<"$(plugin_release "$ROOT_DIR/tests/stand/plugin/itest/newplug/build/generated/rdma/plugin.json" "$hbc")"
+    seed_bundle "$hash" "$hbc"
+    echo "released $NEWPLUG v$version"
+}
+
+# 11) Both native callers observe the hotfix (without slots they render native-v1).
+step_11_native_callers_run_hotfix() {
+    step "11: native callers run the hotfix"
+    store_reload
+    broadcast_resync "itest:newplug" 2
+    wait_logcat "RDMA" "updated itest:newplug -> v3"
+    # The plugin deliberately keeps its thread busy past the 5 s timeout; meanwhile the UI
+    # thread waits for it on recomposition and the screen cannot be dumped. Poll until the
+    # timed-out background call has reported (the last marker to appear).
+    local ui="" tries=0
+    while [ $tries -lt 40 ]; do
+        adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 || true
+        ui=$(adb shell cat /sdcard/ui.xml 2>/dev/null || true)
+        echo "$ui" | grep -q "IO_TIMEOUT error:" && break
+        sleep 1; tries=$((tries+1))
+    done
+    echo "$ui" | grep -q "HOTFIX_HERMES via-native(hotfix-v2:hermes)" \
+        || fail "Hermes-thread native caller did not run the hotfix: $(echo "$ui" | grep -o 'HOTFIX_HERMES[^"]*')"
+    echo "$ui" | grep -q "UI_HOTFIX hotfix-v2:ui" \
+        || fail "UI-thread native caller did not run the hotfix: $(echo "$ui" | grep -o 'UI_HOTFIX[^"]*')"
+    # Background thread (D5 = B): the call switches to the plugin thread and waits.
+    echo "$ui" | grep -q "IO_HOTFIX hotfix-v2:io" \
+        || fail "background-thread native caller did not run the hotfix: $(echo "$ui" | grep -o 'IO_HOTFIX[^"]*')"
+    echo "$ui" | grep -q "IO_TIMEOUT error:.*timed out" \
+        || fail "a background call blocked past the timeout did not fail loudly: $(echo "$ui" | grep -o 'IO_TIMEOUT[^"]*')"
+}
+
+# 12) Release gate (runtime_rework §6.8): a change to a `suspend` callable cannot be
+# hotfixed yet (its native call sites have no slot), so a dynamic release is refused.
+step_12_release_gate_refuses_partial_hotfix() {
+    step "12: release gate refuses a partial hotfix"
+    python3 - "$HOTFIX_SRC" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = 'suspend fun hotfixSuspendTarget(): String = "native-v1"'
+assert old in s, "fixture changed"
+open(p, "w").write(s.replace(old, 'suspend fun hotfixSuspendTarget(): String = "native-v2"'))
+PY
+    run_gradle :tests:stand:kernel:internal:compileAndroidMain
+    local analysis="$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json"
+    local out="$IT_DIR/gate.log"
+    if release "dynamic-release" "$analysis" "$IT_DIR/polyfill-gate" >"$out" 2>&1; then
+        fail "dynamic release of a suspend change was accepted"
+    fi
+    grep -q "hotfixSuspendTarget changed, but it is a suspend function" "$out" \
+        || { tail -20 "$out" >&2; fail "release gate message missing"; }
+}
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
 cleanup() {
     store_stop
-    restore_exception_plugins
     restore_fixture_sources
     rm -rf "$IT_DIR"
 }
@@ -366,7 +475,6 @@ main() {
     adb_dev
     mkdir -p "$VERSIONS_DIR"
 
-    drop_exception_plugins
     store_start
 
     step_0_static_release
@@ -379,6 +487,9 @@ main() {
     step_7_old_bundle_works_and_native_baked
     step_8_remove_native_function_add_manual_polyfill
     step_9_manual_polyfill_delivered
+    step_10_hotfix_native_function
+    step_11_native_callers_run_hotfix
+    step_12_release_gate_refuses_partial_hotfix
 
     echo
     echo "ALL STEPS PASSED"

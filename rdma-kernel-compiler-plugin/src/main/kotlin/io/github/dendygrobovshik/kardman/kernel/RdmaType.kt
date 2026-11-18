@@ -177,6 +177,8 @@ object RdmaTypeValidator {
 
         fun checkParameter(p: ParameterInfo, path: String) {
             when {
+                // A lambda parameter of a method/constructor: its own parameter types must cross.
+                p.functionType != null -> errors += validate(p.functionType!!, isRdmaClass).map { "$path: $it" }
                 p.isList -> {
                     val elem = p.listElementType
                     if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)

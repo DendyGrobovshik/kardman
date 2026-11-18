@@ -79,6 +79,16 @@ class RdmaSignatureClassifierTest {
     // --- incompatible --------------------------------------------------------
 
     @Test
+    fun `baseline without default text matches a current signature that carries it`() {
+        // The committed baseline (`rdma_signatures.json`) keeps no default-expression text;
+        // the current analysis does. A dynamic release of a module with defaulted
+        // parameters must not be rejected for that difference alone.
+        val baseline = listOf(sig("a"), sig("b", "kotlin.String", hasDefault = true))
+        val current = listOf(sig("a"), RdmaParameterSignature("b", "kotlin.String", true, "\"world\""))
+        assertEquals(emptyList(), errors(baseline, current))
+    }
+
+    @Test
     fun `reordering parameters is incompatible`() {
         assertTrue(errors(listOf(sig("a"), sig("b")), listOf(sig("b"), sig("a"))).isNotEmpty())
     }

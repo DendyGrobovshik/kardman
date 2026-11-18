@@ -24,6 +24,8 @@ import org.gradle.api.Project
 import org.gradle.api.Task
 import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.TaskProvider
+import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
+import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSetContainer
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -72,12 +74,16 @@ class RdmaAppGradlePlugin : Plugin<Project> {
         // Gradle auto-creates the intermediate container projects (`:plugin:alice`, …),
         // so only count projects that actually have a build script. A plugin module may opt
         // out of being baked into the app (`rdmaBakeInApp=false`) — it is then delivered
-        // through the store only (dynamic plugin scenario).
+        // through the store only (dynamic plugin scenario). `-PrdmaForceBakePlugins=<paths>`
+        // (comma-separated project paths) bakes such modules anyway, for one build.
         val subprojects = target.rootProject.subprojects
             .filter { it.buildFile.exists() }
         val kernelModulePaths = subprojects.map { it.path }.filter { it.startsWith("$kernelContainer:") }
+        val forceBaked = target.rootProject.findProperty("rdmaForceBakePlugins")?.toString()
+            ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
+            ?: emptySet()
         val pluginModulePaths = subprojects
-            .filter { it.findProperty("rdmaBakeInApp")?.toString() != "false" }
+            .filter { it.path in forceBaked || it.findProperty("rdmaBakeInApp")?.toString() != "false" }
             .map { it.path }
             .filter { it.startsWith("$pluginContainer:") }
 
@@ -182,6 +188,30 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                 writeUserBridgeCAbiCpp(File(capiCppDir, "UserBridgeCAbi.cpp"))
             }
         }
+        // 2c) C ABI Kotlin glue (iOS). Every kernel module generates its C ABI glue
+        // (`capi/kotlin`: C-compatible entries, helpers, registration) while it compiles. The
+        // app compiles that glue right after the kernel modules, in the same build — like
+        // `widget-kotlin` on Android — so a clean build works in one pass and a removed
+        // `@RDMA` symbol can never leave a stale file in a kernel compilation
+        // (docs/design/runtime_rework.md §11). The kernel compiler plugin runs here in
+        // `capi-glue` mode to fill the widget entry bodies.
+        target.plugins.withId("org.jetbrains.kotlin.multiplatform") {
+            val kotlinExt = target.extensions.getByName("kotlin") as KotlinSourceSetContainer
+            kotlinExt.sourceSets.matching { it.name == "iosMain" }.configureEach { ss: KotlinSourceSet ->
+                kernelProjects.forEach { kp -> ss.kotlin.srcDir(File(kp.buildDir, "generated/rdma/capi/kotlin")) }
+            }
+            target.tasks.matching { it.name.startsWith("compileKotlinIos") }.configureEach { task ->
+                kernelProjects.forEach { kp -> task.dependsOn(kp.tasks.matching { it.name == task.name }) }
+            }
+            val glueModules = kernelModulePaths.mapNotNull { path ->
+                val kp = target.rootProject.findProject(path) ?: return@mapNotNull null
+                val api = File(kp.buildDir, "generated/rdma/rdma_api.json").absolutePath
+                "${moduleIdOf(path, kernelContainer)}=${modulePackageOf(path, kernelContainer)}=$api"
+            }.joinToString(";")
+            target.extensions.extraProperties.set(RdmaCAbiGlueSubplugin.GLUE_MODULES_PROPERTY, glueModules)
+            target.pluginManager.apply(RdmaCAbiGlueSubplugin::class.java)
+        }
+
         val copyGeneratedCppCAbi = target.tasks.register("copyGeneratedCppCAbi") { task ->
             kernelIosCompileTasks.forEach { task.dependsOn(it) }
             task.dependsOn(generateBridgeCAbi)
@@ -533,34 +563,29 @@ ${p}UserBridge_nativeInstall(JNIEnv* env, jclass) {
 """,
         )
 
-        // Kernel-side vtable dispatch: one JNI export per kernel module package.
-        val dispatchBody = """
-    if (vtablePtr == 0) return nullptr;
-
-    auto* vt = reinterpret_cast<RdmaVtable*>(vtablePtr);
-    if (vtableId < 0 || (size_t)vtableId >= vt->entries.size()) return nullptr;
-    auto& entry = vt->entries[vtableId];
-    if (!entry) return nullptr;
-
-    try {
-        auto& irt = *(facebook::jsi::IRuntime*)vt->rt;
-        facebook::jsi::Value result = entry->call(irt, nullptr, 0);
-        if (result.isString()) {
-            std::string s = result.getString(*vt->rt).utf8(*vt->rt);
-            return env->NewStringUTF(s.c_str());
-        }
-    } catch (const std::exception& e) {
-        LOGI("rdmaVtableDispatch error: %s", e.what());
-    }
-    return nullptr;
-"""
+        // Kernel-side vtable dispatch: one JNI export per kernel module package; the logic
+        // (threads, marshalling, exceptions) lives in the runtime.
         for (modulePackage in kernelModulePackages.distinct()) {
             val mp = modulePackage.replace('.', '_')
             sb.append(
                 """// Kernel module package: $modulePackage
 extern "C" JNIEXPORT jobject JNICALL
-Java_${mp}_RdmaVtableKt_rdmaVtableDispatch(JNIEnv* env, jclass, jlong vtablePtr, jint vtableId) {
-$dispatchBody}
+Java_${mp}_RdmaVtableKt_rdmaVtableDispatch(JNIEnv* env, jclass, jlong vtablePtr, jint vtableId, jobjectArray args,
+                                            jstring paramDescs, jstring resultDesc, jobject fallthrough) {
+    return facebook::rdma::rdmaVtableInvokeJni(env, vtablePtr, vtableId, args, paramDescs, resultDesc, fallthrough);
+}
+
+// Hotfix dispatch slots of this kernel module (docs/design/runtime_rework.md §6).
+extern "C" JNIEXPORT void JNICALL
+Java_${mp}_RdmaSlotsNativeKt_rdmaSlotRegister(JNIEnv* env, jclass, jobject cell, jstring fqn) {
+    facebook::rdma::rdmaSlotRegisterJni(env, cell, fqn);
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_${mp}_RdmaSlotsNativeKt_rdmaSlotInvokeNative(JNIEnv* env, jclass, jlong blockId, jobjectArray args,
+                                                   jstring paramDescs, jstring resultDesc, jobject fallthrough) {
+    return facebook::rdma::rdmaSlotInvokeJni(env, blockId, args, paramDescs, resultDesc, fallthrough);
+}
 """,
             )
         }

@@ -128,7 +128,12 @@ object JniTypeMapper {
             "kotlin.collections.List" -> "java.util.List"
             "kotlin.collections.MutableList" -> "java.util.List"
             "kotlin.collections.ArrayList" -> "java.util.ArrayList"
-            else -> qualifiedName
+            "kotlin.collections.Map", "kotlin.collections.MutableMap" -> "java.util.Map"
+            else -> if (qualifiedName.startsWith("kotlin.Function")) {
+                "kotlin.jvm.functions." + qualifiedName.removePrefix("kotlin.")
+            } else {
+                qualifiedName
+            }
         }
         return "L${jvmType.replace('.', '/')};"
     }

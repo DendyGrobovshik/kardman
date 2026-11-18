@@ -15,39 +15,58 @@
  */
 package io.github.dendygrobovshik.kardman.plugin
 
+import io.github.dendygrobovshik.kardman.types.RdmaTypeDescFormat
+import org.jetbrains.kotlin.diagnostics.DiagnosticReporter
+import org.jetbrains.kotlin.diagnostics.reportOn
 import org.jetbrains.kotlin.fir.FirSession
 import org.jetbrains.kotlin.fir.analysis.checkers.MppCheckerKind
+import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
 import org.jetbrains.kotlin.fir.analysis.checkers.declaration.DeclarationCheckers
 import org.jetbrains.kotlin.fir.analysis.checkers.declaration.FirDeclarationChecker
 import org.jetbrains.kotlin.fir.analysis.checkers.expression.ExpressionCheckers
 import org.jetbrains.kotlin.fir.analysis.checkers.expression.FirExpressionChecker
+import org.jetbrains.kotlin.fir.analysis.diagnostics.FirErrors
 import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtension
 import org.jetbrains.kotlin.fir.declarations.FirFile
-import org.jetbrains.kotlin.fir.declarations.FirRegularClass
 import org.jetbrains.kotlin.fir.declarations.FirNamedFunction
+import org.jetbrains.kotlin.fir.declarations.FirRegularClass
 import org.jetbrains.kotlin.fir.expressions.FirExpression
 import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
-import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
+import org.jetbrains.kotlin.fir.expressions.FirOperation
 import org.jetbrains.kotlin.fir.expressions.FirPropertyAccessExpression
+import org.jetbrains.kotlin.fir.expressions.FirTypeOperatorCall
 import org.jetbrains.kotlin.fir.expressions.FirVariableAssignment
+import org.jetbrains.kotlin.fir.expressions.FirWhenExpression
+import org.jetbrains.kotlin.fir.expressions.impl.FirElseIfTrueCondition
 import org.jetbrains.kotlin.fir.references.toResolvedSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirCallableSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirConstructorSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirEnumEntrySymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirNamedFunctionSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirPropertySymbol
-import io.github.dendygrobovshik.kardman.types.RdmaTypeDescFormat
 import org.jetbrains.kotlin.fir.types.ConeClassLikeType
 import org.jetbrains.kotlin.fir.types.ConeKotlinType
+import org.jetbrains.kotlin.fir.types.coneType
 import org.jetbrains.kotlin.fir.types.coneTypeSafe
 import org.jetbrains.kotlin.fir.types.isMarkedNullable
 import org.jetbrains.kotlin.fir.types.resolvedType
 import org.jetbrains.kotlin.fir.types.type
-import org.jetbrains.kotlin.diagnostics.DiagnosticReporter
-import org.jetbrains.kotlin.diagnostics.reportOn
-import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
-import org.jetbrains.kotlin.fir.analysis.diagnostics.FirErrors
 
+/**
+ * The plugin's JVM resolve pass (docs/design/runtime_rework.md §5.0).
+ *
+ * Kernel symbols are NOT rewritten: the JS compilation sees generated `inline` stubs in
+ * the kernel packages ([RdmaKernelStubGenerator]) whose bodies are call form v1, so
+ * plugin source (imports, constructors, properties, methods, enums, widgets, suspend
+ * calls) compiles unchanged. This pass only
+ *  - rewrites the Compose entry points that need compile-time knowledge (state
+ *    factories get their type descriptor; effects are hosted by the kernel),
+ *  - rewrites subclassing of an `open` kernel class (`RDMA.createWithOverrides`),
+ *  - adds an `else` to `when` expressions over an `@RDMA` enum (exhaustive over the
+ *    real enum, not over its stub),
+ *  - records the kernel symbols the plugin uses (`plugin.json`),
+ *  - rejects constructs that cannot work across the boundary.
+ */
 class RdmaPluginAdditionalCheckersExtension(session: FirSession) : FirAdditionalCheckersExtension(session) {
 
     override val declarationCheckers: DeclarationCheckers = object : DeclarationCheckers() {
@@ -56,43 +75,43 @@ class RdmaPluginAdditionalCheckersExtension(session: FirSession) : FirAdditional
     }
 
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
-        override val functionCallCheckers = setOf(RdmaPluginFunctionCallChecker, RdmaPluginWidgetCallChecker, RdmaPluginComposeCallChecker, RdmaPluginSuspendMethodCallChecker, RdmaPluginEnumFunctionChecker)
-        override val propertyAccessExpressionCheckers = setOf(RdmaPluginPropertyAccessChecker, RdmaPluginEnumChecker)
+        override val functionCallCheckers = setOf(
+            RdmaPluginFunctionCallChecker,
+            RdmaPluginComposeEntryCallChecker,
+            RdmaPluginComposeCallChecker,
+            RdmaPluginEnumFunctionChecker,
+            RdmaPluginReifiedKernelTypeChecker,
+        )
+        override val propertyAccessExpressionCheckers = setOf(RdmaPluginPropertyAccessChecker)
         override val variableAssignmentCheckers = setOf(RdmaPluginVariableAssignmentChecker)
+        override val typeOperatorCallCheckers = setOf(RdmaPluginTypeOperatorChecker)
+        override val whenExpressionCheckers = setOf(RdmaPluginEnumWhenChecker)
     }
 }
 
 private fun filePathOf(context: CheckerContext): String? = context.containingFile?.path
 
-/**
- * Returns the FQN of the `@RDMA` enum this expression's type refers to, or null.
- * Covers both enum entry accesses (`HttpMethod.GET` — its type is the enum) and
- * variables holding an enum value received from the kernel.
- */
-private fun enumFqnOf(expression: FirExpression): String? {
-    val classId = (expression.resolvedType as? ConeClassLikeType)?.lookupTag?.classId ?: return null
-    val fqn = classId.asSingleFqName().asString()
-    return if (RdmaPluginTransformState.isEnumQualifiedName(fqn)) fqn else null
-}
+private fun fqnOf(type: ConeKotlinType?): String? =
+    (type as? ConeClassLikeType)?.lookupTag?.classId?.asSingleFqName()?.asString()
 
-private fun enumEntryLiteral(expression: FirPropertyAccessExpression): String? {
-    val symbol = expression.calleeReference.toResolvedSymbol<FirCallableSymbol<*>>() as? FirEnumEntrySymbol
-        ?: return null
-    val classId = symbol.callableId?.classId ?: return null
-    val fqn = classId.asSingleFqName().asString()
-    if (!RdmaPluginTransformState.isEnumQualifiedName(fqn)) return null
-    return "\"${symbol.name.asString()}\""
-}
+/** True for an `@RDMA` class or enum visible to the plugin. */
+private fun isKernelType(fqn: String?): Boolean =
+    fqn != null && (RdmaPluginTransformState.isClassQualifiedName(fqn) || RdmaPluginTransformState.isEnumQualifiedName(fqn))
 
 /**
  * Source text of a call argument with registered `@RDMA` enum entries inlined as
- * string literals (entry names are compile-time known, so no RDMA round trip).
+ * string literals (used only by the `createWithOverrides` rewrite, whose arguments are
+ * embedded as JS source).
  */
 private fun argTextOf(arg: FirExpression, text: String): String {
     val src = arg.source ?: return ""
     val raw = text.substring(src.startOffset, src.endOffset).trim()
     if (arg is FirPropertyAccessExpression) {
-        enumEntryLiteral(arg)?.let { return it }
+        val symbol = arg.calleeReference.toResolvedSymbol<FirCallableSymbol<*>>() as? FirEnumEntrySymbol
+        val enumFqn = symbol?.callableId?.classId?.asSingleFqName()?.asString()
+        if (enumFqn != null && RdmaPluginTransformState.isEnumQualifiedName(enumFqn)) {
+            return "\"${symbol.name.asString()}\""
+        }
     }
     return raw
 }
@@ -106,36 +125,6 @@ private fun endWithNewline(text: String, end: Int): Int {
     return e
 }
 
-/**
- * Reorders call arguments into the declared parameter order, resolving named arguments by
- * their declared name (`foo(b = 2, a = 1)` -> `[1, 2]`). Positional arguments fill the front
- * slots in order; omitted trailing (defaulted) parameters are left out entirely. When
- * [quoteStrings] is true, arguments bound to a `kotlin.String` parameter are re-quoted as JS
- * string literals (single quotes), matching the positional marshalling of the generated bridge.
- */
-private fun orderedArgTexts(
-    arguments: List<FirExpression>,
-    constructorParams: List<Pair<String, String>>,
-    text: String,
-    quoteStrings: Boolean,
-): List<String> {
-    val nameToIndex = constructorParams.mapIndexed { i, (name, _) -> name to i }.toMap()
-    val ordered = arrayOfNulls<String>(constructorParams.size)
-    var positional = 0
-    for (arg in arguments) {
-        val named = arg as? FirNamedArgumentExpression
-        val value = named?.expression ?: arg
-        val idx = if (named != null) nameToIndex[named.name.asString()] else positional++
-        if (idx == null || idx !in ordered.indices) continue
-        var argText = argTextOf(value, text)
-        if (quoteStrings && constructorParams[idx].second == "kotlin.String") {
-            argText = "'${argText.removeSurrounding("\"")}'"
-        }
-        ordered[idx] = argText
-    }
-    return ordered.filterNotNull()
-}
-
 object RdmaPluginFileChecker : FirDeclarationChecker<FirFile>(MppCheckerKind.Common) {
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(declaration: FirFile) {
@@ -144,35 +133,32 @@ object RdmaPluginFileChecker : FirDeclarationChecker<FirFile>(MppCheckerKind.Com
         val text = sourceFile.getContentsAsStream().reader().readText()
         RdmaPluginTransformState.registerText(path, text)
 
+        // Imports stay as written: the kernel stubs live in the same packages.
         for (imp in declaration.imports) {
             val fqn = imp.importedFqName?.asString() ?: continue
-            if (!RdmaPluginTransformState.isBridgeableQualifiedName(fqn)) {
-                if (RdmaPluginTransformState.isKernelPackage(fqn)) {
-                    val src = imp.source
-                    if (src != null) {
-                        reporter.reportOn(
-                            src,
-                            FirErrors.UNSUPPORTED,
-                            "Kernel symbol '$fqn' is not visible to this plugin (only internal kernel modules and your own user module are accessible)",
-                        )
-                    }
-                }
-                continue
-            }
+            if (RdmaPluginTransformState.isBridgeableQualifiedName(fqn)) continue
+            if (!RdmaPluginTransformState.isKernelPackage(fqn)) continue
             val src = imp.source ?: continue
-            RdmaPluginTransformState.addEdit(path, src.startOffset, endWithNewline(text, src.endOffset), "")
+            reporter.reportOn(
+                src,
+                FirErrors.UNSUPPORTED,
+                "Kernel symbol '$fqn' is not visible to this plugin (only internal kernel modules and your own user module are accessible)",
+            )
         }
     }
 }
 
+/**
+ * A plugin subclass of an `open` kernel class is not compiled as a class: its
+ * declaration is removed and its constructor calls become `RDMA.createWithOverrides`.
+ */
 object RdmaPluginRegularClassChecker : FirDeclarationChecker<FirRegularClass>(MppCheckerKind.Common) {
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(declaration: FirRegularClass) {
         val superRef = declaration.superTypeRefs.firstOrNull { ref ->
-            val fqn = ref.coneTypeSafe<ConeClassLikeType>()?.lookupTag?.classId?.asSingleFqName()?.asString()
-            fqn != null && RdmaPluginTransformState.isClassQualifiedName(fqn)
+            RdmaPluginTransformState.isClassQualifiedName(fqnOf(ref.coneTypeSafe<ConeClassLikeType>()) ?: "")
         } ?: return
-        val parentSimpleName = superRef.coneTypeSafe<ConeClassLikeType>()?.lookupTag?.classId?.shortClassName?.asString() ?: return
+        val parentFqn = fqnOf(superRef.coneTypeSafe<ConeClassLikeType>()) ?: return
         val className = declaration.name.asString()
         val qualifiedName = declaration.symbol.classId.asSingleFqName().asString()
         val path = filePathOf(context) ?: return
@@ -188,7 +174,7 @@ object RdmaPluginRegularClassChecker : FirDeclarationChecker<FirRegularClass>(Mp
 
         RdmaPluginTransformState.registerSubclass(
             qualifiedName,
-            RdmaSubclass(className, qualifiedName, parentSimpleName, overrides),
+            RdmaSubclass(className, qualifiedName, parentFqn.substringAfterLast('.'), overrides, parentFqn),
         )
 
         val src = declaration.source ?: return
@@ -204,66 +190,52 @@ private fun extractExpressionBody(text: String, func: FirNamedFunction): String?
     return funcText.substring(eqIdx + 1).trim().trimEnd()
 }
 
+/**
+ * Constructor calls: records kernel class usage; a plugin subclass of an `open` kernel
+ * class is constructed through `RDMA.createWithOverrides` and typed as its parent.
+ */
 object RdmaPluginFunctionCallChecker : FirExpressionChecker<FirFunctionCall>(MppCheckerKind.Common) {
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(expression: FirFunctionCall) {
         val symbol = expression.calleeReference.toResolvedSymbol<FirConstructorSymbol>() ?: return
         val classId = symbol.callableId.classId ?: return
         val fqn = classId.asSingleFqName().asString()
+        if (RdmaPluginTransformState.isClassQualifiedName(fqn)) {
+            RdmaPluginTransformState.recordUsedSymbol(fqn)
+            return
+        }
+        // A plugin class: it may be a subclass of an `open` kernel class, whose declaration
+        // can live in a file checked later — so the rewrite is decided in `flush()`, once
+        // every subclass is known (checker order across files is not defined).
         val src = expression.source ?: return
         val path = filePathOf(context) ?: return
         val text = RdmaPluginTransformState.textOf(path)
-
         val argTexts = expression.argumentList.arguments.map { argTextOf(it, text) }
-
-        val subclass = RdmaPluginTransformState.subclassByQualifiedName(fqn)
-        if (subclass != null) {
-            RdmaPluginTransformState.recordUsedSymbol(fqn)
-            val overridesJs = subclass.overrides.joinToString(", ") { (n, b) ->
-                "$n: function() { return $b; }"
-            }
-            val replacement = buildString {
-                append("js(\"\"\"RDMA.createWithOverrides('")
-                append(subclass.parentSimpleName)
-                append("', [")
-                append(argTexts.joinToString(", "))
-                append("], { ")
-                append(overridesJs)
-                append(" })\"\"\")")
-            }
-            RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, replacement)
-            return
-        }
-
-        val type = RdmaPluginTransformState.typeByQualifiedName(fqn) ?: return
-        RdmaPluginTransformState.recordUsedSymbol(fqn)
-        val args = orderedArgTexts(
-            expression.argumentList.arguments,
-            type.constructorParams,
-            text,
-            quoteStrings = true,
-        ).joinToString(", ")
-
-        val replacement = "js(\"RDMA.create${type.simpleName}(${args.escapeForJs()})\")"
-        // The whole-span replacement embeds the raw arg texts, so any nested edits
-        // (e.g. an inlined enum entry) must be dropped to keep flush() consistent.
-        RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
-        RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, replacement)
+        RdmaPluginTransformState.recordConstructorCall(path, src.startOffset, src.endOffset, fqn, argTexts)
     }
 }
 
-object RdmaPluginWidgetCallChecker : FirExpressionChecker<FirFunctionCall>(MppCheckerKind.Common) {
+/**
+ * Calls of named functions: records kernel function and member usage, and rewrites the
+ * Compose entry points that need compile-time knowledge into the runtime bridge.
+ */
+object RdmaPluginComposeEntryCallChecker : FirExpressionChecker<FirFunctionCall>(MppCheckerKind.Common) {
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(expression: FirFunctionCall) {
         val symbol = expression.calleeReference.toResolvedSymbol<FirNamedFunctionSymbol>() ?: return
-        val callableId = symbol.callableId ?: return
+        val callableId = symbol.callableId
+        callableId.classId?.asSingleFqName()?.asString()?.let { owner ->
+            if (isKernelType(owner)) RdmaPluginTransformState.recordUsedSymbol(owner)
+            return
+        }
         val fqn = callableId.asSingleFqName().asString()
         if (!RdmaPluginTransformState.isFunctionQualifiedName(fqn)) return
         RdmaPluginTransformState.recordUsedSymbol(fqn)
+        if (!RdmaPluginTransformState.isComposeEntryPoint(fqn)) return
+
         val nameSrc = expression.calleeReference.source ?: return
         val path = filePathOf(context) ?: return
-        val bridgeName = RdmaPluginTransformState.bridgeNameFor(fqn)
-        RdmaPluginTransformState.addEdit(path, nameSrc.startOffset, nameSrc.endOffset, bridgeName)
+        RdmaPluginTransformState.addEdit(path, nameSrc.startOffset, nameSrc.endOffset, RdmaPluginTransformState.bridgeNameFor(fqn))
 
         if (fqn !in RdmaPluginTransformState.stateFactoryFqns) return
         // The state factory opens an erased value channel: bake the channel's type
@@ -290,76 +262,28 @@ object RdmaPluginWidgetCallChecker : FirExpressionChecker<FirFunctionCall>(MppCh
     }
 }
 
-/**
- * Rewrites calls to `suspend` methods of `@RDMA` classes into a generated suspend
- * bridge. A suspend method cannot dispatch dynamically on the JS proxy (a JS method
- * call is not a coroutine suspension point), so `client.fetch(url)` becomes
- * `rdmaHttpClientFetch(client, url)`, which forwards to `RDMA._HttpClient_fetchAsync`.
- */
-object RdmaPluginSuspendMethodCallChecker : FirExpressionChecker<FirFunctionCall>(MppCheckerKind.Common) {
-    context(context: CheckerContext, reporter: DiagnosticReporter)
-    override fun check(expression: FirFunctionCall) {
-        val symbol = expression.calleeReference.toResolvedSymbol<FirNamedFunctionSymbol>() ?: return
-        val callableId = symbol.callableId ?: return
-        val classId = callableId.classId ?: return
-        val classFqn = classId.asSingleFqName().asString()
-        val type = RdmaPluginTransformState.typeByQualifiedName(classFqn) ?: return
-        val methodName = symbol.name.asString()
-        val method = type.suspendMethods.find { it.name == methodName } ?: return
-
-        val src = expression.source ?: return
-        val nameSrc = expression.calleeReference.source ?: return
-        val path = filePathOf(context) ?: return
-        val text = RdmaPluginTransformState.textOf(path)
-
-        val receiver = text.substring(src.startOffset, nameSrc.startOffset).trim().trimEnd('.')
-        val argTexts = expression.argumentList.arguments.map { argTextOf(it, text) }
-        val bridge = RdmaPluginTransformState.methodBridgeName(type.simpleName, methodName)
-        val replacement = "$bridge(${(listOf(receiver) + argTexts).joinToString(", ")})"
-
-        RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
-        RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, replacement)
-        RdmaPluginTransformState.recordUsedSymbol(classFqn)
-    }
-}
-
+/** Records kernel class / enum usage through properties, statics and enum entries. */
 object RdmaPluginPropertyAccessChecker : FirExpressionChecker<FirPropertyAccessExpression>(MppCheckerKind.Common) {
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(expression: FirPropertyAccessExpression) {
-        val symbol = expression.calleeReference.toResolvedSymbol<FirPropertySymbol>() ?: return
-        val classId = symbol.callableId?.classId ?: return
-        // Companion object static: `Alignment.Center` -> `rdmaAlignmentCenter()`.
-        if (classId.shortClassName.asString() == "Companion") {
-            val outer = classId.outerClassId ?: return
-            val outerFqn = outer.asSingleFqName().asString()
-            val type = RdmaPluginTransformState.typeByQualifiedName(outerFqn) ?: return
-            val propName = symbol.name.asString()
-            if (propName !in type.statics) return
-            RdmaPluginTransformState.recordUsedSymbol(outerFqn)
-            val accessSrc = expression.source ?: return
-            val path = filePathOf(context) ?: return
-            val bridge = RdmaPluginTransformState.staticBridgeNameFor(type.simpleName, propName)
-            RdmaPluginTransformState.addEdit(path, accessSrc.startOffset, accessSrc.endOffset, "$bridge()")
+        val symbol = expression.calleeReference.toResolvedSymbol<FirCallableSymbol<*>>() ?: return
+        var classId = symbol.callableId?.classId ?: return
+        if (classId.shortClassName.asString() == "Companion") classId = classId.outerClassId ?: return
+        val fqn = classId.asSingleFqName().asString()
+        if (!isKernelType(fqn)) return
+        if (symbol is FirPropertySymbol && symbol.name.asString() == "entries" &&
+            RdmaPluginTransformState.isEnumQualifiedName(fqn)
+        ) {
+            expression.source?.let {
+                reporter.reportOn(
+                    it,
+                    FirErrors.UNSUPPORTED,
+                    "Enum.entries is not supported in the plugin yet — use explicit entries or a kernel-side @RDMA helper",
+                )
+            }
             return
         }
-
-        val fqn = classId.asSingleFqName().asString()
-        val type = RdmaPluginTransformState.typeByQualifiedName(fqn) ?: return
-        val propName = symbol.name.asString()
-        if (type.properties.none { it.first == propName }) return
         RdmaPluginTransformState.recordUsedSymbol(fqn)
-        val accessSrc = expression.source ?: return
-        val nameSrc = expression.calleeReference.source ?: return
-        val path = filePathOf(context) ?: return
-        val text = RdmaPluginTransformState.textOf(path)
-
-        var after = accessSrc.endOffset
-        while (after < text.length && text[after].isWhitespace()) after++
-        if (after < text.length && text[after] == '=') return
-
-        val receiver = text.substring(accessSrc.startOffset, nameSrc.startOffset)
-        val getter = "get${propName.replaceFirstChar { it.uppercase() }}"
-        RdmaPluginTransformState.addEdit(path, accessSrc.startOffset, accessSrc.endOffset, "$receiver$getter()")
     }
 }
 
@@ -368,110 +292,88 @@ object RdmaPluginVariableAssignmentChecker : FirExpressionChecker<FirVariableAss
     override fun check(expression: FirVariableAssignment) {
         val lValue = expression.lValue as? FirPropertyAccessExpression ?: return
         val symbol = lValue.calleeReference.toResolvedSymbol<FirPropertySymbol>() ?: return
-        val classId = symbol.callableId?.classId ?: return
-        val fqn = classId.asSingleFqName().asString()
-        val type = RdmaPluginTransformState.typeByQualifiedName(fqn) ?: return
-        val propName = symbol.name.asString()
-        val prop = type.properties.find { it.first == propName } ?: return
-        if (!prop.second) return
-        RdmaPluginTransformState.recordUsedSymbol(fqn)
-        val src = expression.source ?: return
-        val nameSrc = lValue.calleeReference.source ?: return
-        val path = filePathOf(context) ?: return
-        val text = RdmaPluginTransformState.textOf(path)
-        val receiver = text.substring(src.startOffset, nameSrc.startOffset)
-        val rValueText = argTextOf(expression.rValue, text)
-        val setter = "set${propName.replaceFirstChar { it.uppercase() }}"
-        RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
-        RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, "$receiver$setter($rValueText)")
+        val fqn = symbol.callableId?.classId?.asSingleFqName()?.asString() ?: return
+        if (RdmaPluginTransformState.isClassQualifiedName(fqn)) RdmaPluginTransformState.recordUsedSymbol(fqn)
     }
 }
 
-/**
- * Rewrites `@RDMA` enum usages in the plugin:
- *  - `HttpMethod.GET`            -> `"GET"`               (entry name is compile-time known)
- *  - `HttpMethod.GET.name`       -> `"GET"`               (identity under name representation)
- *  - `HttpMethod.GET.ordinal`    -> `rdmaHttpMethodOrdinal("GET")`
- *  - `m.name` / `m.ordinal` for an enum-typed receiver — same as above
- *
- * `when` needs no special handling: the rewritten conditions are string literals and
- * the subject is a dynamic string from RDMA, so Kotlin/JS compares plain JS strings.
- */
-object RdmaPluginEnumChecker : FirExpressionChecker<FirPropertyAccessExpression>(MppCheckerKind.Common) {
-    context(context: CheckerContext, reporter: DiagnosticReporter)
-    override fun check(expression: FirPropertyAccessExpression) {
-        val path = filePathOf(context) ?: return
-        val src = expression.source ?: return
-
-        // (1) `.name` / `.ordinal` member access on an enum value.
-        val symbol = expression.calleeReference.toResolvedSymbol<FirCallableSymbol<*>>()
-        if (symbol != null) {
-            val member = symbol.name.asString()
-            if (member == "name" || member == "ordinal") {
-                val receiver = expression.explicitReceiver ?: return
-                val enumFqn = enumFqnOf(receiver) ?: return
-                val receiverSrc = receiver.source ?: return
-                val text = RdmaPluginTransformState.textOf(path)
-                val receiverText = text.substring(receiverSrc.startOffset, receiverSrc.endOffset).trim()
-                // A value expression usable as the entry name: an entry access inlines
-                // to its string literal; a variable reference passes through as-is.
-                val receiverValueText = (receiver as? FirPropertyAccessExpression)
-                    ?.let { enumEntryLiteral(it) } ?: receiverText
-                val replacement = if (member == "name") {
-                    // Under the name-string representation the value IS the name.
-                    receiverValueText
-                } else {
-                    "${RdmaPluginTransformState.enumOrdinalBridgeName(enumFqn.substringAfterLast('.'))}($receiverValueText)"
-                }
-                // The whole-span rewrite covers any nested entry access (e.g. the
-                // `HttpMethod.GET` inside `HttpMethod.GET.ordinal`).
-                RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
-                RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, replacement)
-                RdmaPluginTransformState.recordUsedSymbol(enumFqn)
-                return
-            }
-        }
-
-        // (2) Bare enum entry access: `HttpMethod.GET` -> `"GET"`.
-        val literal = enumEntryLiteral(expression) ?: return
-        // Skip if a whole-span rewrite (e.g. `.ordinal`) already covers this span.
-        if (RdmaPluginTransformState.isCovered(path, src.startOffset, src.endOffset)) return
-        RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, literal)
-    }
-}
-
-/**
- * `HttpMethod.valueOf(x)` -> `rdmaHttpMethodValueOf(x)` (validated by the kernel) and
- * `HttpMethod.values()` -> compile error (deferred).
- */
+/** `HttpMethod.valueOf(x)` is served by the stub; `HttpMethod.values()` is rejected. */
 object RdmaPluginEnumFunctionChecker : FirExpressionChecker<FirFunctionCall>(MppCheckerKind.Common) {
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(expression: FirFunctionCall) {
         val symbol = expression.calleeReference.toResolvedSymbol<FirNamedFunctionSymbol>() ?: return
-        val classId = symbol.callableId?.classId ?: return
-        val enumFqn = classId.asSingleFqName().asString()
-        val enum = RdmaPluginTransformState.enumByQualifiedName(enumFqn) ?: return
-        val path = filePathOf(context) ?: return
+        val enumFqn = symbol.callableId.classId?.asSingleFqName()?.asString() ?: return
+        if (!RdmaPluginTransformState.isEnumQualifiedName(enumFqn)) return
+        if (symbol.name.asString() != "values") return
         val src = expression.source ?: return
-        when (symbol.name.asString()) {
-            "valueOf" -> {
-                val text = RdmaPluginTransformState.textOf(path)
-                val argTexts = expression.argumentList.arguments.map { argTextOf(it, text) }
-                val bridge = RdmaPluginTransformState.enumValueOfBridgeName(enum.simpleName)
-                RdmaPluginTransformState.removeEditsWithin(path, src.startOffset, src.endOffset)
-                RdmaPluginTransformState.addEdit(path, src.startOffset, src.endOffset, "$bridge(${argTexts.joinToString(", ")})")
-                RdmaPluginTransformState.recordUsedSymbol(enumFqn)
-            }
-            "values" -> reporter.reportOn(
-                src,
-                FirErrors.UNSUPPORTED,
-                "Enum.values() is not supported in the plugin yet — use explicit entries or a kernel-side @RDMA helper",
-            )
+        reporter.reportOn(
+            src,
+            FirErrors.UNSUPPORTED,
+            "Enum.values() is not supported in the plugin yet — use explicit entries or a kernel-side @RDMA helper",
+        )
+    }
+}
+
+private const val IS_AS_MESSAGE =
+    "is/as against a kernel type is not supported in the plugin yet: a kernel object is a native proxy, " +
+        "not an instance of the plugin-side class, so the check cannot hold on every host " +
+        "(docs/design/runtime_rework.md §5.5). Use the static type, or a kernel-side @RDMA helper"
+
+/** `x is Person`, `x as Person`, `x as? HttpMethod` (also inside `when`) → compile error. */
+object RdmaPluginTypeOperatorChecker : FirExpressionChecker<FirTypeOperatorCall>(MppCheckerKind.Common) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(expression: FirTypeOperatorCall) {
+        if (expression.operation !in FirOperation.TYPES) return
+        val fqn = fqnOf(expression.conversionTypeRef.coneType) ?: return
+        if (!isKernelType(fqn)) return
+        val src = expression.source ?: return
+        reporter.reportOn(src, FirErrors.UNSUPPORTED, IS_AS_MESSAGE)
+    }
+}
+
+/** `filterIsInstance<Person>()` and other reified type checks against a kernel type → compile error. */
+object RdmaPluginReifiedKernelTypeChecker : FirExpressionChecker<FirFunctionCall>(MppCheckerKind.Common) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(expression: FirFunctionCall) {
+        val symbol = expression.calleeReference.toResolvedSymbol<FirNamedFunctionSymbol>() ?: return
+        val typeParams = symbol.typeParameterSymbols
+        if (typeParams.none { it.isReified }) return
+        typeParams.zip(expression.typeArguments).forEach { (param, arg) ->
+            if (!param.isReified) return@forEach
+            val argType = (arg as? org.jetbrains.kotlin.fir.types.FirTypeProjectionWithVariance)?.typeRef?.coneType
+            if (!isKernelType(fqnOf(argType))) return@forEach
+            val src = expression.source ?: return
+            reporter.reportOn(src, FirErrors.UNSUPPORTED, IS_AS_MESSAGE)
+            return
         }
     }
 }
 
-private fun String.escapeForJs(): String = replace("\\", "\\\\").replace("\"", "\\\"")
+/**
+ * A `when` over an `@RDMA` enum is exhaustive against the kernel's real enum but not
+ * against the plugin stub (whose values are entry-name strings), so it gets an `else`
+ * branch throwing `NoWhenBranchMatchedException`: an entry the plugin does not know fails
+ * loudly. Added to every such `when`, not only to those FIR marks `usedAsExpression`: the
+ * last statement of a lambda (`list.map { when (it) { … } }`) is not marked, and without
+ * the branch the JS compilation would silently turn it into a statement yielding nothing.
+ * `Nothing` fits both the expression and the statement position.
+ */
+object RdmaPluginEnumWhenChecker : FirExpressionChecker<FirWhenExpression>(MppCheckerKind.Common) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(expression: FirWhenExpression) {
+        val subject = expression.subjectVariable ?: return
+        val enumFqn = fqnOf(subject.returnTypeRef.coneType) ?: return
+        if (!RdmaPluginTransformState.isEnumQualifiedName(enumFqn)) return
+        if (expression.branches.any { it.condition is FirElseIfTrueCondition }) return
+        val src = expression.source ?: return
+        val path = filePathOf(context) ?: return
+        val text = RdmaPluginTransformState.textOf(path)
+        val close = text.lastIndexOf('}', src.endOffset - 1)
+        if (close < src.startOffset) return
+        RdmaPluginTransformState.addEdit(path, close, close, "else -> throw kotlin.NoWhenBranchMatchedException()\n")
+        RdmaPluginTransformState.recordUsedSymbol(enumFqn)
+    }
+}
 
 // ---- state channel descriptors (docs/design/type_descriptors.md)
 

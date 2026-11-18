@@ -46,9 +46,9 @@ import com.example.kernel.user.alice.Person
 // Stand invariant: the demo host renders the LAST content registered via
 // `runRdmaApp`, and the load manifest (`assets/kotlin/rdma-modules.json`) evaluates
 // plugin bundles in dependency order (bob-services -> alice-counter ->
-// itest-exceptions -> itest-exceptions2). The exception crash-test plugins are
-// opted out of the bake (rdmaBakeInApp=false) by the state e2e scripts, so this
-// module's Counter is the content that composes there.
+// itest-exceptions -> itest-exceptions2). The crash-test plugins are not baked by
+// default (only exception-propagation.sh bakes them), so this module's Counter is the
+// content that composes there.
 
 /** Erased re-typing for the negative probes: hands the runtime value through with
  *  no conversion, so a raw JS number can reach a typed channel untouched. */

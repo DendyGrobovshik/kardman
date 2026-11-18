@@ -30,6 +30,11 @@ import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeContinuat
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeDispose
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeEffectBody
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeFreeBlock
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeBlockCount
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeReleaseBlock
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeReleaseJsValue
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeRetainBlock
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeSetBlockParamDescs
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeLambda
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeScopeBlock
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeScopeBlock1
@@ -38,6 +43,11 @@ import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_takeNativeError
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_vtableDispatch
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.StableRef
+import kotlinx.cinterop.value
+import kotlinx.cinterop.ptr
+import kotlinx.cinterop.memScoped
+import kotlinx.cinterop.alloc
+import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.asStableRef
 import kotlinx.cinterop.toKString
 
@@ -97,6 +107,13 @@ object RdmaComposeHost {
     fun nativeInvokeDispose(resultId: Long) = rdma_nativeInvokeDispose(resultId)
     fun nativeInvokeFreeBlock(blockId: Long) = rdma_nativeInvokeFreeBlock(blockId)
 
+    // Block holders (docs/design/runtime_rework.md §4). Callable from any thread.
+    fun nativeRetainBlock(blockId: Long) = rdma_nativeRetainBlock(blockId)
+    fun nativeReleaseBlock(blockId: Long) = rdma_nativeReleaseBlock(blockId)
+    fun nativeSetBlockParamDescs(blockId: Long, descs: String) = rdma_nativeSetBlockParamDescs(blockId, descs)
+    fun nativeBlockCount(): Int = rdma_nativeBlockCount()
+    fun nativeReleaseJsValue(valueId: Long) = rdma_nativeReleaseJsValue(valueId)
+
     fun nativeInvokeContinuation(completionId: Long, value: Any?) {
         rdma_nativeInvokeContinuation(completionId, value?.let { StableRef.create(it).asCPointer() })
     }
@@ -132,29 +149,65 @@ object RdmaComposeHost {
         return sb.toString()
     }
 
-    /** Vtable dispatch (native actual): calls the JS override, returns the boxed String. */
-    fun rdmaVtableDispatch(vtablePtr: Long, vtableId: Int): Any? {
-        val handle: COpaquePointer = rdma_vtableDispatch(vtablePtr, vtableId) ?: return null
-        val ref = handle.asStableRef<Any>()
-        val value = ref.get()
-        ref.dispose()
-        return value
+    /**
+     * Vtable dispatch (native actual): runs the plugin override on the Hermes thread
+     * (runtime_rework §6.4); `fallthrough` when the method is not overridden; a JS
+     * exception or a timeout is thrown as `RdmaException` (§2.8).
+     */
+    fun rdmaVtableDispatch(
+        vtablePtr: Long,
+        vtableId: Int,
+        args: Array<Any?>,
+        paramDescs: String,
+        resultDesc: String,
+        fallthrough: Any,
+    ): Any? = memScoped {
+        val status = alloc<IntVar>()
+        val handle = rdma_vtableDispatch(vtablePtr, vtableId, StableRef.create(args).asCPointer(), paramDescs, resultDesc, status.ptr)
+        when (status.value) {
+            1 -> fallthrough
+            2 -> throw RdmaException("Error", rdma_takeNativeError()?.toKString() ?: "override failed", "", null)
+            else -> handle?.let {
+                val ref = it.asStableRef<Any>()
+                val value = ref.get()
+                ref.dispose()
+                value
+            }
+        }
     }
 }
 
-class ComposerScopeBlock(private val blockId: Long) : (Composer, Int) -> Unit {
+// Recompose-scope block: held by the recompose scope it was installed on; the JS block
+// is released when the scope drops it (finalization of this holder).
+class ComposerScopeBlock(blockId: Long) : (Composer, Int) -> Unit {
+    private val ref = RdmaBlockRef(blockId)
     override fun invoke(composer: Composer, changed: Int) {
-        RdmaComposeHost.nativeInvokeScopeBlock(blockId, composer, changed)
+        RdmaComposeHost.nativeInvokeScopeBlock(ref.id, composer, changed)
+        ref.touch()
     }
 }
 
-class ComposerScopeBlock1(private val blockId: Long) : (Int, Composer, Int) -> Unit {
+class ComposerScopeBlock1(blockId: Long) : (Int, Composer, Int) -> Unit {
+    private val ref = RdmaBlockRef(blockId)
     override fun invoke(p1: Int, composer: Composer, changed: Int) {
-        RdmaComposeHost.nativeInvokeScopeBlock1(blockId, composer, changed, p1)
+        RdmaComposeHost.nativeInvokeScopeBlock1(ref.id, composer, changed, p1)
+        ref.touch()
     }
 }
 
-class JsValueHolder(val id: Long)
+/**
+ * A plugin JS value stored in a kernel `remember` slot. Compose reports when the slot
+ * forgets it, and the JS value is released then (docs/design/runtime_rework.md §4).
+ */
+class JsValueHolder(val id: Long) : androidx.compose.runtime.RememberObserver {
+    private val released = kotlin.concurrent.AtomicInt(0)
+    private fun release() {
+        if (released.compareAndSet(0, 1)) RdmaComposeHost.nativeReleaseJsValue(id)
+    }
+    override fun onRemembered() {}
+    override fun onForgotten() = release()
+    override fun onAbandoned() = release()
+}
 
 // The currently-composing Composer, held as a raw object reference for the C ABI.
 // The widget wrappers and the composer proxy methods read this instead of

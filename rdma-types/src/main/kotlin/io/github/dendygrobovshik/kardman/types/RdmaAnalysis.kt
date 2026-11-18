@@ -74,6 +74,12 @@ data class RdmaDeclaration(
     val deprecated: Boolean = false,
     val isMutable: Boolean = false,
     val signature: List<RdmaParameterSignature>? = null,
+    /**
+     * Why a change of this top-level function cannot be shipped as a hotfix yet (some call
+     * sites could not run the new version, docs/design/runtime_rework.md §2.7, §6.8);
+     * null when it can. Classes and properties are never hotfixable yet, whatever this says.
+     */
+    val hotfixBlocker: String? = null,
 )
 
 /** A single callable parameter as seen by the release-time signature classifier. */
@@ -92,7 +98,7 @@ data class RdmaParameterSignature(
  * Only `(name, type, hasDefault)` is persisted: it is exactly what the release-time
  * [RdmaSignatureClassifier] needs to reject incompatible signature changes, and it keeps the
  * committed baseline free of the raw default-expression source text. The `defaultValue` text is
- * transient — it lives only in the in-memory analysis (`rdma_analysis.json`) where the polyfill
+ * transient — it lives only in the in-memory analysis (`kernel_manifest_<platform>.json`) where the polyfill
  * materializer reads it to re-fill a masked parameter.
  */
 @Serializable

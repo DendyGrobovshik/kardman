@@ -21,7 +21,11 @@ VERSIONS_DIR="$IT_DIR/versions"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo; echo "==== $* ===="; }
 
-run_gradle() { "$GRADLE" -p "$ROOT_DIR" --console=plain -PrdmaVersionsDir="$VERSIONS_DIR" "$@"; }
+# The crash-test plugins are not baked by default (their gradle.properties); this
+# scenario is the one that needs them in the app.
+FORCE_BAKE="-PrdmaForceBakePlugins=:tests:stand:plugin:itest:exceptions,:tests:stand:plugin:itest:exceptions2"
+
+run_gradle() { "$GRADLE" -p "$ROOT_DIR" --console=plain -PrdmaVersionsDir="$VERSIONS_DIR" "$FORCE_BAKE" "$@"; }
 
 adb_dev() { adb devices | grep -q 'emulator-.*\sdevice' || fail "no emulator attached"; }
 
@@ -49,13 +53,13 @@ step_0_static_release() {
         -PrdmaPolicyFile="$ROOT_DIR/rdma.toml"
 
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-internal" "internal"
+    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-internal" "internal"
 
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-alice" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-alice" ""
 
     run_gradle :tests:stand:kernel:user:itest:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-itest" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-itest" ""
 }
 
 # 1) Build and launch the app (baked kernel + exceptions plugin).

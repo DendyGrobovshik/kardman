@@ -232,7 +232,8 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
             }
             val resolutions = StringBuilder()
             ctor.parameters.forEachIndexed { i, p ->
-                val converted = fromC(RdmaDefaultSupport.raw(i), p.toMemberType())
+                memberLambdaDecl(p, RdmaDefaultSupport.raw(i))?.let { resolutions.append(it) }
+                val converted = memberParamFromC(p, RdmaDefaultSupport.raw(i))
                 val d = p.defaultValue
                 val resolved = if (p.hasDefault && d != null) {
                     "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else $converted"
@@ -251,6 +252,28 @@ $resolutions    return ${info.qualifiedName}($args).handle()
         }
     }
 
+    /**
+     * A lambda parameter of a method or constructor arrives as a block id: wrap it into the
+     * Kotlin function type, holding the block (runtime_rework §4) with its parameter
+     * descriptors (§4.5). Id 0 (null/absent) → null.
+     */
+    private fun memberLambdaDecl(p: ParameterInfo, raw: String): String? {
+        val ty = p.functionType?.type as? RdmaType.FunctionType ?: return null
+        val n = ty.parameters.size
+        val argNames = (0 until n).joinToString(", ") { "p$it" }
+        val argsArray = if (n == 0) "emptyArray<Any?>()" else (0 until n).joinToString(", ", "arrayOf<Any?>(", ")") { "p$it" }
+        val descs = RdmaCallbackDescs.joined(ty.parameters)
+        val fnType = functionParamKotlinFnType(ty)
+        return "    val ${raw}_fn: ($fnType)? = if ($raw == 0L) null else run {\n" +
+            "        val ${raw}_ref = io.github.dendygrobovshik.kardman.runtime.RdmaBlockRef($raw).withParamDescs(\"$descs\")\n" +
+            "        val ${raw}_lambda: $fnType = { $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda(${raw}_ref.id, $argsArray); ${raw}_ref.touch(); Unit }\n" +
+            "        ${raw}_lambda\n" +
+            "    }\n"
+    }
+
+    private fun memberParamFromC(p: ParameterInfo, raw: String): String =
+        if (p.functionType != null) (if (p.functionType!!.nullable) "${raw}_fn" else "${raw}_fn!!") else fromC(raw, p.toMemberType())
+
     private fun writeMethod(out: BufferedWriter, info: RdmaClassInfo, method: MethodInfo, registered: MutableList<String>) {
         val retM = MemberType(method.returnType, method.isList, method.listElementType, method.isMap, method.mapKeyType, method.mapValueType, method.nullableReturn)
         val name = cName(info.className + "_" + method.name)
@@ -263,7 +286,8 @@ $resolutions    return ${info.qualifiedName}($args).handle()
         val resolutions = StringBuilder()
         resolutions.append("    val self = handle.obj<${info.qualifiedName}>()\n")
         method.parameters.forEachIndexed { i, p ->
-            val converted = fromC(RdmaDefaultSupport.raw(i), p.toMemberType())
+            memberLambdaDecl(p, RdmaDefaultSupport.raw(i))?.let { resolutions.append(it) }
+            val converted = memberParamFromC(p, RdmaDefaultSupport.raw(i))
             val d = p.defaultValue
             val resolved = if (p.hasDefault && d != null) {
                 "if (${RdmaDefaultSupport.omitted(i)}) (${RdmaDefaultSupport.rewriteThis(d)}) else $converted"
@@ -422,8 +446,12 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
             val argNames = (0 until n).joinToString(", ") { "p$it" }
             val argsArray = if (n == 0) "emptyArray<Any?>()"
             else (0 until n).joinToString(", ", "arrayOf<Any?>(", ")") { "p$it" }
+            // The lambda holds the plugin block (runtime_rework §4) and carries its
+            // parameter descriptors (§4.5).
+            val descs = RdmaCallbackDescs.joined(ty.parameters)
+            lambdaDecls.append("    val ${raw}_ref = io.github.dendygrobovshik.kardman.runtime.RdmaBlockRef($raw).withParamDescs(\"$descs\")\n")
             lambdaDecls.append("    val ${raw}_fn: ${functionParamKotlinFnType(ty)} = " +
-                "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda($raw, $argsArray); Unit }\n")
+                "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda(${raw}_ref.id, $argsArray); ${raw}_ref.touch(); Unit }\n")
         }
 
         val resolutions = StringBuilder()
@@ -470,8 +498,12 @@ $body}
             val argNames = (0 until n).joinToString(", ") { "p$it" }
             val argsArray = if (n == 0) "emptyArray<Any?>()"
             else (0 until n).joinToString(", ", "arrayOf<Any?>(", ")") { "p$it" }
+            // The lambda holds the plugin block (runtime_rework §4) and carries its
+            // parameter descriptors (§4.5).
+            val descs = RdmaCallbackDescs.joined(ty.parameters)
+            lambdaDecls.append("        val ${raw}_ref = io.github.dendygrobovshik.kardman.runtime.RdmaBlockRef($raw).withParamDescs(\"$descs\")\n")
             lambdaDecls.append("        val ${raw}_fn: ${functionParamKotlinFnType(ty)} = " +
-                "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda($raw, $argsArray); Unit }\n")
+                "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda(${raw}_ref.id, $argsArray); ${raw}_ref.touch(); Unit }\n")
         }
         val resolutions = StringBuilder()
         fn.parameters.forEachIndexed { i, p ->

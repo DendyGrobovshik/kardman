@@ -19,27 +19,27 @@
 #include <string>
 #include <vector>
 
+#include "RdmaProxyCore.h"
+
 namespace facebook {
 namespace rdma {
 
-struct ListNativeState : public jsi::NativeState {
+// NativeState of a list proxy (kernel-created or adopted plugin list). Owns one
+// global reference to the native `java.util.List`.
+struct ListNativeState : public RdmaTaggedState {
     JavaVM* jvm_;
     jobject globalListRef_;
+    // Recursive element descriptor: a primitive/@RDMA FQN, `list:<elem>` or `map:<k>:<v>`.
     std::string elementType_;
-    // Mangled name of the original `checkIsMutable` method, discovered when a
-    // plugin-created `ArrayList` is morphed. Empty when the proxy wraps a
-    // kernel-created list (the native list is the source of truth for mutability).
-    std::string checkIsMutable_;
-    // True when the native list is a kernel `SnapshotStateList` created by
-    // `RDMA.mutableStateListOf`: mutation through the proxy then schedules a
-    // recomposition, and proxy operations during composition register the
-    // snapshot read first (docs/design/type_descriptors.md#state-semantics).
+    // True for a kernel `SnapshotStateList` created by `RDMA.mutableStateListOf`:
+    // the proxy then uses the state-backed prototype, whose operations register the
+    // composition read first (docs/design/type_descriptors.md#state-semantics).
     bool stateBacked_ = false;
 
     ListNativeState(JavaVM* jvm, jobject globalRef, const std::string& elemType)
-        : jvm_(jvm), globalListRef_(globalRef), elementType_(elemType) {}
-    
-    ~ListNativeState() {
+        : RdmaTaggedState(RdmaStateKind::List), jvm_(jvm), globalListRef_(globalRef), elementType_(elemType) {}
+
+    ~ListNativeState() override {
         if (globalListRef_ != nullptr && jvm_ != nullptr) {
             JNIEnv* env = nullptr;
             jint res = jvm_->GetEnv((void**)&env, JNI_VERSION_1_6);
@@ -56,24 +56,57 @@ struct ListNativeState : public jsi::NativeState {
     }
 };
 
-// Setup NativeState + the full plain `List`/`MutableList` API as HostFunctions +
-// the `size` getter. `elementType` is a recursive descriptor: a primitive or @RDMA
-// FQN, or `list:<elem>` for a nested list. `stateBacked` marks a kernel
-// `SnapshotStateList` handle (see ListNativeState::stateBacked_).
+inline std::shared_ptr<ListNativeState> rdmaListStateOf(jsi::Runtime& rt, const jsi::Value& v) {
+    return rdmaStateAs<ListNativeState>(rt, v, RdmaStateKind::List);
+}
+
+inline std::shared_ptr<ListNativeState> rdmaListStateOf(jsi::Runtime& rt, const jsi::Object& o) {
+    return rdmaStateAs<ListNativeState>(rt, o, RdmaStateKind::List);
+}
+
+// The native list behind a list proxy (a BORROWED global reference owned by the
+// proxy), or null when `v` is not a list proxy.
+inline jobject rdmaListJObjectOf(jsi::Runtime& rt, const jsi::Value& v) {
+    auto s = rdmaListStateOf(rt, v);
+    return s ? s->globalListRef_ : nullptr;
+}
+
+// Turns `obj` into a proxy over `globalListRef` in place (identity preserved): used
+// for plugin-created lists on their first crossing. Takes ownership of the global ref.
 void populateListHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject globalListRef, const std::string& elementType, bool stateBacked = false);
 
-// Discover the storage methods of a Kotlin/JS `ArrayList` on its prototype and
-// replace them on `obj` with wrappers that forward to the native list. Called only
-// for plugin-created lists, after `populateListHandle`.
+// Host functions of the list prototypes (plain or state-backed); consumed by the
+// JNI implementation of `rdmaPlatformProtoMethods`.
+std::vector<RdmaProtoMethod> rdmaJniListProtoMethods(bool stateBacked);
+
+// Legacy entry kept for source compatibility of generated code; the prototype swap
+// in `populateListHandle` already installs every storage method.
 void morphArrayList(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, const std::string& elementType);
 
-// Create a fresh ListHandle JSI object wrapping a JVM ArrayList (or a kernel
-// `SnapshotStateList` when `stateBacked` is set — docs/design/type_descriptors.md).
+// A fresh list proxy over a kernel list (or a kernel `SnapshotStateList` when
+// `stateBacked`). Takes ownership of `globalListRef`.
 jsi::Object createListHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalListRef, const std::string& elementType, bool stateBacked = false);
 
-// Materialize JS Array → JVM ArrayList + mutate JS object into permanent ListHandle.
-// Recursively materializes nested lists when `elementType` is a `list:<elem>` descriptor.
+// The native list for a JS list value: the kernel list behind a proxy, or a fresh
+// native `ArrayList` materialized from a plugin-created Kotlin list (which is then
+// adopted as a proxy in place). Nested lists/maps materialize recursively.
+//
+// Ownership: returns a NEW LOCAL reference owned by the caller (null for `null`).
+// The proxy keeps its own global reference.
 jobject materializeArray(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object& jsObj, const std::string& elementType);
+
+// Descriptor-driven element conversion shared by the list and map proxies.
+// JS -> JVM: returns a NEW LOCAL reference (null for null/undefined); raises a
+// cross-runtime type error when the value does not fit the descriptor.
+jobject rdmaJsToJniTyped(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, const jsi::Value& v, const std::string& desc);
+// JVM -> JS: CONSUMES the local reference `local` (released on every path).
+jsi::Value rdmaJniToJsTyped(jsi::Runtime& rt, JavaVM* jvm, jobject local, const std::string& desc);
+
+// A temporary native `java.util.ArrayList` (local reference) holding the elements of
+// any JS-side collection argument (`addAll`, `containsAll`, …): the native list behind
+// a proxy, or a copy of a plugin collection's `toArray()` — the argument itself is NOT
+// adopted (no side effect on the caller's collection).
+jobject rdmaTempJniCollection(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, const jsi::Value& v, const std::string& elemDesc);
 
 } // namespace rdma
 } // namespace facebook

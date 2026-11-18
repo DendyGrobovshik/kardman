@@ -72,6 +72,26 @@ class CppGenerator(
      * of `isRdmaClass` so that a module can marshal @RDMA types declared in *other*
      * kernel modules without knowing their concrete class.
      */
+    /**
+     * A lambda parameter of a method or constructor: the plugin passes a block id; the kernel
+     * receives an `RdmaFunctionN` holding the block, with the callback's parameter
+     * descriptors registered (runtime_rework §4.5). Null/undefined → null (or the default).
+     */
+    private fun lambdaArg(param: ParameterInfo, idx: Int, guarded: Boolean): String {
+        val fn = param.functionType!!.type as RdmaType.FunctionType
+        val descs = RdmaCallbackDescs.joined(fn.parameters)
+        val present = (if (guarded) "count > $idx && !args[$idx].isUndefined() && " else "") + "args[$idx].isNumber()"
+        return buildString {
+            append("    jobject arg_${param.name} = nullptr;\n")
+            append("    if ($present) {\n")
+            append("        jlong id_${param.name} = (jlong)args[$idx].getNumber();\n")
+            append("        arg_${param.name} = createRdmaFunction(env, ${fn.parameters.size}, id_${param.name});\n")
+            if (descs.isNotEmpty()) append("        rdmaBlockSetParamDescs(id_${param.name}, \"$descs\");\n")
+            append("    }\n")
+            if (guarded) append("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+        }
+    }
+
     private fun isObjectRef(typeName: String): Boolean =
         JniTypeMapper.forType(typeName) == null && !typeName.startsWith("kotlin.Function")
 
@@ -466,6 +486,7 @@ ${info.className}NativeState::~${info.className}NativeState() {
 static jsi::Value ${info.className}_${getterName}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value& thisVal) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env) return jsi::Value::undefined();
     auto thisObj = thisVal.asObject(r);
     auto state = std::static_pointer_cast<${info.className}NativeState>(thisObj.getNativeState(r));
@@ -499,6 +520,7 @@ static jsi::Value ${info.className}_${getterName}(jsi::Runtime& r, JavaVM* jvm, 
 static jsi::Value ${info.className}_${setterName}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value& thisVal, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env) return jsi::Value::undefined();
     auto thisObj = thisVal.asObject(r);
     auto state = std::static_pointer_cast<${info.className}NativeState>(thisObj.getNativeState(r));
@@ -519,6 +541,7 @@ static jsi::Value ${info.className}_${setterName}(jsi::Runtime& r, JavaVM* jvm, 
 static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value& thisVal, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env) return jsi::Value::undefined();
     auto thisObj = thisVal.asObject(r);
     auto state = std::static_pointer_cast<${info.className}NativeState>(thisObj.getNativeState(r));
@@ -569,26 +592,18 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     out.write("    jobject arg_${param.name} = nullptr;\n")
                     out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto listObj = args[$idx].asObject(r);\n")
-                    out.write("        if (listObj.hasNativeState(r)) {\n")
-                    out.write("            auto ns = listObj.getNativeState(r);\n")
-                    out.write("            if (ns) arg_${param.name} = *(jobject*)((char*)ns.get() + 16);\n")
-                    out.write("        } else {\n")
                     out.write("            arg_${param.name} = materializeArray(env, r, jvm, listObj, \"${param.listElementType ?: ""}\");\n")
-                    out.write("        }\n")
                     out.write("    }\n")
                     if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (param.isMap) {
                     out.write("    jobject arg_${param.name} = nullptr;\n")
                     out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto mapObj = args[$idx].asObject(r);\n")
-                    out.write("        if (mapObj.hasNativeState(r)) {\n")
-                    out.write("            auto ns = mapObj.getNativeState(r);\n")
-                    out.write("            if (ns) arg_${param.name} = *(jobject*)((char*)ns.get() + 16);\n")
-                    out.write("        } else {\n")
                     out.write("            arg_${param.name} = materializeMap(env, r, jvm, mapObj, \"${param.mapKeyType ?: ""}\", \"${param.mapValueType ?: ""}\");\n")
-                    out.write("        }\n")
                     out.write("    }\n")
                     if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                } else if (param.functionType != null) {
+                    out.write(lambdaArg(param, idx, guarded))
                 } else if (isEnumType(param.type)) {
                     val enumName = param.type.substringAfterLast('.')
                     out.write("    jobject arg_${param.name} = nullptr;\n")
@@ -640,6 +655,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     else -> when {
                         param.isList -> "arg_${param.name}"
                         param.isMap -> "arg_${param.name}"
+                        param.functionType != null -> "arg_${param.name}"
                         isObjectRef(param.type) -> "arg_${param.name}"
                         else -> "nullptr"
                     }
@@ -733,7 +749,13 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
         }
 
         out.write("""
+// The shared prototype of every ${info.className} proxy (docs/design/runtime_rework.md §3.7):
+// built once at bridge install; a proxy is `Object.create(proto)` + its NativeState.
+// Intentionally leaked — it lives as long as the runtime.
+static jsi::Object* g_${info.className}Proto = nullptr;
+
 void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
+    jsi::Object proto(rt);
 """)
         for (method in info.methods.filter { !it.isSuspend }) {
             val paramCount = method.parameters.size
@@ -745,7 +767,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                 return ${info.className}_${method.name}(r, jvm, thisVal, args, count);
             }
         );
-        rt.global().setProperty(rt, "__${info.className}_proto_${method.name}", std::move(fn));
+        proto.setProperty(rt, "${method.name}", std::move(fn));
     }
 """)
         }
@@ -759,7 +781,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                 return ${info.className}_${getterName}(r, jvm, thisVal);
             }
         );
-        rt.global().setProperty(rt, "__${info.className}_proto_${getterName}", std::move(fn));
+        proto.setProperty(rt, "$getterName", std::move(fn));
     }
 """)
             if (prop.isMutable) {
@@ -772,16 +794,17 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                 return ${info.className}_${setterName}(r, jvm, thisVal, args, count);
             }
         );
-        rt.global().setProperty(rt, "__${info.className}_proto_${setterName}", std::move(fn));
+        proto.setProperty(rt, "$setterName", std::move(fn));
     }
 """)
             }
         }
-        out.write("}\n\n")
+        out.write("    g_${info.className}Proto = new jsi::Object(std::move(proto));\n}\n\n")
 
         out.write("""jsi::Object create${info.className}Instance(jsi::Runtime& rt, JavaVM* jvm, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env) return jsi::Object(rt);
 
 """)
@@ -812,12 +835,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     out.write("    jobject arg_${param.name} = nullptr;\n")
                     out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto listObj_${param.name} = args[$idx].asObject(rt);\n")
-                    out.write("        if (listObj_${param.name}.hasNativeState(rt)) {\n")
-                    out.write("            auto ns_${param.name} = listObj_${param.name}.getNativeState(rt);\n")
-                    out.write("            if (ns_${param.name}) arg_${param.name} = *(jobject*)((char*)ns_${param.name}.get() + 16);\n")
-                    out.write("        } else {\n")
                     out.write("            arg_${param.name} = materializeArray(env, rt, jvm, listObj_${param.name}, \"$elemType\");\n")
-                    out.write("        }\n")
                     out.write("    }\n")
                     if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                 } else if (param.isMap) {
@@ -826,14 +844,11 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     out.write("    jobject arg_${param.name} = nullptr;\n")
                     out.write("    if (${if (guarded) "count > $idx && !args[$idx].isUndefined() && " else ""}!args[$idx].isNull()) {\n")
                     out.write("        auto mapObj_${param.name} = args[$idx].asObject(rt);\n")
-                    out.write("        if (mapObj_${param.name}.hasNativeState(rt)) {\n")
-                    out.write("            auto ns_${param.name} = mapObj_${param.name}.getNativeState(rt);\n")
-                    out.write("            if (ns_${param.name}) arg_${param.name} = *(jobject*)((char*)ns_${param.name}.get() + 16);\n")
-                    out.write("        } else {\n")
                     out.write("            arg_${param.name} = materializeMap(env, rt, jvm, mapObj_${param.name}, \"$keyType\", \"$valueType\");\n")
-                    out.write("        }\n")
                     out.write("    }\n")
                     if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                } else if (param.functionType != null) {
+                    out.write(lambdaArg(param, idx, guarded))
                 } else if (isEnumType(param.type)) {
                     val enumName = param.type.substringAfterLast('.')
                     out.write("    jobject arg_${param.name} = nullptr;\n")
@@ -881,6 +896,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                     else -> when {
                         param.isList -> "arg_${param.name}"
                         param.isMap -> "arg_${param.name}"
+                        param.functionType != null -> "arg_${param.name}"
                         isObjectRef(param.type) -> "arg_${param.name}"
                         else -> "nullptr"
                     }
@@ -900,48 +916,19 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
             out.write("    jobject globalObj = env->NewGlobalRef(localObj);\n")
             out.write("    env->DeleteLocalRef(localObj);\n\n")
         }
-        out.write("    auto jsObj = jsi::Object(rt);\n")
-        out.write("    auto nativeState = std::make_shared<${info.className}NativeState>(jvm, globalObj);\n")
-        out.write("    jsObj.setNativeState(rt, nativeState);\n")
-        out.write("""
-    // Copy prototype methods onto instance
-""")
-        emitClassSurface(out, info)
-        out.write("    return jsObj;\n}\n\n")
+        out.write("    return create${info.className}Wrapper(rt, jvm, globalObj);\n}\n\n")
 
         // Wrapper: creates JSI object around existing jobject (for @RDMA return values)
         out.write("""jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, JavaVM* jvm, jobject globalObj) {
-    auto jsObj = jsi::Object(rt);
-    auto nativeState = std::make_shared<${info.className}NativeState>(jvm, globalObj);
-    jsObj.setNativeState(rt, nativeState);
+    auto jsObj = jsi::Object::create(rt, jsi::Value(rt, *g_${info.className}Proto));
+    jsObj.setNativeState(rt, std::make_shared<${info.className}NativeState>(jvm, globalObj));
+    return jsObj;
+}
+
 """)
-        emitClassSurface(out, info)
-        out.write("    return jsObj;\n}\n\n")
 
         out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
         out.close()
-    }
-
-    /**
-     * Emits the lines that attach an `@RDMA` class's public surface (non-suspend methods,
-     * property getters, and setters for mutable properties) onto a freshly created `jsObj`.
-     *
-     * Single source of truth for "what a `[RdmaClassInfo]` looks like on the JS side"; both the
-     * constructor path and the rehydration path (`createXxxWrapper`) call it so the two cannot
-     * drift (see the property-setter bug where the wrapper omitted setters).
-     */
-    private fun emitClassSurface(out: BufferedWriter, info: RdmaClassInfo) {
-        for (method in info.methods.filter { !it.isSuspend }) {
-            out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
-        }
-        for (prop in info.properties) {
-            val getterName = "get${prop.name.replaceFirstChar { it.uppercase() }}"
-            out.write("    jsObj.setProperty(rt, \"$getterName\", rt.global().getProperty(rt, \"__${info.className}_proto_${getterName}\"));\n")
-            if (prop.isMutable) {
-                val setterName = "set${prop.name.replaceFirstChar { it.uppercase() }}"
-                out.write("    jsObj.setProperty(rt, \"$setterName\", rt.global().getProperty(rt, \"__${info.className}_proto_${setterName}\"));\n")
-            }
-        }
     }
 
     private fun generateBridge(infos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo>, enums: List<RdmaEnumInfo> = emptyList()) {
@@ -1113,6 +1100,7 @@ jsi::Value createWithOverrides(jsi::Runtime& rt, JavaVM* jvm, const std::string&
             cpp.write("""        }
         JNIEnv* env = nullptr;
         jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
         auto state = std::static_pointer_cast<${info.className}NativeState>(jsObj.getNativeState(rt));
         jfieldID vtableField = env->GetFieldID(g_rdmaCache.${info.className.lowercase()}_cache.clazz, "__vtable", "J");
         env->SetLongField(state->getObject(), vtableField, (jlong)vt);
@@ -1129,26 +1117,21 @@ jsi::Value wrapUserObject(jsi::Runtime& rt, JavaVM* jvm, jobject obj) {
     if (!obj) return jsi::Value::null();
     JNIEnv* env = getEnv(jvm);
     if (!env) return jsi::Value::undefined();
+    // Exact-class dispatch against the cached class refs: one GetObjectClass and a
+    // pointer compare per class — no FindClass / Class.getName / string compare
+    // (docs/design/runtime_rework.md §3.7).
     jclass objClass = env->GetObjectClass(obj);
-    jclass classClass = env->FindClass("java/lang/Class");
-    jmethodID getName = env->GetMethodID(classClass, "getName", "()Ljava/lang/String;");
-    jstring jname = (jstring)env->CallObjectMethod(objClass, getName);
-    env->DeleteLocalRef(objClass);
-    env->DeleteLocalRef(classClass);
-    if (!jname) return jsi::Value::undefined();
-    const char* cname = env->GetStringUTFChars(jname, nullptr);
-    std::string name(cname);
-    env->ReleaseStringUTFChars(jname, cname);
-    env->DeleteLocalRef(jname);
-
-    jobject globalObj = env->NewGlobalRef(obj);
+    jsi::Value result = jsi::Value::undefined();
 """)
         for (info in infos) {
-            cpp.write("""    if (name == "${info.qualifiedName}") return create${info.className}Wrapper(rt, jvm, globalObj);
+            val cv = "${info.className.lowercase()}_cache"
+            cpp.write("""    if (result.isUndefined() && g_rdmaCache.$cv.clazz && env->IsSameObject(objClass, g_rdmaCache.$cv.clazz)) {
+        result = create${info.className}Wrapper(rt, jvm, env->NewGlobalRef(obj));
+    }
 """)
         }
-        cpp.write("""    env->DeleteGlobalRef(globalObj);
-    return jsi::Value::undefined();
+        cpp.write("""    env->DeleteLocalRef(objClass);
+    return result;
 }
 
 $nsClose} // namespace rdma
@@ -1164,6 +1147,7 @@ $nsClose} // namespace rdma
 static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env) return jsi::Value::undefined();
 """)
         if (hasDefaults) sb.append("    int mask = 0;\n")
@@ -1214,6 +1198,7 @@ static jsi::Value rdma_fn_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Va
 static jsi::Value rdma_suspend_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env) return jsi::Value::undefined();
     jlong completionId = (jlong)args[0].getNumber();
     rdmaRegisterSuspendResultType(completionId, "$typeDesc");
@@ -1243,6 +1228,7 @@ static jsi::Value rdma_suspend_${fn.name}(jsi::Runtime& r, JavaVM* jvm, const js
 static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env) return jsi::Value::undefined();
     jlong completionId = (jlong)args[0].getNumber();
     rdmaRegisterSuspendResultType(completionId, "$typeDesc");
@@ -1343,12 +1329,7 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
             return "    jobject arg_${p.name} = nullptr;\n" +
                 "    if (${notUndef()}!args[$idx].isNull()) {\n" +
                 "        auto listObj = args[$idx].asObject(r);\n" +
-                "        if (listObj.hasNativeState(r)) {\n" +
-                "            auto ns = listObj.getNativeState(r);\n" +
-                "            if (ns) arg_${p.name} = *(jobject*)((char*)ns.get() + 16);\n" +
-                "        } else {\n" +
                 "            arg_${p.name} = materializeArray(env, r, jvm, listObj, \"${p.listElementType ?: ""}\");\n" +
-                "        }\n" +
                 "    }\n" +
                 maskLine()
         }
@@ -1356,12 +1337,7 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
             return "    jobject arg_${p.name} = nullptr;\n" +
                 "    if (${notUndef()}!args[$idx].isNull()) {\n" +
                 "        auto mapObj = args[$idx].asObject(r);\n" +
-                "        if (mapObj.hasNativeState(r)) {\n" +
-                "            auto ns = mapObj.getNativeState(r);\n" +
-                "            if (ns) arg_${p.name} = *(jobject*)((char*)ns.get() + 16);\n" +
-                "        } else {\n" +
                 "            arg_${p.name} = materializeMap(env, r, jvm, mapObj, \"${p.mapKeyType ?: ""}\", \"${p.mapValueType ?: ""}\");\n" +
-                "        }\n" +
                 "    }\n" +
                 maskLine()
         }
@@ -1421,6 +1397,7 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
 static jsi::Value rdma_enum_${n}_ordinal(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env || count < 1) return jsi::Value::undefined();
     std::string name = args[0].isNull() ? "" : args[0].getString(r).utf8(r);
     jstring jname = env->NewStringUTF(name.c_str());
@@ -1434,6 +1411,7 @@ static jsi::Value rdma_enum_${n}_ordinal(jsi::Runtime& r, JavaVM* jvm, const jsi
 static jsi::Value rdma_enum_${n}_valueof(jsi::Runtime& r, JavaVM* jvm, const jsi::Value* args, size_t count) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env || count < 1) return jsi::Value::undefined();
     std::string name = args[0].isNull() ? "" : args[0].getString(r).utf8(r);
     jstring jname = env->NewStringUTF(name.c_str());
@@ -1535,6 +1513,7 @@ $nullCheck    auto cstr = env->GetStringUTFChars(jret, nullptr);
 static jsi::Value rdma_static_${info.className}_${static.name}(jsi::Runtime& r, JavaVM* jvm) {
     JNIEnv* env = nullptr;
     jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JniLocalFrame localFrame_(env);
     if (!env) return jsi::Value::undefined();
 $body}
 """
@@ -1609,12 +1588,7 @@ $body}
                 "    jobject arg_${p.name} = nullptr;\n" +
                     "    if (${notUndef()}!args[$i].isNull()) {\n" +
                     "        auto listObj_${p.name} = args[$i].asObject(r);\n" +
-                    "        if (listObj_${p.name}.hasNativeState(r)) {\n" +
-                    "            auto ns_${p.name} = listObj_${p.name}.getNativeState(r);\n" +
-                    "            if (ns_${p.name}) arg_${p.name} = *(jobject*)((char*)ns_${p.name}.get() + 16);\n" +
-                    "        } else {\n" +
                     "            arg_${p.name} = materializeArray(env, r, jvm, listObj_${p.name}, \"$elem\");\n" +
-                    "        }\n" +
                     "    }\n" +
                     maskLine()
             }
@@ -1624,24 +1598,23 @@ $body}
                 "    jobject arg_${p.name} = nullptr;\n" +
                     "    if (${notUndef()}!args[$i].isNull()) {\n" +
                     "        auto mapObj_${p.name} = args[$i].asObject(r);\n" +
-                    "        if (mapObj_${p.name}.hasNativeState(r)) {\n" +
-                    "            auto ns_${p.name} = mapObj_${p.name}.getNativeState(r);\n" +
-                    "            if (ns_${p.name}) arg_${p.name} = *(jobject*)((char*)ns_${p.name}.get() + 16);\n" +
-                    "        } else {\n" +
                     "            arg_${p.name} = materializeMap(env, r, jvm, mapObj_${p.name}, \"$key\", \"$value\");\n" +
-                    "        }\n" +
                     "    }\n" +
                     maskLine()
             }
             is RdmaType.FunctionType -> {
                 val arity = t.parameters.size
+                // Typed callback arguments (runtime_rework §4.5): the block marshals
+                // kernel -> plugin arguments by these descriptors.
+                val descs = RdmaCallbackDescs.joined(t.parameters)
+                val setDescs = if (descs.isEmpty()) "" else "    rdmaBlockSetParamDescs(id_${p.name}, \"$descs\");\n"
                 if (guarded) {
                     "    jlong id_${p.name} = 0;\n" +
                         "    if (!args[$i].isUndefined()) { id_${p.name} = (jlong)args[$i].getNumber(); } else { mask |= (1 << $i); }\n" +
-                        "    jobject arg_${p.name} = createRdmaFunction(env, $arity, id_${p.name});\n"
+                        "    jobject arg_${p.name} = createRdmaFunction(env, $arity, id_${p.name});\n" + setDescs
                 } else {
                     "    jlong id_${p.name} = (jlong)args[$i].getNumber();\n" +
-                        "    jobject arg_${p.name} = createRdmaFunction(env, $arity, id_${p.name});\n"
+                        "    jobject arg_${p.name} = createRdmaFunction(env, $arity, id_${p.name});\n" + setDescs
                 }
             }
             is RdmaType.UnitType -> ""

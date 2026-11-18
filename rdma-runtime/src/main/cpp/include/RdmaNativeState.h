@@ -17,6 +17,8 @@
 #include <jsi/jsi.h>
 #include <jni.h>
 
+#include "RdmaProxyCore.h"
+
 namespace facebook {
 namespace rdma {
 
@@ -26,9 +28,10 @@ namespace rdma {
 // knowing the concrete class (and, critically, without any virtual-call overhead:
 // `std::static_pointer_cast<RdmaObjectNativeState>` is a no-op under single
 // inheritance, and `getObject()` is a direct member load).
-class RdmaObjectNativeState : public jsi::NativeState {
+class RdmaObjectNativeState : public RdmaTaggedState {
 public:
-    RdmaObjectNativeState(JavaVM* jvm, jobject globalRef) : jvm_(jvm), globalRef_(globalRef) {}
+    RdmaObjectNativeState(JavaVM* jvm, jobject globalRef)
+        : RdmaTaggedState(RdmaStateKind::Object), jvm_(jvm), globalRef_(globalRef) {}
 
     ~RdmaObjectNativeState() override {
         if (globalRef_ != nullptr && jvm_ != nullptr) {

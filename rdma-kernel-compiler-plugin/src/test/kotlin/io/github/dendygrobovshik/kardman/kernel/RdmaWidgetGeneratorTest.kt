@@ -125,11 +125,34 @@ class RdmaWidgetGeneratorTest {
         val (cpp, kt) = generate(listOf(widget))
         val entries = kt["RdmaWidgetEntries.kt"] ?: error("RdmaWidgetEntries.kt not generated")
         assertContains(entries, "fun composeNavigationPanel(_p0: String?, _p1: List<String>?, _p2: List<Long>?, _p3: Long)")
-        assertContains(entries, "val actions: List<() -> Unit> = _p2!!.map { { RdmaComposeHost.nativeInvokeCallback(it, emptyArray<Any?>()) } }")
+        // Composition-owned block holders (docs/design/runtime_rework.md §4.4).
+        assertContains(entries, "val actions: List<() -> Unit> = rdmaRememberCallbackList(_p2!!)")
         assertContains(entries, "actionLabels = actionLabels")
         val bridge = cpp["RdmaWidgetBridge.cpp"] ?: error("not generated")
         assertContains(bridge, "materializeArray(e, r, jvm, listObj_1, \"kotlin.String\")")
-        assertContains(bridge, "materializeArray(e, r, jvm, listObj_2, \"kotlin.Long\")")
+        assertContains(bridge, "materializeArray(e, r, jvm, listObj_2, \"rdma.BlockId\")")
+    }
+
+    @Test
+    fun `primitive params cross unboxed so the entry matches the JNI signature`() {
+        val spacer = RdmaFunctionInfo(
+            name = "Spacer",
+            qualifiedName = "com.example.kernel.Spacer",
+            facadeClass = "com.example.kernel.WidgetsKt",
+            composable = true,
+            parameters = listOf(
+                RdmaParameterInfo("width", RdmaTypeRef(RdmaType.Primitive("kotlin.Double"))),
+                RdmaParameterInfo("height", RdmaTypeRef(RdmaType.Primitive("kotlin.Double"))),
+            ),
+            returnType = RdmaTypeRef(RdmaType.UnitType),
+        )
+        val (cpp, kt) = generate(listOf(spacer))
+        val entries = kt["RdmaWidgetEntries.kt"] ?: error("not generated")
+        // A boxed `Double?` here made the JNI lookup `(DD...)V` fail at startup.
+        assertContains(entries, "fun composeSpacer(_p0: Double, _p1: Double)")
+        assertContains(entries, "val width: Double = _p0\n")
+        val bridge = cpp["RdmaWidgetBridge.cpp"] ?: error("not generated")
+        assertContains(bridge, "\"composeSpacer\", \"(DDLandroidx/compose/runtime/Composer;I)V\"")
     }
 
     @Test

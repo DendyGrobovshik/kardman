@@ -54,20 +54,115 @@ private fun Project.kernelModuleId(): String {
 
 private fun vtableExpectSource(kernelPackage: String) = """package $kernelPackage
 
-expect fun rdmaVtableDispatch(vtablePtr: Long, vtableId: Int): Any?
+// Calls a plugin override of an `open` method (the vtable): arguments and the result are
+// marshalled by the method's type descriptors; returns `fallthrough` when the method is not
+// overridden; a JS exception is thrown as `RdmaException` (runtime_rework §6.4, §2.8).
+expect fun rdmaVtableDispatch(
+    vtablePtr: Long,
+    vtableId: Int,
+    args: Array<Any?>,
+    paramDescs: String,
+    resultDesc: String,
+    fallthrough: Any,
+): Any?
 """
 
 private fun vtableAndroidActualSource(kernelPackage: String) = """package $kernelPackage
 
-actual external fun rdmaVtableDispatch(vtablePtr: Long, vtableId: Int): Any?
+actual external fun rdmaVtableDispatch(
+    vtablePtr: Long,
+    vtableId: Int,
+    args: Array<Any?>,
+    paramDescs: String,
+    resultDesc: String,
+    fallthrough: Any,
+): Any?
 """
 
 private fun vtableIosActualSource(kernelPackage: String) = """package $kernelPackage
 
 import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 
-actual fun rdmaVtableDispatch(vtablePtr: Long, vtableId: Int): Any? =
-    RdmaComposeHost.rdmaVtableDispatch(vtablePtr, vtableId)
+actual fun rdmaVtableDispatch(
+    vtablePtr: Long,
+    vtableId: Int,
+    args: Array<Any?>,
+    paramDescs: String,
+    resultDesc: String,
+    fallthrough: Any,
+): Any? = RdmaComposeHost.rdmaVtableDispatch(vtablePtr, vtableId, args, paramDescs, resultDesc, fallthrough)
+"""
+
+// Hotfix dispatch slots (docs/design/runtime_rework.md §6). The kernel compiler plugin
+// gives every slotted top-level @RDMA function a static `RdmaSlotCell` and a prologue
+// calling `rdmaSlotInvoke`; the runtime keeps the cells by FQN and fills `blockId` when
+// a hotfix bundle calls `RDMA.installSlot`. Generated per module package (like the
+// vtable dispatch), so a kernel module needs no runtime dependency on Android.
+private fun slotsCommonSource(kernelPackage: String) = """package $kernelPackage
+
+/** Hotfix dispatch slot of one @RDMA callable (generated; runtime_rework §6). */
+internal class RdmaSlotCell(
+    fqn: String,
+    @kotlin.jvm.JvmField val paramDescs: String,
+    @kotlin.jvm.JvmField val resultDesc: String,
+) {
+    /** Block id of the JS implementation; 0 while the callable is not hotfixed. */
+    @kotlin.concurrent.Volatile
+    @kotlin.jvm.JvmField
+    var blockId: Long = 0L
+
+    init {
+        rdmaSlotRegister(this, fqn)
+    }
+}
+
+/** Returned by the runtime when the calling thread cannot run the hotfix. */
+internal object RdmaSlotFallthrough
+
+internal fun rdmaSlotInvoke(cell: RdmaSlotCell, args: Array<Any?>): Any? =
+    rdmaSlotInvokeNative(cell.blockId, args, cell.paramDescs, cell.resultDesc, RdmaSlotFallthrough)
+
+internal fun rdmaSlotHandled(result: Any?): Boolean = result !== RdmaSlotFallthrough
+
+internal expect fun rdmaSlotRegister(cell: RdmaSlotCell, fqn: String)
+
+internal expect fun rdmaSlotInvokeNative(
+    blockId: Long,
+    args: Array<Any?>,
+    paramDescs: String,
+    resultDesc: String,
+    fallthrough: Any,
+): Any?
+"""
+
+private fun slotsAndroidActualSource(kernelPackage: String) = """package $kernelPackage
+
+internal actual external fun rdmaSlotRegister(cell: RdmaSlotCell, fqn: String)
+
+internal actual external fun rdmaSlotInvokeNative(
+    blockId: Long,
+    args: Array<Any?>,
+    paramDescs: String,
+    resultDesc: String,
+    fallthrough: Any,
+): Any?
+"""
+
+private fun slotsIosActualSource(kernelPackage: String) = """package $kernelPackage
+
+import io.github.dendygrobovshik.kardman.runtime.RdmaSlots
+
+internal actual fun rdmaSlotRegister(cell: RdmaSlotCell, fqn: String) {
+    RdmaSlots.register(fqn) { blockId -> cell.blockId = blockId }
+}
+
+internal actual fun rdmaSlotInvokeNative(
+    blockId: Long,
+    args: Array<Any?>,
+    paramDescs: String,
+    resultDesc: String,
+    fallthrough: Any,
+): Any? = RdmaSlots.invokeNative(blockId, args, paramDescs, resultDesc, fallthrough)
 """
 
 class RdmaKernelGradlePlugin : KotlinCompilerPluginSupportPlugin {
@@ -80,14 +175,17 @@ class RdmaKernelGradlePlugin : KotlinCompilerPluginSupportPlugin {
         File(target.buildDir, "generated/rdma/kotlin").also {
             it.mkdirs()
             File(it, "RdmaVtable.kt").writeText(vtableExpectSource(pkg))
+            File(it, "RdmaSlots.kt").writeText(slotsCommonSource(pkg))
         }
         File(target.buildDir, "generated/rdma/androidMain").also {
             it.mkdirs()
             File(it, "RdmaVtable.kt").writeText(vtableAndroidActualSource(pkg))
+            File(it, "RdmaSlotsNative.kt").writeText(slotsAndroidActualSource(pkg))
         }
         File(target.buildDir, "generated/rdma/iosMain").also {
             it.mkdirs()
             File(it, "RdmaVtable.kt").writeText(vtableIosActualSource(pkg))
+            File(it, "RdmaSlotsNative.kt").writeText(slotsIosActualSource(pkg))
         }
     }
 

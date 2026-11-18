@@ -13,598 +13,530 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+// JNI map proxies and their keys/values/entries views on the shared-prototype object
+// model (docs/design/runtime_rework.md §3.5), plus the JNI implementation of
+// `rdmaPlatformProtoMethods`.
+
 #include "MapHandle.h"
 #include "ListHandle.h"
 #include "RdmaCompose.h"
+#include "RdmaJniUtil.h"
+#include "RdmaProxyCore.h"
+
 #include <jni.h>
 
 namespace facebook {
 namespace rdma {
 
-// Parses a `map:<key>:<value>` descriptor body (the part after `map:`) into the
-// key and value descriptors. Mirrors the Kotlin descriptor grammar.
-static std::pair<std::string, std::string> parseMapBody(const std::string& s) {
-    if (s.rfind("list:", 0) == 0) {
-        auto inner = parseMapBody(s.substr(5));
-        return {"list:" + inner.first, inner.second};
-    }
-    if (s.rfind("map:", 0) == 0) {
-        auto k = parseMapBody(s.substr(4));
-        auto v = parseMapBody(k.second);
-        return {"map:" + k.first + ":" + v.first, v.second};
-    }
-    size_t idx = s.find(':');
-    if (idx == std::string::npos) return {s, ""};
-    return {s.substr(0, idx), s.substr(idx + 1)};
+namespace {
+
+struct MapJni {
+    jclass linkedHashMapClass = nullptr;
+    jmethodID linkedHashMapCtor = nullptr;
+    jclass collectionsClass = nullptr;
+    jmethodID emptyMap = nullptr;
+    jmethodID size, get, put, remove, removeKV, clear, containsKey, containsValue, isEmpty, putAll,
+        keySet, values, entrySet;
+    // java.util.Collection (views)
+    jmethodID collToArray, collContains, collRemove, collContainsAll;
+    jmethodID toString, equals, hashCode;
+};
+
+MapJni makeMapJni(JNIEnv* env) {
+    MapJni j{};
+    jclass map = env->FindClass("java/util/Map");
+    jclass coll = env->FindClass("java/util/Collection");
+    jclass object = env->FindClass("java/lang/Object");
+    jclass lhm = env->FindClass("java/util/LinkedHashMap");
+    jclass collections = env->FindClass("java/util/Collections");
+    j.linkedHashMapClass = (jclass)env->NewGlobalRef(lhm);
+    j.linkedHashMapCtor = env->GetMethodID(lhm, "<init>", "()V");
+    j.collectionsClass = (jclass)env->NewGlobalRef(collections);
+    j.emptyMap = env->GetStaticMethodID(collections, "emptyMap", "()Ljava/util/Map;");
+    j.size = env->GetMethodID(map, "size", "()I");
+    j.get = env->GetMethodID(map, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
+    j.put = env->GetMethodID(map, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+    j.remove = env->GetMethodID(map, "remove", "(Ljava/lang/Object;)Ljava/lang/Object;");
+    j.removeKV = env->GetMethodID(map, "remove", "(Ljava/lang/Object;Ljava/lang/Object;)Z");
+    j.clear = env->GetMethodID(map, "clear", "()V");
+    j.containsKey = env->GetMethodID(map, "containsKey", "(Ljava/lang/Object;)Z");
+    j.containsValue = env->GetMethodID(map, "containsValue", "(Ljava/lang/Object;)Z");
+    j.isEmpty = env->GetMethodID(map, "isEmpty", "()Z");
+    j.putAll = env->GetMethodID(map, "putAll", "(Ljava/util/Map;)V");
+    j.keySet = env->GetMethodID(map, "keySet", "()Ljava/util/Set;");
+    j.values = env->GetMethodID(map, "values", "()Ljava/util/Collection;");
+    j.entrySet = env->GetMethodID(map, "entrySet", "()Ljava/util/Set;");
+    j.collToArray = env->GetMethodID(coll, "toArray", "()[Ljava/lang/Object;");
+    j.collContains = env->GetMethodID(coll, "contains", "(Ljava/lang/Object;)Z");
+    j.collRemove = env->GetMethodID(coll, "remove", "(Ljava/lang/Object;)Z");
+    j.collContainsAll = env->GetMethodID(coll, "containsAll", "(Ljava/util/Collection;)Z");
+    j.toString = env->GetMethodID(object, "toString", "()Ljava/lang/String;");
+    j.equals = env->GetMethodID(object, "equals", "(Ljava/lang/Object;)Z");
+    j.hashCode = env->GetMethodID(object, "hashCode", "()I");
+    env->DeleteLocalRef(map);
+    env->DeleteLocalRef(coll);
+    env->DeleteLocalRef(object);
+    env->DeleteLocalRef(lhm);
+    env->DeleteLocalRef(collections);
+    return j;
 }
 
-static bool isListElementType(const std::string& t) {
-    return t.rfind("list:", 0) == 0;
-}
-static bool isMapElementType(const std::string& t) {
-    return t.rfind("map:", 0) == 0;
+const MapJni& mapJni(JNIEnv* env) {
+    static const MapJni j = makeMapJni(env); // thread-safe one-time init
+    return j;
 }
 
-// Converts a single JS value into a JVM object using a type descriptor. Nested
-// lists/maps materialize recursively; @RDMA objects reuse their held jobject;
-// primitives/strings are boxed.
-static jobject jsiToJobjectMap(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm,
-                               const jsi::Value& v, const std::string& type) {
-    if (v.isNull() || v.isUndefined()) return nullptr;
-    if (isListElementType(type)) {
-        jsi::Object obj = v.asObject(rt);
-        return materializeArray(env, rt, jvm, obj, type.substr(5));
-    }
-    if (isMapElementType(type)) {
-        auto kv = parseMapBody(type.substr(4));
-        jsi::Object obj = v.asObject(rt);
-        return materializeMap(env, rt, jvm, obj, kv.first, kv.second);
-    }
-    // Scalar/enum leaves follow the descriptor's declared type (the `?`/`!` marks
-    // stripped), NOT the value's shape — same descriptor-first order as the C-ABI
-    // `jsiToHandle`, so the two backends cannot drift. An enum-marked leaf
-    // (`MyEnum!`) rebuilds via `valueOf`; without this the name string would
-    // silently become a `java.lang.String` rather than the enum entry (types.md).
-    std::string fqn = type.substr(0, type.find_first_of("?!"));
-    bool isEnum = type.find('!') != std::string::npos;
-    if (isEnum) return rdmaBoxEnumValue(env, rt, v, fqn);
-    if (fqn == "kotlin.Int" || fqn == "kotlin.Long" || fqn == "kotlin.Double" ||
-        fqn == "kotlin.Float" || fqn == "kotlin.Boolean" || fqn == "kotlin.String") {
-        return rdmaBoxLeafValue(env, rt, v, fqn);
-    }
-    // `@RDMA` class leaf: reuse the kernel object behind the plugin-side wrapper.
-    if (v.isObject()) {
-        jsi::Object eo = v.asObject(rt);
-        if (eo.hasNativeState(rt)) {
-            auto ns = eo.getNativeState(rt);
-            if (ns) {
-                auto objState = std::static_pointer_cast<RdmaObjectNativeState>(ns);
-                return objState->getObject();
-            }
-        }
-        return nullptr;
-    }
-    // Unknown leaves keep the runtime-dispatch boxer (pre-descriptor behavior,
-    // e.g. callback-id lists) — the same fallback as the C-ABI `jsiToHandle`.
-    return boxJsi(env, rt, v);
+jsi::String jstringToJs(JNIEnv* env, jsi::Runtime& r, jstring s, const char* fallback) {
+    if (!s) return jsi::String::createFromUtf8(r, fallback);
+    const char* c = env->GetStringUTFChars(s, nullptr);
+    jsi::String out = jsi::String::createFromUtf8(r, c ? c : "");
+    if (c) env->ReleaseStringUTFChars(s, c);
+    return out;
 }
 
-// Wraps a JVM object into a JS value using a type descriptor. **Consumes** the
-// caller's local reference `obj` (every branch releases it) — callers must not
-// delete it.
-static jsi::Value wrapTyped(jsi::Runtime& r, JavaVM* jvm, jobject obj, const std::string& type) {
-    if (!obj) return jsi::Value::null();
-    JNIEnv* env = getEnv(jvm);
-    if (isListElementType(type)) {
-        jobject global = nullptr;
-        if (env) global = env->NewGlobalRef(obj);
-        if (env) env->DeleteLocalRef(obj);
-        return createListHandle(r, jvm, global, type.substr(5));
+struct MapCall {
+    JNIEnv* env;
+    JniLocalFrame frame;
+    jsi::Object self;
+    std::shared_ptr<MapNativeState> st;
+    const MapJni& j;
+
+    MapCall(jsi::Runtime& r, const jsi::Value& thisVal)
+        : env(getEnv(g_composeCache.jvm)),
+          frame(env),
+          self(thisVal.getObject(r)),
+          st(rdmaMapStateOf(r, self)),
+          j(mapJni(env)) {
+        if (!st) throw jsi::JSError(r, "receiver is not a native map proxy");
     }
-    if (isMapElementType(type)) {
-        auto kv = parseMapBody(type.substr(4));
-        jobject global = nullptr;
-        if (env) global = env->NewGlobalRef(obj);
-        if (env) env->DeleteLocalRef(obj);
-        return createMapHandle(r, jvm, global, kv.first, kv.second);
+    jobject ref() const { return st->globalMapRef_; }
+    JavaVM* jvm() const { return st->jvm_; }
+};
+
+struct ViewCall {
+    JNIEnv* env;
+    JniLocalFrame frame;
+    jsi::Object self;
+    std::shared_ptr<MapViewNativeState> st;
+    const MapJni& j;
+
+    ViewCall(jsi::Runtime& r, const jsi::Value& thisVal)
+        : env(getEnv(g_composeCache.jvm)),
+          frame(env),
+          self(thisVal.getObject(r)),
+          st(rdmaStateAs<MapViewNativeState>(r, self, RdmaStateKind::MapView)),
+          j(mapJni(env)) {
+        if (!st) throw jsi::JSError(r, "receiver is not a native map view");
     }
-    jsi::Value result = wrapAny(r, jvm, obj);
-    if (env) env->DeleteLocalRef(obj);
-    return result;
-}
-
-static std::shared_ptr<MapNativeState> mapStateOf(jsi::Runtime& r, const jsi::Object& obj) {
-    return std::static_pointer_cast<MapNativeState>(obj.getNativeState(r));
-}
-
-// Kotlin/JS mangled-name aliasing (implemented below, next to morphHashMap).
-static void installMapMangledForwards(jsi::Runtime& rt, jsi::Object& obj, const std::vector<std::string>& names);
-static std::vector<std::string> mapMangledNamesOf(jsi::Runtime& rt);
-
-// Invokes the original `checkIsMutable` (recorded during morphing) before a
-// mutation.
-static void checkIsMutable(jsi::Runtime& r, const jsi::Object& thisObj, const std::string& name) {
-    if (name.empty()) return;
-    auto fn = thisObj.getProperty(r, name.c_str());
-    if (fn.isObject() && fn.asObject(r).isFunction(r)) {
-        fn.asObject(r).asFunction(r).callWithThis(r, thisObj, nullptr, 0);
+    jobject map() const { return st->globalMapRef_; }
+    JavaVM* jvm() const { return st->jvm_; }
+    // The java.util view (local reference): keySet / values / entrySet.
+    jobject javaView(jsi::Runtime& r) {
+        jmethodID m = st->mode_ == MapViewNativeState::Keys ? j.keySet
+            : st->mode_ == MapViewNativeState::Values ? j.values : j.entrySet;
+        jobject v = env->CallObjectMethod(map(), m);
+        checkAndThrowJs(env, r);
+        return v;
     }
-}
+};
 
-// Creates a live view object over the map's keySet/values/entrySet. `mode`:
-// 0 = keys, 1 = values, 2 = entries. The view uses entry iteration to reach a
-// given index (O(n) per access), keeping it live with respect to the native map.
-static jsi::Object createView(jsi::Runtime& rt, JavaVM* jvm, jobject mapRef, int mode, const std::string& elemType) {
-    auto view = jsi::Object(rt);
-    view.setNativeState(rt, nullptr);
-
-    auto sizeFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "size"), 0,
-        [jvm, mapRef](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            jclass mapCls = env->GetObjectClass(mapRef);
-            jmethodID sizeMethod = env->GetMethodID(mapCls, "size", "()I");
-            return jsi::Value((double)env->CallIntMethod(mapRef, sizeMethod));
-        });
-    view.setProperty(rt, "size", std::move(sizeFn));
-
-    auto getFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "get"), 1,
-        [jvm, mapRef, mode, elemType](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t) -> jsi::Value {
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            int index = (int)args[0].getNumber();
-            jclass mapCls = env->GetObjectClass(mapRef);
-            jmethodID entrySetMethod = env->GetMethodID(mapCls, "entrySet", "()Ljava/util/Set;");
-            jobject entrySet = env->CallObjectMethod(mapRef, entrySetMethod);
-            jclass setCls = env->GetObjectClass(entrySet);
-            jmethodID iteratorMethod = env->GetMethodID(setCls, "iterator", "()Ljava/util/Iterator;");
-            jobject it = env->CallObjectMethod(entrySet, iteratorMethod);
-            jclass itCls = env->GetObjectClass(it);
-            jmethodID hasNextMethod = env->GetMethodID(itCls, "hasNext", "()Z");
-            jmethodID nextMethod = env->GetMethodID(itCls, "next", "()Ljava/lang/Object;");
-            jobject entry = nullptr;
-            int i = 0;
-            while (i <= index && env->CallBooleanMethod(it, hasNextMethod)) {
-                jobject e = env->CallObjectMethod(it, nextMethod);
-                if (i == index) entry = e; else env->DeleteLocalRef(e);
-                i++;
-            }
-            env->DeleteLocalRef(it);
-            env->DeleteLocalRef(entrySet);
-            if (!entry) return jsi::Value::undefined();
-            jclass entryCls = env->GetObjectClass(entry);
-            jmethodID getKeyMethod = env->GetMethodID(entryCls, "getKey", "()Ljava/lang/Object;");
-            jmethodID getValueMethod = env->GetMethodID(entryCls, "getValue", "()Ljava/lang/Object;");
-            if (mode == 0) {
-                jobject key = env->CallObjectMethod(entry, getKeyMethod);
-                env->DeleteLocalRef(entry);
-                return wrapTyped(r, jvm, key, elemType);
-            }
-            if (mode == 1) {
-                jobject value = env->CallObjectMethod(entry, getValueMethod);
-                env->DeleteLocalRef(entry);
-                return wrapTyped(r, jvm, value, elemType);
-            }
-            // entries mode
-            auto out = jsi::Object(r);
-            jobject key = env->CallObjectMethod(entry, getKeyMethod);
-            jobject value = env->CallObjectMethod(entry, getValueMethod);
-            out.setProperty(r, "key", wrapTyped(r, jvm, key, elemType));
-            out.setProperty(r, "value", wrapTyped(r, jvm, value, elemType));
-            env->DeleteLocalRef(entry);
-            return out;
-        });
-    view.setProperty(rt, "get", std::move(getFn));
-    return view;
-}
-
-// For a state-backed handle (a kernel `SnapshotStateMap`, see MapNativeState) an
-// operation during composition first touches the map's state on the UI thread so
-// Compose's snapshot read observer records the dependency (the same contract as the
-// list handles — docs/design/type_descriptors.md#state-semantics).
-static void touchCompositionReadMap(const std::shared_ptr<MapNativeState>& state) {
+void touchCompositionRead(JavaVM* jvm, jobject mapRef) {
     if (!g_inComposition) return;
-    rdmaCallUi([state]() -> RdmaResult {
-        JNIEnv* e = getEnv(state->jvm_);
+    rdmaCallUi([jvm, mapRef]() -> RdmaResult {
+        JNIEnv* e = getEnv(jvm);
         if (!e) return RdmaResult::undefined();
-        jclass cls = e->GetObjectClass(state->globalMapRef_);
-        jmethodID sizeMethod = e->GetMethodID(cls, "size", "()I");
-        e->CallIntMethod(state->globalMapRef_, sizeMethod);
+        e->CallIntMethod(mapRef, mapJni(e).size);
         RdmaResult err;
-        if (captureJniError(e, err)) { e->DeleteLocalRef(cls); return err; }
-        e->DeleteLocalRef(cls);
+        if (captureJniError(e, err)) return err;
         return RdmaResult::undefined();
     });
 }
 
-static void wrapStateBackedMapReads(jsi::Runtime& rt, jsi::Object& obj, const std::shared_ptr<MapNativeState>& state) {
-    static const char* kNames[] = {
-        "get", "set", "remove", "clear", "containsKey", "sizeImpl", "isEmpty",
-        "keys", "values", "entries", "toString",
+int mapKindOf(jsi::Runtime& rt, const jsi::Value& v) {
+    jsi::Value rdma = rt.global().getProperty(rt, "RDMA");
+    if (!rdma.isObject()) return -1;
+    jsi::Value fn = rdma.getObject(rt).getProperty(rt, "mapKind");
+    if (!fn.isObject() || !fn.getObject(rt).isFunction(rt)) return -1;
+    jsi::Value res = fn.getObject(rt).getFunction(rt).call(rt, v);
+    return res.isNumber() ? (int)res.getNumber() : -1;
+}
+
+// Entries of a plugin-side Kotlin map as `[[k, v], …]` (guest bridge `RDMA.mapToEntries`).
+jsi::Array pluginEntriesOf(jsi::Runtime& rt, const jsi::Object& obj) {
+    jsi::Value rdma = rt.global().getProperty(rt, "RDMA");
+    if (rdma.isObject()) {
+        jsi::Value fn = rdma.getObject(rt).getProperty(rt, "mapToEntries");
+        if (fn.isObject() && fn.getObject(rt).isFunction(rt)) {
+            jsi::Value res = fn.getObject(rt).getFunction(rt).call(rt, jsi::Value(rt, obj));
+            if (res.isObject() && res.getObject(rt).isArray(rt)) return res.getObject(rt).getArray(rt);
+        }
+    }
+    throw jsi::JSError(rt, "map crossing the runtime boundary: the plugin bridge has no mapToEntries");
+}
+
+jobject newJniMap(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, const jsi::Array& entries, const std::string& keyType, const std::string& valueType) {
+    const MapJni& j = mapJni(env);
+    jobject map = env->NewObject(j.linkedHashMapClass, j.linkedHashMapCtor);
+    size_t n = entries.size(rt);
+    for (size_t i = 0; i < n; i++) {
+        jsi::Value pair = entries.getValueAtIndex(rt, i);
+        if (!pair.isObject() || !pair.getObject(rt).isArray(rt)) continue;
+        jsi::Array kv = pair.getObject(rt).getArray(rt);
+        if (kv.size(rt) < 2) continue;
+        jobject k = rdmaJsToJniTyped(env, rt, jvm, kv.getValueAtIndex(rt, 0), keyType);
+        jobject v = rdmaJsToJniTyped(env, rt, jvm, kv.getValueAtIndex(rt, 1), valueType);
+        jobject old = env->CallObjectMethod(map, j.put, k, v);
+        if (old) env->DeleteLocalRef(old);
+        if (k) env->DeleteLocalRef(k);
+        if (v) env->DeleteLocalRef(v);
+        checkAndThrowJs(env, rt);
+    }
+    return map;
+}
+
+// Converts a java Object[] (local) into a JS array of typed values.
+jsi::Array jniArrayToJs(JNIEnv* env, jsi::Runtime& r, JavaVM* jvm, jobjectArray arr, const std::string& desc) {
+    jsize n = arr ? env->GetArrayLength(arr) : 0;
+    jsi::Array out(r, (size_t)n);
+    for (jsize i = 0; i < n; i++) {
+        out.setValueAtIndex(r, (size_t)i, rdmaJniToJsTyped(r, jvm, env->GetObjectArrayElement(arr, i), desc));
+    }
+    return out;
+}
+
+// One snapshot of the map as `[k0, v0, k1, v1, …]`: two JNI calls for the whole map
+// (keySet and values iterate in the same order on an unmodified map).
+jsi::Array flatSnapshot(JNIEnv* env, jsi::Runtime& r, JavaVM* jvm, jobject mapRef, const std::string& keyType, const std::string& valueType) {
+    const MapJni& j = mapJni(env);
+    jobject keys = env->CallObjectMethod(mapRef, j.keySet);
+    checkAndThrowJs(env, r);
+    auto karr = (jobjectArray)env->CallObjectMethod(keys, j.collToArray);
+    checkAndThrowJs(env, r);
+    jobject values = env->CallObjectMethod(mapRef, j.values);
+    checkAndThrowJs(env, r);
+    auto varr = (jobjectArray)env->CallObjectMethod(values, j.collToArray);
+    checkAndThrowJs(env, r);
+    jsize n = karr ? env->GetArrayLength(karr) : 0;
+    jsize nv = varr ? env->GetArrayLength(varr) : 0;
+    if (nv < n) n = nv;
+    jsi::Array out(r, (size_t)n * 2);
+    for (jsize i = 0; i < n; i++) {
+        out.setValueAtIndex(r, (size_t)i * 2, rdmaJniToJsTyped(r, jvm, env->GetObjectArrayElement(karr, i), keyType));
+        out.setValueAtIndex(r, (size_t)i * 2 + 1, rdmaJniToJsTyped(r, jvm, env->GetObjectArrayElement(varr, i), valueType));
+    }
+    return out;
+}
+
+jsi::Object newView(jsi::Runtime& r, MapCall& c, MapViewNativeState::Mode mode) {
+    auto state = std::make_shared<MapViewNativeState>(c.jvm(), c.env->NewGlobalRef(c.ref()), mode, c.st->keyType_, c.st->valueType_);
+    state->stateBacked_ = c.st->stateBacked_;
+    RdmaProtoKind kind = mode == MapViewNativeState::Keys ? RdmaProtoKind::KeysView
+        : mode == MapViewNativeState::Values ? RdmaProtoKind::ValuesView : RdmaProtoKind::EntriesView;
+    return rdmaNewProxy(r, kind, std::move(state));
+}
+
+std::vector<RdmaProtoMethod> mapMethods() {
+    std::vector<RdmaProtoMethod> m;
+    m.push_back({"get", 1, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        MapCall c(r, t);
+        jobject k = rdmaJsToJniTyped(c.env, r, c.jvm(), rdmaArg(a, n, 0), c.st->keyType_);
+        jobject v = c.env->CallObjectMethod(c.ref(), c.j.get, k);
+        checkAndThrowJs(c.env, r);
+        return rdmaJniToJsTyped(r, c.jvm(), v, c.st->valueType_);
+    }});
+    // `set` is the plain name; the stdlib `put` aliases here. Returns the previous value.
+    m.push_back({"set", 2, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        MapCall c(r, t);
+        if (n < 2) throw jsi::JSError(r, "put: key and value expected");
+        rdmaCheckMapMutable(r, c.self);
+        jobject k = rdmaJsToJniTyped(c.env, r, c.jvm(), a[0], c.st->keyType_);
+        jobject v = rdmaJsToJniTyped(c.env, r, c.jvm(), a[1], c.st->valueType_);
+        jobject old = c.env->CallObjectMethod(c.ref(), c.j.put, k, v);
+        checkAndThrowJs(c.env, r);
+        return rdmaJniToJsTyped(r, c.jvm(), old, c.st->valueType_);
+    }});
+    m.push_back({"putAll", 1, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        MapCall c(r, t);
+        if (n < 1 || !a[0].isObject()) throw jsi::JSError(r, "putAll: map expected");
+        rdmaCheckMapMutable(r, c.self);
+        jobject src = rdmaMapJObjectOf(r, a[0]);
+        jobject tmp = src ? c.env->NewLocalRef(src)
+            : newJniMap(c.env, r, c.jvm(), pluginEntriesOf(r, a[0].getObject(r)), c.st->keyType_, c.st->valueType_);
+        c.env->CallVoidMethod(c.ref(), c.j.putAll, tmp);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value::undefined();
+    }});
+    // Kotlin `MutableMap.remove(key)` returns the removed value.
+    m.push_back({"remove", 1, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        MapCall c(r, t);
+        rdmaCheckMapMutable(r, c.self);
+        jobject k = rdmaJsToJniTyped(c.env, r, c.jvm(), rdmaArg(a, n, 0), c.st->keyType_);
+        jobject old = c.env->CallObjectMethod(c.ref(), c.j.remove, k);
+        checkAndThrowJs(c.env, r);
+        return rdmaJniToJsTyped(r, c.jvm(), old, c.st->valueType_);
+    }});
+    m.push_back({"clear", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        MapCall c(r, t);
+        rdmaCheckMapMutable(r, c.self);
+        c.env->CallVoidMethod(c.ref(), c.j.clear);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value::undefined();
+    }});
+    m.push_back({"containsKey", 1, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        MapCall c(r, t);
+        jobject k = rdmaJsToJniTyped(c.env, r, c.jvm(), rdmaArg(a, n, 0), c.st->keyType_);
+        jboolean has = c.env->CallBooleanMethod(c.ref(), c.j.containsKey, k);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value(has == JNI_TRUE);
+    }});
+    m.push_back({"containsValue", 1, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        MapCall c(r, t);
+        jobject v = rdmaJsToJniTyped(c.env, r, c.jvm(), rdmaArg(a, n, 0), c.st->valueType_);
+        jboolean has = c.env->CallBooleanMethod(c.ref(), c.j.containsValue, v);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value(has == JNI_TRUE);
+    }});
+    m.push_back({"sizeImpl", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        MapCall c(r, t);
+        jint size = c.env->CallIntMethod(c.ref(), c.j.size);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value((double)size);
+    }});
+    m.push_back({"isEmpty", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        MapCall c(r, t);
+        jboolean empty = c.env->CallBooleanMethod(c.ref(), c.j.isEmpty);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value(empty == JNI_TRUE);
+    }});
+    m.push_back({"keys", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        MapCall c(r, t);
+        return newView(r, c, MapViewNativeState::Keys);
+    }});
+    m.push_back({"values", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        MapCall c(r, t);
+        return newView(r, c, MapViewNativeState::Values);
+    }});
+    m.push_back({"entries", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        MapCall c(r, t);
+        return newView(r, c, MapViewNativeState::Entries);
+    }});
+    m.push_back({"checkIsMutable", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        rdmaCheckMapMutable(r, t.getObject(r));
+        return jsi::Value::undefined();
+    }});
+    m.push_back({"equals", 1, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        MapCall c(r, t);
+        if (n < 1 || !a[0].isObject()) return jsi::Value(false);
+        jobject other = rdmaMapJObjectOf(r, a[0]);
+        if (!other) return jsi::Value(rdmaInheritedEquals(r, RdmaProtoKind::Map, c.self, a[0]));
+        jboolean eq = c.env->CallBooleanMethod(c.ref(), c.j.equals, other);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value(eq == JNI_TRUE);
+    }});
+    m.push_back({"hashCode", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        MapCall c(r, t);
+        jint h = c.env->CallIntMethod(c.ref(), c.j.hashCode);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value((double)h);
+    }});
+    m.push_back({"toString", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        MapCall c(r, t);
+        auto s = (jstring)c.env->CallObjectMethod(c.ref(), c.j.toString);
+        checkAndThrowJs(c.env, r);
+        return jstringToJs(c.env, r, s, "{}");
+    }});
+    return m;
+}
+
+// The JNI value used to test/remove an element of a view: a key, a value, or (for
+// entries) the entry's key and value.
+std::vector<RdmaProtoMethod> viewMethods(MapViewNativeState::Mode mode) {
+    std::vector<RdmaProtoMethod> m;
+    m.push_back({"sizeImpl", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        ViewCall c(r, t);
+        jint size = c.env->CallIntMethod(c.map(), c.j.size);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value((double)size);
+    }});
+    m.push_back({"isEmpty", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        ViewCall c(r, t);
+        jboolean empty = c.env->CallBooleanMethod(c.map(), c.j.isEmpty);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value(empty == JNI_TRUE);
+    }});
+    m.push_back({"iterator", 0, [mode](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        ViewCall c(r, t);
+        if (mode == MapViewNativeState::Entries) {
+            jsi::Array flat = flatSnapshot(c.env, r, c.jvm(), c.map(), c.st->keyType_, c.st->valueType_);
+            // Entries write through the owning map: rebuild a map proxy over the same native map.
+            auto mapState = std::make_shared<MapNativeState>(c.jvm(), c.env->NewGlobalRef(c.map()), c.st->keyType_, c.st->valueType_);
+            mapState->stateBacked_ = c.st->stateBacked_;
+            jsi::Object owner = rdmaNewProxy(r, c.st->stateBacked_ ? RdmaProtoKind::StateMap : RdmaProtoKind::Map, std::move(mapState));
+            return rdmaSnapshotIterator(r, RdmaIterKind::Entries, c.self, rdmaMakeEntries(r, owner, flat));
+        }
+        jobject view = c.javaView(r);
+        auto arr = (jobjectArray)c.env->CallObjectMethod(view, c.j.collToArray);
+        checkAndThrowJs(c.env, r);
+        const std::string& desc = mode == MapViewNativeState::Keys ? c.st->keyType_ : c.st->valueType_;
+        return rdmaSnapshotIterator(r, mode == MapViewNativeState::Keys ? RdmaIterKind::Keys : RdmaIterKind::Values,
+            c.self, jniArrayToJs(c.env, r, c.jvm(), arr, desc));
+    }});
+    m.push_back({"contains", 1, [mode](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        ViewCall c(r, t);
+        jsi::Value x = n > 0 ? jsi::Value(r, a[0]) : jsi::Value::undefined();
+        if (mode == MapViewNativeState::Keys) {
+            jobject k = rdmaJsToJniTyped(c.env, r, c.jvm(), x, c.st->keyType_);
+            jboolean has = c.env->CallBooleanMethod(c.map(), c.j.containsKey, k);
+            checkAndThrowJs(c.env, r);
+            return jsi::Value(has == JNI_TRUE);
+        }
+        if (mode == MapViewNativeState::Values) {
+            jobject v = rdmaJsToJniTyped(c.env, r, c.jvm(), x, c.st->valueType_);
+            jboolean has = c.env->CallBooleanMethod(c.map(), c.j.containsValue, v);
+            checkAndThrowJs(c.env, r);
+            return jsi::Value(has == JNI_TRUE);
+        }
+        // Entry: present when the map maps its key to an equal value.
+        if (!x.isObject()) return jsi::Value(false);
+        jsi::Object e = x.getObject(r);
+        jsi::Value keyOf = e.getProperty(r, "$keyOf");
+        if (!keyOf.isObject()) return jsi::Value(false);
+        jsi::Value key = keyOf.getObject(r).getFunction(r).callWithThis(r, e, nullptr, 0);
+        jsi::Value value = e.getPropertyAsFunction(r, "$valueOf").callWithThis(r, e, nullptr, 0);
+        jobject k = rdmaJsToJniTyped(c.env, r, c.jvm(), key, c.st->keyType_);
+        jobject cur = c.env->CallObjectMethod(c.map(), c.j.get, k);
+        checkAndThrowJs(c.env, r);
+        jobject v = rdmaJsToJniTyped(c.env, r, c.jvm(), value, c.st->valueType_);
+        bool eq = cur ? (c.env->CallBooleanMethod(cur, c.j.equals, v) == JNI_TRUE) : (v == nullptr && c.env->CallBooleanMethod(c.map(), c.j.containsKey, k) == JNI_TRUE);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value(eq);
+    }});
+    m.push_back({"remove", 1, [mode](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        ViewCall c(r, t);
+        jsi::Value x = n > 0 ? jsi::Value(r, a[0]) : jsi::Value::undefined();
+        if (mode == MapViewNativeState::Entries) {
+            if (!x.isObject()) return jsi::Value(false);
+            jsi::Object e = x.getObject(r);
+            jsi::Value keyOf = e.getProperty(r, "$keyOf");
+            if (!keyOf.isObject()) return jsi::Value(false);
+            jsi::Value key = keyOf.getObject(r).getFunction(r).callWithThis(r, e, nullptr, 0);
+            jsi::Value value = e.getPropertyAsFunction(r, "$valueOf").callWithThis(r, e, nullptr, 0);
+            jobject k = rdmaJsToJniTyped(c.env, r, c.jvm(), key, c.st->keyType_);
+            jobject v = rdmaJsToJniTyped(c.env, r, c.jvm(), value, c.st->valueType_);
+            jboolean removed = c.env->CallBooleanMethod(c.map(), c.j.removeKV, k, v);
+            checkAndThrowJs(c.env, r);
+            return jsi::Value(removed == JNI_TRUE);
+        }
+        const std::string& desc = mode == MapViewNativeState::Keys ? c.st->keyType_ : c.st->valueType_;
+        jobject el = rdmaJsToJniTyped(c.env, r, c.jvm(), x, desc);
+        jobject view = c.javaView(r);
+        jboolean removed = c.env->CallBooleanMethod(view, c.j.collRemove, el);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value(removed == JNI_TRUE);
+    }});
+    m.push_back({"clear", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        ViewCall c(r, t);
+        c.env->CallVoidMethod(c.map(), c.j.clear);
+        checkAndThrowJs(c.env, r);
+        return jsi::Value::undefined();
+    }});
+    m.push_back({"containsAll", 1, [mode](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+        // Generic over `contains`: one check per element of the argument.
+        if (n < 1 || !a[0].isObject()) return jsi::Value(false);
+        jsi::Object self = t.getObject(r);
+        jsi::Function contains = self.getPropertyAsFunction(r, "contains");
+        jsi::Object arg = a[0].getObject(r);
+        jsi::Value toArray = arg.getProperty(r, "toArray");
+        if (!toArray.isObject()) return jsi::Value(false);
+        jsi::Array elems = toArray.getObject(r).getFunction(r).callWithThis(r, arg, nullptr, 0).getObject(r).getArray(r);
+        for (size_t i = 0; i < elems.size(r); i++) {
+            jsi::Value hit = contains.callWithThis(r, self, elems.getValueAtIndex(r, i));
+            if (!hit.isBool() || !hit.getBool()) return jsi::Value(false);
+        }
+        (void)mode;
+        return jsi::Value(true);
+    }});
+    // Kotlin map views do not support adding.
+    auto unsupported = [](jsi::Runtime& r, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+        throw jsi::JSError(r, "UnsupportedOperationException: a map view does not support adding elements");
     };
-    for (const char* name : kNames) {
-        if (!obj.hasProperty(rt, name)) continue;
-        jsi::Value fn = obj.getProperty(rt, name);
-        if (!fn.isObject() || !fn.asObject(rt).isFunction(rt)) continue;
-        auto inner = std::make_shared<jsi::Function>(fn.asObject(rt).asFunction(rt));
-        auto wrapped = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, name), 0,
-            [inner, state](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-                touchCompositionReadMap(state);
-                return inner->callWithThis(r, thisVal.asObject(r), args, count);
-            });
-        obj.setProperty(rt, name, std::move(wrapped));
+    m.push_back({"add", 1, unsupported});
+    m.push_back({"addAll", 1, unsupported});
+    m.push_back({"checkIsMutable", 0, [](jsi::Runtime&, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+        return jsi::Value::undefined();
+    }});
+    m.push_back({"toString", 0, [](jsi::Runtime& r, const jsi::Value& t, const jsi::Value*, size_t) -> jsi::Value {
+        ViewCall c(r, t);
+        jobject view = c.javaView(r);
+        auto s = (jstring)c.env->CallObjectMethod(view, c.j.toString);
+        checkAndThrowJs(c.env, r);
+        return jstringToJs(c.env, r, s, "[]");
+    }});
+    return m;
+}
+
+std::vector<RdmaProtoMethod> stateBackedMap(std::vector<RdmaProtoMethod> methods) {
+    for (auto& m : methods) {
+        jsi::HostFunctionType inner = std::move(m.fn);
+        m.fn = [inner](jsi::Runtime& r, const jsi::Value& t, const jsi::Value* a, size_t n) -> jsi::Value {
+            if (g_inComposition) {
+                if (auto st = rdmaMapStateOf(r, t)) touchCompositionRead(st->jvm_, st->globalMapRef_);
+            }
+            return inner(r, t, a, n);
+        };
+    }
+    return methods;
+}
+
+} // namespace
+
+std::vector<RdmaProtoMethod> rdmaPlatformProtoMethods(jsi::Runtime&, RdmaProtoKind kind) {
+    switch (kind) {
+        case RdmaProtoKind::List: return rdmaJniListProtoMethods(false);
+        case RdmaProtoKind::StateList: return rdmaJniListProtoMethods(true);
+        case RdmaProtoKind::Map: return mapMethods();
+        case RdmaProtoKind::StateMap: return stateBackedMap(mapMethods());
+        case RdmaProtoKind::KeysView: return viewMethods(MapViewNativeState::Keys);
+        case RdmaProtoKind::ValuesView: return viewMethods(MapViewNativeState::Values);
+        case RdmaProtoKind::EntriesView: return viewMethods(MapViewNativeState::Entries);
+        default: return {};
     }
 }
 
 void populateMapHandle(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, jobject globalMapRef, const std::string& keyType, const std::string& valueType, bool stateBacked) {
-    auto ns = std::make_shared<MapNativeState>(jvm, globalMapRef, keyType, valueType);
-    ns->stateBacked_ = stateBacked;
-    obj.setNativeState(rt, ns);
-
-    auto getFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "get"), 1,
-        [jvm, keyType, valueType](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            if (count < 1) return jsi::Value::undefined();
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto state = mapStateOf(r, thisVal.asObject(r));
-            jobject key = jsiToJobjectMap(env, r, jvm, args[0], keyType);
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID getMethod = env->GetMethodID(mapCls, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
-            jobject value = env->CallObjectMethod(state->globalMapRef_, getMethod, key);
-            return wrapTyped(r, jvm, value, valueType);
-        });
-    obj.setProperty(rt, "get", std::move(getFn));
-
-    auto setFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "set"), 2,
-        [jvm, keyType, valueType](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            if (count < 2) return jsi::Value::undefined();
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto thisObj = thisVal.asObject(r);
-            auto state = mapStateOf(r, thisObj);
-            checkIsMutable(r, thisObj, state->checkIsMutable_);
-            jobject key = jsiToJobjectMap(env, r, jvm, args[0], keyType);
-            jobject value = jsiToJobjectMap(env, r, jvm, args[1], valueType);
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID putMethod = env->GetMethodID(mapCls, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
-            jobject old = env->CallObjectMethod(state->globalMapRef_, putMethod, key, value);
-            // Kotlin `MutableMap.put`/`set` returns the previous value (`V?`) — return it,
-            // not undefined (audit #16). `wrapTyped` consumes the local ref.
-            return wrapTyped(r, jvm, old, valueType);
-        });
-    obj.setProperty(rt, "set", std::move(setFn));
-
-    // `putAll` had no plain implementation before (the morph forwarded its mangled
-    // spelling into a silent no-op — a quiet correctness hole); the plain handler
-    // forwards the source map into this one through java.util.Map.putAll.
-    auto putAllFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "putAll"), 1,
-        [jvm, keyType, valueType](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            if (count < 1 || !args[0].isObject()) return jsi::Value::undefined();
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto thisObj = thisVal.asObject(r);
-            auto state = mapStateOf(r, thisObj);
-            checkIsMutable(r, thisObj, state->checkIsMutable_);
-            auto srcObj = args[0].asObject(r);
-            jobject srcMap = nullptr;
-            bool borrowed = false;
-            if (srcObj.hasNativeState(r)) {
-                auto s = std::dynamic_pointer_cast<MapNativeState>(srcObj.getNativeState(r));
-                if (s) { srcMap = s->globalMapRef_; borrowed = true; }
-            }
-            if (!srcMap) srcMap = materializeMap(env, r, jvm, srcObj, keyType, valueType);
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID putAllMethod = env->GetMethodID(mapCls, "putAll", "(Ljava/util/Map;)V");
-            env->CallVoidMethod(state->globalMapRef_, putAllMethod, srcMap);
-            if (!borrowed && srcMap) env->DeleteGlobalRef(srcMap);
-            env->DeleteLocalRef(mapCls);
-            return jsi::Value::undefined();
-        });
-    obj.setProperty(rt, "putAll", std::move(putAllFn));
-
-    auto removeFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "remove"), 1,
-        [jvm, keyType, valueType](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            if (count < 1) return jsi::Value::null();
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto thisObj = thisVal.asObject(r);
-            auto state = mapStateOf(r, thisObj);
-            checkIsMutable(r, thisObj, state->checkIsMutable_);
-            jobject key = jsiToJobjectMap(env, r, jvm, args[0], keyType);
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID removeMethod = env->GetMethodID(mapCls, "remove", "(Ljava/lang/Object;)Ljava/lang/Object;");
-            jobject removed = env->CallObjectMethod(state->globalMapRef_, removeMethod, key);
-            // Kotlin `MutableMap.remove` returns the removed value (`V?`), not a boolean
-            // (audit #16). `wrapTyped` consumes the local ref.
-            return wrapTyped(r, jvm, removed, valueType);
-        });
-    obj.setProperty(rt, "remove", std::move(removeFn));
-
-    auto clearFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "clear"), 0,
-        [jvm](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            (void)args; (void)count;
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto thisObj = thisVal.asObject(r);
-            auto state = mapStateOf(r, thisObj);
-            checkIsMutable(r, thisObj, state->checkIsMutable_);
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID clearMethod = env->GetMethodID(mapCls, "clear", "()V");
-            env->CallVoidMethod(state->globalMapRef_, clearMethod);
-            return jsi::Value::undefined();
-        });
-    obj.setProperty(rt, "clear", std::move(clearFn));
-
-    auto containsKeyFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "containsKey"), 1,
-        [jvm, keyType](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            if (count < 1) return jsi::Value(false);
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto state = mapStateOf(r, thisVal.asObject(r));
-            jobject key = jsiToJobjectMap(env, r, jvm, args[0], keyType);
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID containsKeyMethod = env->GetMethodID(mapCls, "containsKey", "(Ljava/lang/Object;)Z");
-            return jsi::Value(env->CallBooleanMethod(state->globalMapRef_, containsKeyMethod, key) == JNI_TRUE);
-        });
-    obj.setProperty(rt, "containsKey", std::move(containsKeyFn));
-
-    // `containsValue` had no plain implementation (audit #13): delegate to
-    // `java.util.Map.containsValue` over the decoded value.
-    auto containsValueFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "containsValue"), 1,
-        [jvm, valueType](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            if (count < 1) return jsi::Value(false);
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto state = mapStateOf(r, thisVal.asObject(r));
-            jobject value = jsiToJobjectMap(env, r, jvm, args[0], valueType);
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID containsValueMethod = env->GetMethodID(mapCls, "containsValue", "(Ljava/lang/Object;)Z");
-            return jsi::Value(env->CallBooleanMethod(state->globalMapRef_, containsValueMethod, value) == JNI_TRUE);
-        });
-    obj.setProperty(rt, "containsValue", std::move(containsValueFn));
-
-    auto sizeFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "sizeImpl"), 0,
-        [jvm](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            (void)args; (void)count;
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto state = mapStateOf(r, thisVal.asObject(r));
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID sizeMethod = env->GetMethodID(mapCls, "size", "()I");
-            return jsi::Value((double)env->CallIntMethod(state->globalMapRef_, sizeMethod));
-        });
-    obj.setProperty(rt, "sizeImpl", std::move(sizeFn));
-
-    auto isEmptyFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "isEmpty"), 0,
-        [jvm](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            (void)args; (void)count;
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto state = mapStateOf(r, thisVal.asObject(r));
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID isEmptyMethod = env->GetMethodID(mapCls, "isEmpty", "()Z");
-            return jsi::Value(env->CallBooleanMethod(state->globalMapRef_, isEmptyMethod) == JNI_TRUE);
-        });
-    obj.setProperty(rt, "isEmpty", std::move(isEmptyFn));
-
-    auto keysFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "keys"), 0,
-        [jvm](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            (void)args; (void)count;
-            auto state = mapStateOf(r, thisVal.asObject(r));
-            return createView(r, jvm, state->globalMapRef_, 0, state->keyType_);
-        });
-    obj.setProperty(rt, "keys", std::move(keysFn));
-
-    auto valuesFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "values"), 0,
-        [jvm](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            (void)args; (void)count;
-            auto state = mapStateOf(r, thisVal.asObject(r));
-            return createView(r, jvm, state->globalMapRef_, 1, state->valueType_);
-        });
-    obj.setProperty(rt, "values", std::move(valuesFn));
-
-    auto entriesFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "entries"), 0,
-        [jvm](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            (void)args; (void)count;
-            auto state = mapStateOf(r, thisVal.asObject(r));
-            return createView(r, jvm, state->globalMapRef_, 2, state->keyType_);
-        });
-    obj.setProperty(rt, "entries", std::move(entriesFn));
-
-    auto toStringFn = jsi::Function::createFromHostFunction(rt, jsi::PropNameID::forAscii(rt, "toString"), 0,
-        [jvm](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
-            (void)args; (void)count;
-            JNIEnv* env = getEnv(jvm);
-            if (!env) return jsi::Value::undefined();
-            auto state = mapStateOf(r, thisVal.asObject(r));
-            jclass mapCls = env->GetObjectClass(state->globalMapRef_);
-            jmethodID toStringMethod = env->GetMethodID(mapCls, "toString", "()Ljava/lang/String;");
-            jstring jstr = (jstring)env->CallObjectMethod(state->globalMapRef_, toStringMethod);
-            if (!jstr) return jsi::String::createFromUtf8(r, "{}");
-            const char* cstr = env->GetStringUTFChars(jstr, nullptr);
-            auto result = jsi::String::createFromUtf8(r, cstr ? cstr : "");
-            if (cstr) env->ReleaseStringUTFChars(jstr, cstr);
-            env->DeleteLocalRef(jstr);
-            return result;
-        });
-    obj.setProperty(rt, "toString", std::move(toStringFn));
-
-    // Kotlin/JS typed calls arrive as compile-mangled names; the guest bridge knows
-    // the exact spellings for this toolchain (docs/design/collections.md).
-    if (stateBacked) wrapStateBackedMapReads(rt, obj, ns);
-    installMapMangledForwards(rt, obj, mapMangledNamesOf(rt));
-
-    rt.global().setProperty(rt, "__rdma_map", jsi::Value(rt, obj));
-    rt.evaluateJavaScript(std::make_shared<jsi::StringBuffer>(
-        "Object.defineProperty(globalThis.__rdma_map, 'size', {"
-        "  get: function() { return this.sizeImpl(); },"
-        "  configurable: true"
-        "})"
-    ), "<mapGetter>");
-    rt.global().setProperty(rt, "__rdma_map", jsi::Value::undefined());
+    auto state = std::make_shared<MapNativeState>(jvm, globalMapRef, keyType, valueType);
+    state->stateBacked_ = stateBacked;
+    rdmaAdoptProxy(rt, obj, stateBacked ? RdmaProtoKind::StateMap : RdmaProtoKind::Map, std::move(state));
 }
 
-// A Kotlin/JS typed call site emits the compile-mangled method name (`add_1x7w2j_k$`).
-// Alias it directly to the plain host function already installed on `obj` — no wrapper,
-// no per-call `getProperty`, no double-hop. See `aliasMangled` in ListHandle.cpp.
-static void aliasMangled(jsi::Runtime& rt, jsi::Object& obj, const std::string& mangledName, const std::string& plainName) {
-    jsi::Value target = obj.getProperty(rt, plainName.c_str());
-    if (!target.isObject() || !target.asObject(rt).isFunction(rt)) {
-        throw jsi::JSError(rt, std::string("collection proxy: no implementation for '") + plainName + "'");
-    }
-    obj.setProperty(rt, mangledName.c_str(), std::move(target));
-}
-
-// Kotlin/JS spells stdlib map methods with compile-mangled suffixes; the mapping
-// below forwards them to the plain implementations installed by
-// `populateMapHandle`. Same table for the morphed-plugin and kernel-created paths
-// so they cannot drift: names come either from a live Kotlin map's prototype
-// (morphing) or from the guest bridge (`RDMA.mapMethodNames`, compiled with the
-// plugin).
-static void installMapMangledForwards(jsi::Runtime& rt, jsi::Object& obj, const std::vector<std::string>& names) {
-    static const std::pair<const char*, const char*> kTable[] = {
-        {"get_size_", "sizeImpl"},
-        {"get_keys_", "keys"},
-        {"get_values_", "values"},
-        {"get_entries_", "entries"},
-        {"get_", "get"},
-        {"put_", "set"},
-        {"remove_", "remove"},
-        {"clear_", "clear"},
-        {"containsKey_", "containsKey"},
-        {"containsValue_", "containsValue"},
-        {"isEmpty_", "isEmpty"},
-        {"putAll_", "putAll"},
-    };
-    for (const std::string& name : names) {
-        for (const auto& entry : kTable) {
-            if (name.rfind(entry.first, 0) == 0) {
-                aliasMangled(rt, obj, name, entry.second);
-                break;
-            }
-        }
-    }
-}
-
-// Mangled map method spellings discovered by the guest bridge
-// (`RDMA.mapMethodNames`). Cached per runtime once discovered.
-static std::vector<std::string> mapMangledNamesOf(jsi::Runtime& rt) {
-    static std::vector<std::string> cached;
-    static bool computed = false;
-    if (computed) return cached;
-    auto rdma = rt.global().getProperty(rt, "RDMA");
-    if (!rdma.isObject()) return cached;
-    auto fn = rdma.asObject(rt).getProperty(rt, "mapMethodNames");
-    if (!fn.isObject() || !fn.asObject(rt).isFunction(rt)) return cached;
-    jsi::Value res = fn.asObject(rt).asFunction(rt).call(rt);
-    if (!res.isObject() || !res.asObject(rt).isArray(rt)) return cached;
-    jsi::Array arr = res.asObject(rt).getArray(rt);
-    size_t n = arr.size(rt);
-    std::vector<std::string> out;
-    for (size_t i = 0; i < n; i++) {
-        jsi::Value v = arr.getValueAtIndex(rt, i);
-        if (v.isString()) out.push_back(v.getString(rt).utf8(rt));
-    }
-    if (!out.empty()) {
-        cached = out;
-        computed = true;
-    }
-    return cached;
-}
-
-void morphHashMap(jsi::Runtime& rt, JavaVM* jvm, jsi::Object& obj, const std::string& keyType, const std::string& valueType) {
-    (void)jvm; (void)keyType; (void)valueType;
-    auto objectCtor = rt.global().getPropertyAsObject(rt, "Object");
-    auto getPrototypeOf = objectCtor.getPropertyAsFunction(rt, "getPrototypeOf");
-    jsi::Object proto = getPrototypeOf.call(rt, jsi::Value(rt, obj)).asObject(rt);
-
-    auto state = mapStateOf(rt, obj);
-    auto nameArray = proto.getPropertyNames(rt);
-    size_t n = nameArray.size(rt);
-    std::vector<std::string> names;
-    names.reserve(n);
-    for (size_t i = 0; i < n; i++) {
-        names.push_back(nameArray.getValueAtIndex(rt, i).getString(rt).utf8(rt));
-    }
-    for (const std::string& name : names) {
-        if (name.rfind("checkIsMutable_", 0) == 0) {
-            state->checkIsMutable_ = name;
-        }
-    }
-    // Same mangled-alias table as kernel-created proxies (see
-    // installMapMangledForwards) — the two paths cannot drift.
-    installMapMangledForwards(rt, obj, names);
+void morphHashMap(jsi::Runtime&, JavaVM*, jsi::Object&, const std::string&, const std::string&) {
+    // The prototype swap in populateMapHandle already shadows every storage method.
 }
 
 jsi::Object createMapHandle(jsi::Runtime& rt, JavaVM* jvm, jobject globalMapRef, const std::string& keyType, const std::string& valueType, bool stateBacked) {
-    auto mapObj = jsi::Object(rt);
-    populateMapHandle(rt, jvm, mapObj, globalMapRef, keyType, valueType, stateBacked);
-    return mapObj;
-}
-
-// Queries the plugin-side classifier (`RDMA.mapKind`): 0 = LinkedHashMap,
-// 1 = HashMap, 2 = emptyMap, 3 = unsupported. Returns -1 when not installed.
-static int mapKindOf(jsi::Runtime& rt, const jsi::Value& v) {
-    auto rdma = rt.global().getProperty(rt, "RDMA");
-    if (!rdma.isObject()) return -1;
-    auto fn = rdma.asObject(rt).getProperty(rt, "mapKind");
-    if (!fn.isObject() || !fn.asObject(rt).isFunction(rt)) return -1;
-    auto res = fn.asObject(rt).asFunction(rt).call(rt, v);
-    return res.isNumber() ? (int)res.getNumber() : -1;
-}
-
-// Extracts entries of a plugin-side Kotlin/JS Map into a JS array of [key, value].
-static jsi::Array mapToEntries(jsi::Runtime& rt, const jsi::Object& obj) {
-    auto rdma = rt.global().getProperty(rt, "RDMA");
-    if (!rdma.isObject()) return jsi::Array(rt, 0);
-    auto fn = rdma.asObject(rt).getProperty(rt, "mapToEntries");
-    if (!fn.isObject() || !fn.asObject(rt).isFunction(rt)) return jsi::Array(rt, 0);
-    auto res = fn.asObject(rt).asFunction(rt).call(rt, jsi::Value(rt, obj));
-    if (res.isObject() && res.asObject(rt).isArray(rt)) return res.asObject(rt).asArray(rt);
-    return jsi::Array(rt, 0);
+    auto state = std::make_shared<MapNativeState>(jvm, globalMapRef, keyType, valueType);
+    state->stateBacked_ = stateBacked;
+    return rdmaNewProxy(rt, stateBacked ? RdmaProtoKind::StateMap : RdmaProtoKind::Map, std::move(state));
 }
 
 jobject materializeMap(JNIEnv* env, jsi::Runtime& rt, JavaVM* jvm, jsi::Object& jsObj, const std::string& keyType, const std::string& valueType) {
+    // Already a proxy (kernel map, or a plugin map that crossed before).
+    if (auto st = rdmaMapStateOf(rt, jsObj)) return env->NewLocalRef(st->globalMapRef_);
+
     int kind = mapKindOf(rt, jsi::Value(rt, jsObj));
     if (kind == 3) {
         throw jsi::JSError(rt, "unsupported Map implementation crossing the runtime boundary; only LinkedHashMap, HashMap and EmptyMap are supported");
     }
     if (kind == 2) {
-        jclass collectionsCls = env->FindClass("java/util/Collections");
-        jmethodID emptyMapMethod = env->GetStaticMethodID(collectionsCls, "emptyMap", "()Ljava/util/Map;");
-        jobject empty = env->CallStaticObjectMethod(collectionsCls, emptyMapMethod);
-        return env->NewGlobalRef(empty);
+        // emptyMap: the immutable native empty map; the JS singleton is not adopted.
+        const MapJni& j = mapJni(env);
+        return env->CallStaticObjectMethod(j.collectionsClass, j.emptyMap);
     }
-    // Already a map handle we produced earlier.
-    if (jsObj.hasNativeState(rt)) {
-        auto ns = std::dynamic_pointer_cast<MapNativeState>(jsObj.getNativeState(rt));
-        if (ns) return ns->globalMapRef_;
-    }
-
-    jclass lhmCls = env->FindClass("java/util/LinkedHashMap");
-    jmethodID ctor = env->GetMethodID(lhmCls, "<init>", "()V");
-    jmethodID putMethod = env->GetMethodID(lhmCls, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
-    jobject localMap = env->NewObject(lhmCls, ctor);
-
-    auto entries = mapToEntries(rt, jsObj);
-    size_t n = entries.size(rt);
-    for (size_t i = 0; i < n; i++) {
-        auto pair = entries.getValueAtIndex(rt, i);
-        if (!pair.isObject() || !pair.asObject(rt).isArray(rt)) continue;
-        auto arr = pair.asObject(rt).asArray(rt);
-        if (arr.size(rt) < 2) continue;
-        jobject key = jsiToJobjectMap(env, rt, jvm, arr.getValueAtIndex(rt, 0), keyType);
-        jobject value = jsiToJobjectMap(env, rt, jvm, arr.getValueAtIndex(rt, 1), valueType);
-        env->CallObjectMethod(localMap, putMethod, key, value);
-    }
-
-    jobject globalMap = env->NewGlobalRef(localMap);
-    env->DeleteLocalRef(localMap);
-
-    populateMapHandle(rt, jvm, jsObj, globalMap, keyType, valueType);
-    morphHashMap(rt, jvm, jsObj, keyType, valueType);
-
-    return globalMap;
+    jobject map = newJniMap(env, rt, jvm, pluginEntriesOf(rt, jsObj), keyType, valueType);
+    // The proxy owns its own global reference; the caller owns the returned local.
+    populateMapHandle(rt, jvm, jsObj, env->NewGlobalRef(map), keyType, valueType);
+    return map;
 }
 
 } // namespace rdma

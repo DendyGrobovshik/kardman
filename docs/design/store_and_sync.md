@@ -1,7 +1,8 @@
 # Design: store & sync
 
-How the store serves bundles, how a client gets exactly what it needs, and what a
-bundle physically is. The versioning model behind the store (kernel `H`, toolchain `G`,
+The target design: how the store serves bundles, how a client gets exactly what it needs,
+and what a bundle physically is. What exists today:
+[internals/plugin_loading.md](../internals/plugin_loading.md). The versioning model behind the store (kernel `H`, toolchain `G`,
 the P1–P4 state machine) lives in [compatibility.md](compatibility.md) and
 [toolchain_compatibility.md](toolchain_compatibility.md).
 

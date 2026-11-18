@@ -20,12 +20,15 @@
 #include "ListHandle.h"
 #include "MapHandle.h"
 #include "RdmaNativeState.h"
+#include "RdmaBlocks.h"
+#include "RdmaVtable.h"
 
 #include <jsi/jsi.h>
 #include <jni.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <mutex>
 #include <atomic>
 #include <cstdio>
 #include <android/log.h>
@@ -41,13 +44,11 @@ ComposeJniCache g_composeCache;
 
 static std::shared_ptr<jsi::Function> g_content;
 static std::string g_contentPluginId;
-std::unordered_map<int64_t, std::string> g_blockPluginId;
 std::shared_ptr<jsi::Object> g_empty;
 // Monotonic counter bumped every time a new content is registered. The host
 // polls it to detect "content changed" and recompose the UI (dynamic plugins).
 static std::atomic<int> g_contentVersion{0};
-static std::unordered_map<int64_t, std::shared_ptr<jsi::Function>> g_scopeBlocks;
-static int64_t g_nextScopeBlockId = 1;
+// Plugin JS blocks referenced by id live in the shared registry (RdmaBlocks.h).
 std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;
 int64_t g_nextJsValueId = 1;
 jobject g_currentComposer = nullptr; // borrowed global ref; owned by the content/scope task
@@ -85,6 +86,65 @@ extern "C" void rdmaSetObjectWrapper(ObjectWrapper wrapper) {
     g_objectWrapper = wrapper;
 }
 
+// Boxed java.lang types and their accessors, resolved once (boot classes are visible
+// on every thread). Every value crossing used to do several FindClass/GetMethodID
+// lookups (docs/design/runtime_rework.md §3.9).
+namespace {
+struct BoxJni {
+    jclass integer, boolean, string, dbl, lng, flt, enumCls;
+    jmethodID intValue, booleanValue, doubleValue, longValue, floatValue, enumName, stringGetBytes;
+    jmethodID integerValueOf, booleanValueOf, doubleValueOf, longValueOf, floatValueOf;
+    jstring utf8; // "UTF-8" (global)
+};
+jclass globalClass(JNIEnv* env, const char* name) {
+    jclass local = env->FindClass(name);
+    jclass global = (jclass)env->NewGlobalRef(local);
+    env->DeleteLocalRef(local);
+    return global;
+}
+BoxJni makeBoxJni(JNIEnv* env) {
+    BoxJni b{};
+    b.integer = globalClass(env, "java/lang/Integer");
+    b.boolean = globalClass(env, "java/lang/Boolean");
+    b.string = globalClass(env, "java/lang/String");
+    b.dbl = globalClass(env, "java/lang/Double");
+    b.lng = globalClass(env, "java/lang/Long");
+    b.flt = globalClass(env, "java/lang/Float");
+    b.enumCls = globalClass(env, "java/lang/Enum");
+    b.intValue = env->GetMethodID(b.integer, "intValue", "()I");
+    b.booleanValue = env->GetMethodID(b.boolean, "booleanValue", "()Z");
+    b.doubleValue = env->GetMethodID(b.dbl, "doubleValue", "()D");
+    b.longValue = env->GetMethodID(b.lng, "longValue", "()J");
+    b.floatValue = env->GetMethodID(b.flt, "floatValue", "()F");
+    b.enumName = env->GetMethodID(b.enumCls, "name", "()Ljava/lang/String;");
+    b.stringGetBytes = env->GetMethodID(b.string, "getBytes", "(Ljava/lang/String;)[B");
+    b.integerValueOf = env->GetStaticMethodID(b.integer, "valueOf", "(I)Ljava/lang/Integer;");
+    b.booleanValueOf = env->GetStaticMethodID(b.boolean, "valueOf", "(Z)Ljava/lang/Boolean;");
+    b.doubleValueOf = env->GetStaticMethodID(b.dbl, "valueOf", "(D)Ljava/lang/Double;");
+    b.longValueOf = env->GetStaticMethodID(b.lng, "valueOf", "(J)Ljava/lang/Long;");
+    b.floatValueOf = env->GetStaticMethodID(b.flt, "valueOf", "(F)Ljava/lang/Float;");
+    jstring u = env->NewStringUTF("UTF-8");
+    b.utf8 = (jstring)env->NewGlobalRef(u);
+    env->DeleteLocalRef(u);
+    return b;
+}
+const BoxJni& boxJni(JNIEnv* env) {
+    static const BoxJni b = makeBoxJni(env); // thread-safe one-time init
+    return b;
+}
+// A Java String as standard UTF-8 (not JNI's modified UTF-8).
+std::string javaStringUtf8(JNIEnv* env, jobject s) {
+    const BoxJni& b = boxJni(env);
+    auto bytes = (jbyteArray)env->CallObjectMethod(s, b.stringGetBytes, b.utf8);
+    if (!bytes) return "";
+    jsize len = env->GetArrayLength(bytes);
+    std::string out((size_t)len, '\0');
+    if (len > 0) env->GetByteArrayRegion(bytes, 0, len, reinterpret_cast<jbyte*>(&out[0]));
+    env->DeleteLocalRef(bytes);
+    return out;
+}
+} // namespace
+
 jsi::Value wrapAny(jsi::Runtime& rt, HostContext jvm, jobject obj) {
     JNIEnv* env = getEnv(jvm);
     if (!env) return jsi::Value::undefined();
@@ -112,15 +172,20 @@ static jobject rdmaBoxObjectLeaf(jsi::Runtime& rt, const jsi::Value& v);
 // same leaves inside its `elementType` strings). `@RDMA enum` leaves are handled by
 // the channel-specific paths (an enum needs its `valueOf`, see boxStateValue).
 jobject rdmaBoxLeafValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, const std::string& fqn) {
+    const BoxJni& b = boxJni(env);
+    if (fqn == "rdma.BlockId") {
+        // A plugin block id (`RDMA.registerBlock`): a plain non-negative integral JS
+        // number, boxed as the kernel's `Long` (e.g. `List<() -> Unit>` widget args).
+        if (!v.isNumber()) throwTypeError(rt, "expected a block id (number) at the boundary");
+        double dv = v.getNumber();
+        if (dv < 0 || (double)(long long)dv != dv) throwTypeError(rt, "invalid block id " + std::to_string(dv));
+        return env->CallStaticObjectMethod(b.lng, b.longValueOf, (jlong)dv);
+    }
     if (fqn == "kotlin.Long") {
         // The plugin's `Long(low, high)` object (or an integral JS number), exact
         // in all 64 bits (docs/design/type_descriptors.md#long-policy).
         long long lv = rdmaCheckedJLong(rt, v);
-        jclass cls = env->FindClass("java/lang/Long");
-        jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(J)Ljava/lang/Long;");
-        jobject r = env->CallStaticObjectMethod(cls, valueOf, (jlong)lv);
-        env->DeleteLocalRef(cls);
-        return r;
+        return env->CallStaticObjectMethod(b.lng, b.longValueOf, (jlong)lv);
     }
     if (fqn == "kotlin.Int" || fqn == "kotlin.Double" || fqn == "kotlin.Float") {
         if (!v.isNumber()) throwTypeError(rt, "expected a number (" + fqn + ") at the boundary");
@@ -129,32 +194,14 @@ jobject rdmaBoxLeafValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, con
             if (!(dv >= -2147483648.0 && dv <= 2147483647.0) || (double)(long long)dv != dv) {
                 throwTypeError(rt, "value " + std::to_string(dv) + " does not fit " + fqn);
             }
-            jclass cls = env->FindClass("java/lang/Integer");
-            jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(I)Ljava/lang/Integer;");
-            jobject r = env->CallStaticObjectMethod(cls, valueOf, (jint)dv);
-            env->DeleteLocalRef(cls);
-            return r;
+            return env->CallStaticObjectMethod(b.integer, b.integerValueOf, (jint)dv);
         }
-        if (fqn == "kotlin.Double") {
-            jclass cls = env->FindClass("java/lang/Double");
-            jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(D)Ljava/lang/Double;");
-            jobject r = env->CallStaticObjectMethod(cls, valueOf, (jdouble)dv);
-            env->DeleteLocalRef(cls);
-            return r;
-        }
-        jclass cls = env->FindClass("java/lang/Float");
-        jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(F)Ljava/lang/Float;");
-        jobject r = env->CallStaticObjectMethod(cls, valueOf, (jfloat)dv);
-        env->DeleteLocalRef(cls);
-        return r;
+        if (fqn == "kotlin.Double") return env->CallStaticObjectMethod(b.dbl, b.doubleValueOf, (jdouble)dv);
+        return env->CallStaticObjectMethod(b.flt, b.floatValueOf, (jfloat)dv);
     }
     if (fqn == "kotlin.Boolean") {
         if (!v.isBool()) throwTypeError(rt, "expected a Boolean value at the boundary");
-        jclass cls = env->FindClass("java/lang/Boolean");
-        jmethodID valueOf = env->GetStaticMethodID(cls, "valueOf", "(Z)Ljava/lang/Boolean;");
-        jobject r = env->CallStaticObjectMethod(cls, valueOf, (jboolean)v.getBool());
-        env->DeleteLocalRef(cls);
-        return r;
+        return env->CallStaticObjectMethod(b.boolean, b.booleanValueOf, (jboolean)v.getBool());
     }
     if (fqn == "kotlin.String") {
         if (!v.isString()) throwTypeError(rt, "expected a String value at the boundary");
@@ -235,7 +282,7 @@ static jclass findAppClass(JNIEnv* env, const std::string& fqn) {
 // Boxes the enum entry name string into the concrete JVM enum via the enum class's
 // `valueOf(String)`. `fqn` should be the enum class FQN (e.g. `com.example.HttpMethod`).
 // Returns the entry as a new local reference the caller owns. Raises a cross-runtime
-// error on a wrong-shaped input or a missing `valueOf(String)` (docs/types.md).
+// error on a wrong-shaped input or a missing `valueOf(String)` (docs/guide/types.md).
 // Shared by state writes and collection element materialization — no drift between them.
 jobject rdmaBoxEnumValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, const std::string& fqn) {
     if (!v.isString()) throwTypeError(rt, "expected the enum entry name string for " + fqn);
@@ -289,29 +336,14 @@ static jobject boxStateValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v,
         case TypeDesc::LIST: {
             if (!v.isObject()) throwTypeError(rt, "expected a List value for " + d.serialize());
             jsi::Object o = v.asObject(rt);
-            if (o.hasNativeState(rt)) {
-                auto ns = std::dynamic_pointer_cast<ListNativeState>(o.getNativeState(rt));
-                if (ns) return env->NewLocalRef(ns->globalListRef_); // kernel list: same object
-            }
-            // materializeArray returns an owned global; hand back an owned local instead.
-            jobject g = materializeArray(env, rt, g_composeCache.jvm, o, d.elem->serialize());
-            if (!g) return nullptr;
-            jobject local = env->NewLocalRef(g);
-            env->DeleteGlobalRef(g);
-            return local;
+            // materializeArray returns an owned local (the kernel list behind a proxy, or a
+            // freshly materialized one) — exactly this function's contract.
+            return materializeArray(env, rt, g_composeCache.jvm, o, d.elem->serialize());
         }
         case TypeDesc::MAP: {
             if (!v.isObject()) throwTypeError(rt, "expected a Map value for " + d.serialize());
             jsi::Object o = v.asObject(rt);
-            if (o.hasNativeState(rt)) {
-                auto ns = std::dynamic_pointer_cast<MapNativeState>(o.getNativeState(rt));
-                if (ns) return env->NewLocalRef(ns->globalMapRef_);
-            }
-            jobject g = materializeMap(env, rt, g_composeCache.jvm, o, d.key->serialize(), d.value->serialize());
-            if (!g) return nullptr;
-            jobject local = env->NewLocalRef(g);
-            env->DeleteGlobalRef(g);
-            return local;
+            return materializeMap(env, rt, g_composeCache.jvm, o, d.key->serialize(), d.value->serialize());
         }
         case TypeDesc::LEAF:
         default:
@@ -484,23 +516,23 @@ JNIEnv* getEnv(JavaVM* jvm) {
 // ------------------------------------------------- value conversion (JVM <-> JSI)
 
 jobject boxJsi(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
+    const BoxJni& b = boxJni(env);
     if (v.isNumber()) {
-        jclass integer = env->FindClass("java/lang/Integer");
-        jmethodID valueOf = env->GetStaticMethodID(integer, "valueOf", "(I)Ljava/lang/Integer;");
-        jobject r = env->CallStaticObjectMethod(integer, valueOf, (jint)v.getNumber());
-        env->DeleteLocalRef(integer);
-        return r;
+        // A JS number is a Kotlin `Int` or `Double` alike. Integral values in Int range
+        // keep their historical Integer box (untyped channels rely on it); anything else
+        // is boxed losslessly as Double (an Integer box truncated `remember { 1.5 }` to 1).
+        double d = v.getNumber();
+        if (d >= -2147483648.0 && d <= 2147483647.0 && (double)(int32_t)d == d) {
+            return env->CallStaticObjectMethod(b.integer, b.integerValueOf, (jint)d);
+        }
+        return env->CallStaticObjectMethod(b.dbl, b.doubleValueOf, (jdouble)d);
     }
     if (v.isString()) {
         std::string s = v.getString(rt).utf8(rt);
         return env->NewStringUTF(s.c_str());
     }
     if (v.isBool()) {
-        jclass boolean = env->FindClass("java/lang/Boolean");
-        jmethodID valueOf = env->GetStaticMethodID(boolean, "valueOf", "(Z)Ljava/lang/Boolean;");
-        jobject r = env->CallStaticObjectMethod(boolean, valueOf, (jboolean)v.getBool());
-        env->DeleteLocalRef(boolean);
-        return r;
+        return env->CallStaticObjectMethod(b.boolean, b.booleanValueOf, (jboolean)v.getBool());
     }
     return nullptr;
 }
@@ -518,136 +550,45 @@ static jobject boxKeyForRemember(JNIEnv* env, jsi::Runtime& rt, const jsi::Value
 
 jsi::Value unboxJni(JNIEnv* env, jsi::Runtime& rt, jobject o) {
     if (o == nullptr) return jsi::Value::null();
-    jclass cls = env->GetObjectClass(o);
-    jclass integer = env->FindClass("java/lang/Integer");
-    jclass boolean = env->FindClass("java/lang/Boolean");
-    jclass string = env->FindClass("java/lang/String");
-    jclass dbl = env->FindClass("java/lang/Double");
-    jclass lng = env->FindClass("java/lang/Long");
-    jclass flt = env->FindClass("java/lang/Float");
-    jclass enumCls = env->FindClass("java/lang/Enum");
-
+    const BoxJni& b = boxJni(env);
+    if (env->IsInstanceOf(o, b.integer)) return jsi::Value((double)env->CallIntMethod(o, b.intValue));
+    if (env->IsInstanceOf(o, b.string)) return jsi::String::createFromUtf8(rt, javaStringUtf8(env, o));
+    if (env->IsInstanceOf(o, b.boolean)) return jsi::Value(env->CallBooleanMethod(o, b.booleanValue) == JNI_TRUE);
+    if (env->IsInstanceOf(o, b.dbl)) return jsi::Value(env->CallDoubleMethod(o, b.doubleValue));
+    if (env->IsInstanceOf(o, b.lng)) {
+        return rdmaLongToJs(rt, (long long)env->CallLongMethod(o, b.longValue)); // plugin's Long object, all 64 bits
+    }
+    if (env->IsInstanceOf(o, b.flt)) return jsi::Value((double)env->CallFloatMethod(o, b.floatValue));
     // Enum entries cross kernel -> plugin as their name string (any @RDMA enum).
-    jsi::Value enumResult = jsi::Value::undefined();
-    if (enumCls && env->IsInstanceOf(o, enumCls)) {
-        jmethodID enumName = env->GetMethodID(enumCls, "name", "()Ljava/lang/String;");
-        jstring jname = (jstring)env->CallObjectMethod(o, enumName);
-        const char* nameCstr = env->GetStringUTFChars(jname, nullptr);
-        std::string nameStr(nameCstr);
-        env->ReleaseStringUTFChars(jname, nameCstr);
-        env->DeleteLocalRef(jname);
-        enumResult = jsi::String::createFromUtf8(rt, nameStr);
+    if (env->IsInstanceOf(o, b.enumCls)) {
+        auto name = (jstring)env->CallObjectMethod(o, b.enumName);
+        std::string s = name ? javaStringUtf8(env, name) : "";
+        if (name) env->DeleteLocalRef(name);
+        return jsi::String::createFromUtf8(rt, s);
     }
-
-    jsi::Value result = jsi::Value::undefined();
-    if (env->IsInstanceOf(o, integer)) {
-        jmethodID intValue = env->GetMethodID(integer, "intValue", "()I");
-        result = jsi::Value((double)env->CallIntMethod(o, intValue));
-    } else if (env->IsInstanceOf(o, boolean)) {
-        jmethodID boolValue = env->GetMethodID(boolean, "booleanValue", "()Z");
-        result = jsi::Value(env->CallBooleanMethod(o, boolValue));
-    } else if (env->IsInstanceOf(o, string)) {
-        jmethodID getBytes = env->GetMethodID(string, "getBytes", "(Ljava/lang/String;)[B");
-        jstring utf8 = env->NewStringUTF("UTF-8");
-        jbyteArray bytes = (jbyteArray)env->CallObjectMethod(o, getBytes, utf8);
-        env->DeleteLocalRef(utf8);
-        if (bytes != nullptr) {
-            jsize len = env->GetArrayLength(bytes);
-            jbyte* elems = env->GetByteArrayElements(bytes, nullptr);
-            std::string s((char*)elems, len);
-            env->ReleaseByteArrayElements(bytes, elems, JNI_ABORT);
-            result = jsi::String::createFromUtf8(rt, s);
-        }
-    } else if (env->IsInstanceOf(o, dbl)) {
-        jmethodID doubleValue = env->GetMethodID(dbl, "doubleValue", "()D");
-        result = jsi::Value(env->CallDoubleMethod(o, doubleValue));
-    } else if (env->IsInstanceOf(o, lng)) {
-        jmethodID longValue = env->GetMethodID(lng, "longValue", "()J");
-        jlong lv = env->CallLongMethod(o, longValue);
-        result = rdmaLongToJs(rt, (long long)lv); // plugin's Long object, all 64 bits
-    } else if (env->IsInstanceOf(o, flt)) {
-        jmethodID floatValue = env->GetMethodID(flt, "floatValue", "()F");
-        result = jsi::Value((double)env->CallFloatMethod(o, floatValue));
-    }
-
-    if (result.isUndefined() && !enumResult.isUndefined()) {
-        result = std::move(enumResult);
-    }
-
-    env->DeleteLocalRef(cls);
-    env->DeleteLocalRef(integer);
-    env->DeleteLocalRef(boolean);
-    env->DeleteLocalRef(string);
-    env->DeleteLocalRef(dbl);
-    env->DeleteLocalRef(lng);
-    env->DeleteLocalRef(flt);
-    if (enumCls) env->DeleteLocalRef(enumCls);
-    return result;
+    return jsi::Value::undefined();
 }
 
 // Classifies a boxed JVM value into an RdmaResult descriptor (run on the UI thread).
 // Handles Integer/Boolean/Double/Long/Float/String/enum/null; anything else -> Null.
 RdmaResult classifyBoxedValue(JNIEnv* env, jobject o) {
     if (o == nullptr) return RdmaResult::null();
-    jclass integer = env->FindClass("java/lang/Integer");
-    jclass boolean = env->FindClass("java/lang/Boolean");
-    jclass string = env->FindClass("java/lang/String");
-    jclass dbl = env->FindClass("java/lang/Double");
-    jclass lng = env->FindClass("java/lang/Long");
-    jclass flt = env->FindClass("java/lang/Float");
-    jclass enumCls = env->FindClass("java/lang/Enum");
-
-    RdmaResult r;
-    if (env->IsInstanceOf(o, integer)) {
-        jmethodID intValue = env->GetMethodID(integer, "intValue", "()I");
-        r = RdmaResult::number((double)env->CallIntMethod(o, intValue));
-    } else if (env->IsInstanceOf(o, boolean)) {
-        jmethodID boolValue = env->GetMethodID(boolean, "booleanValue", "()Z");
-        r = RdmaResult::boolean(env->CallBooleanMethod(o, boolValue));
-    } else if (env->IsInstanceOf(o, string)) {
-        jmethodID getBytes = env->GetMethodID(string, "getBytes", "(Ljava/lang/String;)[B");
-        jstring utf8 = env->NewStringUTF("UTF-8");
-        jbyteArray bytes = (jbyteArray)env->CallObjectMethod(o, getBytes, utf8);
-        env->DeleteLocalRef(utf8);
-        if (bytes != nullptr) {
-            jsize len = env->GetArrayLength(bytes);
-            jbyte* elems = env->GetByteArrayElements(bytes, nullptr);
-            std::string s((char*)elems, len);
-            env->ReleaseByteArrayElements(bytes, elems, JNI_ABORT);
-            env->DeleteLocalRef(bytes);
-            r = RdmaResult::string(std::move(s));
-        } else {
-            r = RdmaResult::string("");
-        }
-    } else if (env->IsInstanceOf(o, dbl)) {
-        jmethodID doubleValue = env->GetMethodID(dbl, "doubleValue", "()D");
-        r = RdmaResult::number(env->CallDoubleMethod(o, doubleValue));
-    } else if (env->IsInstanceOf(o, lng)) {
-        jmethodID longValue = env->GetMethodID(lng, "longValue", "()J");
-        jlong lv = env->CallLongMethod(o, longValue);
-        r = RdmaResult::i64Value((long long)lv); // full 64 bits, never squeezed through a double
-    } else if (env->IsInstanceOf(o, flt)) {
-        jmethodID floatValue = env->GetMethodID(flt, "floatValue", "()F");
-        r = RdmaResult::number((double)env->CallFloatMethod(o, floatValue));
-    } else if (enumCls && env->IsInstanceOf(o, enumCls)) {
-        jmethodID enumName = env->GetMethodID(enumCls, "name", "()Ljava/lang/String;");
-        jstring jname = (jstring)env->CallObjectMethod(o, enumName);
-        const char* nameCstr = env->GetStringUTFChars(jname, nullptr);
-        r = RdmaResult::string(std::string(nameCstr));
-        env->ReleaseStringUTFChars(jname, nameCstr);
-        env->DeleteLocalRef(jname);
-    } else {
-        r = RdmaResult::null();
+    const BoxJni& b = boxJni(env);
+    if (env->IsInstanceOf(o, b.integer)) return RdmaResult::number((double)env->CallIntMethod(o, b.intValue));
+    if (env->IsInstanceOf(o, b.boolean)) return RdmaResult::boolean(env->CallBooleanMethod(o, b.booleanValue));
+    if (env->IsInstanceOf(o, b.string)) return RdmaResult::string(javaStringUtf8(env, o));
+    if (env->IsInstanceOf(o, b.dbl)) return RdmaResult::number(env->CallDoubleMethod(o, b.doubleValue));
+    if (env->IsInstanceOf(o, b.lng)) {
+        return RdmaResult::i64Value((long long)env->CallLongMethod(o, b.longValue)); // full 64 bits
     }
-
-    env->DeleteLocalRef(integer);
-    env->DeleteLocalRef(boolean);
-    env->DeleteLocalRef(string);
-    env->DeleteLocalRef(dbl);
-    env->DeleteLocalRef(lng);
-    env->DeleteLocalRef(flt);
-    if (enumCls) env->DeleteLocalRef(enumCls);
-    return r;
+    if (env->IsInstanceOf(o, b.flt)) return RdmaResult::number((double)env->CallFloatMethod(o, b.floatValue));
+    if (env->IsInstanceOf(o, b.enumCls)) {
+        auto name = (jstring)env->CallObjectMethod(o, b.enumName);
+        std::string s = name ? javaStringUtf8(env, name) : "";
+        if (name) env->DeleteLocalRef(name);
+        return RdmaResult::string(std::move(s));
+    }
+    return RdmaResult::null();
 }
 
 jthrowable makeRdmaException(JNIEnv* env, const RdmaExceptionInfo& info) {
@@ -786,163 +727,166 @@ bool captureJniError(JNIEnv* e, RdmaResult& out) {
 
 // ----------------------------------------------------------------- proxies
 
-class StateProxyHost : public jsi::HostObject {
-public:
-    StateProxyHost(jobject state, std::string typeDesc)
-        : state_(state), descRaw_(std::move(typeDesc)), desc_(TypeDesc::parseOrAny(descRaw_)) {}
-    ~StateProxyHost() override {
+// MutableState proxy: a NativeState object over a shared lazy prototype
+// (docs/design/runtime_rework.md §3.8). `get_value`/`set_value` are resolved once
+// per runtime by their compile-mangled names and read the state from `this`.
+struct StateProxyState : public RdmaTaggedState {
+    StateProxyState(jobject state, std::string typeDesc)
+        : RdmaTaggedState(RdmaStateKind::State), state_(state), descRaw_(std::move(typeDesc)), desc_(TypeDesc::parseOrAny(descRaw_)) {}
+    ~StateProxyState() override {
         if (state_ && g_composeCache.jvm) {
             JNIEnv* env = getEnv(g_composeCache.jvm);
             if (env) env->DeleteGlobalRef(state_);
         }
     }
-
-    jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& name) override {
-        std::string n = name.utf8(rt);
-        JNIEnv* env = getEnv(g_composeCache.jvm);
-        if (!env) return jsi::Value::undefined();
-        if (n.rfind("get_value", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "get_value"), 0,
-                [state = state_, descRaw = descRaw_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    if (g_inComposition) {
-                        // Rendezvous to the UI thread so Compose's snapshot read
-                        // observer records the dependency on this state, and carry
-                        // the value back as a descriptor-typed handle: the JS side
-                        // marshals it by the channel's type descriptor.
-                        RdmaResult res = rdmaCallUi([state, descRaw]() -> RdmaResult {
-                            JNIEnv* e = getEnv(g_composeCache.jvm);
-                            if (!e) return RdmaResult::undefined();
-                            jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
-                            RdmaResult err;
-                            if (captureJniError(e, err)) { if (v) e->DeleteLocalRef(v); return err; }
-                            jobject global = v ? e->NewGlobalRef(v) : nullptr;
-                            if (v) e->DeleteLocalRef(v);
-                            return RdmaResult::hostValue(global, descRaw);
-                        });
-                        return rdmaResultToJsi(r, res);
-                    }
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value::undefined();
-                    jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
-                    checkAndThrowJs(e, r);
-                    jsi::Value out = marshalByTypeDesc(r, g_composeCache.jvm, v, descRaw);
-                    if (v) e->DeleteLocalRef(v);
-                    return out;
-                });
-        }
-        if (n.rfind("set_value", 0) == 0) {
-            auto fn = jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "set_value"), 1,
-                [state = state_, desc = desc_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    JNIEnv* e = getEnv(g_composeCache.jvm);
-                    if (!e) return jsi::Value::undefined();
-                    if (count < 1) return jsi::Value::undefined();
-                    // Descriptor-typed and strict: a foreign-typed value raises
-                    // instead of being coerced or silently dropped, and `null` is
-                    // written as a value only on nullable states.
-                    jobject boxed = boxStateValue(e, r, args[0], desc);
-                    if (g_inComposition) {
-                        // Rendezvous write during composition: the write runs inside
-                        // the UI thread's active composition snapshot, so it is visible
-                        // to the same pass' reads and Compose's snapshot system observes
-                        // the change (docs/bridges.md §state). A direct write from the
-                        // Hermes thread would land in the global snapshot that the open
-                        // composition snapshot cannot see.
-                        jobject boxedG = boxed ? e->NewGlobalRef(boxed) : nullptr;
-                        if (boxed) e->DeleteLocalRef(boxed);
-                        RdmaResult res = rdmaCallUi([state, boxedG]() -> RdmaResult {
-                            JNIEnv* e2 = getEnv(g_composeCache.jvm);
-                            if (!e2) return RdmaResult::undefined();
-                            e2->CallVoidMethod(state, g_composeCache.stateSetValue, boxedG);
-                            RdmaResult err;
-                            if (captureJniError(e2, err)) {
-                                if (boxedG) e2->DeleteGlobalRef(boxedG);
-                                return err;
-                            }
-                            if (boxedG) e2->DeleteGlobalRef(boxedG);
-                            return RdmaResult::undefined();
-                        });
-                        return rdmaResultToJsi(r, res); // Error kind rethrows into JS
-                    }
-                    e->CallVoidMethod(state, g_composeCache.stateSetValue, boxed);
-                    if (boxed) e->DeleteLocalRef(boxed);
-                    checkAndThrowJs(e, r);
-                    return jsi::Value::undefined();
-                });
-            return fn;
-        }
-        return jsi::Value::undefined();
-    }
-
-    jobject state() const { return state_; }
-
-private:
     jobject state_;       // global ref
     std::string descRaw_; // type descriptor of the state's value channel
     TypeDesc desc_;       // parsed form, used on writes
 };
 
+static std::shared_ptr<StateProxyState> stateProxyStateOf(jsi::Runtime& r, const jsi::Value& thisVal) {
+    auto st = rdmaStateAs<StateProxyState>(r, thisVal, RdmaStateKind::State);
+    if (!st) throw jsi::JSError(r, "receiver is not a MutableState proxy");
+    return st;
+}
+
+static jsi::Value resolveStateMethod(jsi::Runtime& rt, const std::string& n) {
+    if (n.rfind("get_value", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "get_value"), 0,
+            [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value*, size_t) -> jsi::Value {
+                auto st = stateProxyStateOf(r, thisVal);
+                jobject state = st->state_;
+                std::string descRaw = st->descRaw_;
+                if (g_inComposition) {
+                    // Rendezvous to the UI thread so Compose's snapshot read
+                    // observer records the dependency on this state, and carry
+                    // the value back as a descriptor-typed handle: the JS side
+                    // marshals it by the channel's type descriptor.
+                    RdmaResult res = rdmaCallUi([state, descRaw]() -> RdmaResult {
+                        JNIEnv* e = getEnv(g_composeCache.jvm);
+                        if (!e) return RdmaResult::undefined();
+                        jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
+                        RdmaResult err;
+                        if (captureJniError(e, err)) { if (v) e->DeleteLocalRef(v); return err; }
+                        jobject global = v ? e->NewGlobalRef(v) : nullptr;
+                        if (v) e->DeleteLocalRef(v);
+                        return RdmaResult::hostValue(global, descRaw);
+                    });
+                    return rdmaResultToJsi(r, res);
+                }
+                JNIEnv* e = getEnv(g_composeCache.jvm);
+                if (!e) return jsi::Value::undefined();
+                JniLocalFrame frame(e);
+                jobject v = e->CallObjectMethod(state, g_composeCache.stateGetValue);
+                checkAndThrowJs(e, r);
+                return marshalByTypeDesc(r, g_composeCache.jvm, v, descRaw);
+            });
+    }
+    if (n.rfind("set_value", 0) == 0) {
+        return jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, "set_value"), 1,
+            [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                auto st = stateProxyStateOf(r, thisVal);
+                jobject state = st->state_;
+                JNIEnv* e = getEnv(g_composeCache.jvm);
+                if (!e) return jsi::Value::undefined();
+                if (count < 1) return jsi::Value::undefined();
+                JniLocalFrame frame(e);
+                // Descriptor-typed and strict: a foreign-typed value raises
+                // instead of being coerced or silently dropped, and `null` is
+                // written as a value only on nullable states.
+                jobject boxed = boxStateValue(e, r, args[0], st->desc_);
+                if (g_inComposition) {
+                    // Rendezvous write during composition: the write runs inside
+                    // the UI thread's active composition snapshot, so it is visible
+                    // to the same pass' reads and Compose's snapshot system observes
+                    // the change (docs/internals/compose_protocol.md#state). A direct write from the
+                    // Hermes thread would land in the global snapshot that the open
+                    // composition snapshot cannot see.
+                    jobject boxedG = boxed ? e->NewGlobalRef(boxed) : nullptr;
+                    RdmaResult res = rdmaCallUi([state, boxedG]() -> RdmaResult {
+                        JNIEnv* e2 = getEnv(g_composeCache.jvm);
+                        if (!e2) return RdmaResult::undefined();
+                        e2->CallVoidMethod(state, g_composeCache.stateSetValue, boxedG);
+                        RdmaResult err;
+                        if (captureJniError(e2, err)) {
+                            if (boxedG) e2->DeleteGlobalRef(boxedG);
+                            return err;
+                        }
+                        if (boxedG) e2->DeleteGlobalRef(boxedG);
+                        return RdmaResult::undefined();
+                    });
+                    return rdmaResultToJsi(r, res); // Error kind rethrows into JS
+                }
+                e->CallVoidMethod(state, g_composeCache.stateSetValue, boxed);
+                checkAndThrowJs(e, r);
+                return jsi::Value::undefined();
+            });
+    }
+    return jsi::Value::undefined();
+}
+
 jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal, const std::string& typeDesc) {
-    auto host = std::make_shared<StateProxyHost>(stateGlobal, typeDesc);
-    return jsi::Object::createFromHostObject(rt, host);
+    static jsi::Object* proto = nullptr; // shared, intentionally leaked (lives as long as the runtime)
+    if (!proto) proto = new jsi::Object(rdmaLazyProto(rt, resolveStateMethod));
+    jsi::Object obj = jsi::Object::create(rt, jsi::Value(rt, *proto));
+    obj.setNativeState(rt, std::make_shared<StateProxyState>(stateGlobal, typeDesc));
+    return obj;
 }
 
 jobject stateProxyJObject(jsi::Runtime& rt, const jsi::Value& v) {
-    if (!v.isObject()) return nullptr;
-    auto obj = v.asObject(rt);
-    if (!obj.isHostObject(rt)) return nullptr;
-    auto host = std::dynamic_pointer_cast<StateProxyHost>(obj.getHostObject(rt));
-    return host ? host->state() : nullptr;
+    auto st = rdmaStateAs<StateProxyState>(rt, v, RdmaStateKind::State);
+    return st ? st->state_ : nullptr;
 }
 
-class ScopeUpdateScopeProxyHost : public jsi::HostObject {
-public:
-    ScopeUpdateScopeProxyHost(jobject scope) : scope_(scope) {}
-    ~ScopeUpdateScopeProxyHost() override {
+// ScopeUpdateScope proxy (same object model as the state proxy).
+struct ScopeProxyState : public RdmaTaggedState {
+    explicit ScopeProxyState(jobject scope) : RdmaTaggedState(RdmaStateKind::Scope), scope_(scope) {}
+    ~ScopeProxyState() override {
         if (scope_ && g_composeCache.jvm) {
             JNIEnv* env = getEnv(g_composeCache.jvm);
             if (env) env->DeleteGlobalRef(scope_);
         }
     }
-
-    jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& name) override {
-        std::string n = name.utf8(rt);
-        if (n.rfind("updateScope", 0) == 0) {
-            return jsi::Function::createFromHostFunction(
-                rt, jsi::PropNameID::forAscii(rt, "updateScope"), 1,
-                [scope = scope_](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    if (count < 1 || !args[0].isObject() || !args[0].asObject(r).isFunction(r)) {
-                        return jsi::Value::undefined();
-                    }
-                    auto fn = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
-                    int64_t id = g_nextScopeBlockId++;
-                    g_scopeBlocks[id] = fn;
-                    // ScopeUpdateScope.updateScope is a Compose-runtime call and must run
-                    // on the UI thread; only the JS block registration happens here.
-                    rdmaCallUi([scope, id]() -> RdmaResult {
-                        JNIEnv* e = getEnv(g_composeCache.jvm);
-                        if (!e) return RdmaResult::undefined();
-                        jobject block = e->NewObject(g_composeCache.scopeBlockClass, g_composeCache.scopeBlockCtor, (jlong)id);
-                        if (block) {
-                            e->CallVoidMethod(scope, g_composeCache.updateScope, block);
-                            e->DeleteLocalRef(block);
-                        }
-                        return RdmaResult::undefined();
-                    });
-                    return jsi::Value::undefined();
-                });
-        }
-        return jsi::Value::undefined();
-    }
-
-private:
     jobject scope_; // global ref
 };
 
+static jsi::Value resolveScopeMethod(jsi::Runtime& rt, const std::string& n) {
+    if (n.rfind("updateScope", 0) != 0) return jsi::Value::undefined();
+    return jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "updateScope"), 1,
+        [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+            auto st = rdmaStateAs<ScopeProxyState>(r, thisVal, RdmaStateKind::Scope);
+            if (!st) throw jsi::JSError(r, "receiver is not a ScopeUpdateScope proxy");
+            if (count < 1 || !args[0].isObject() || !args[0].asObject(r).isFunction(r)) {
+                return jsi::Value::undefined();
+            }
+            jobject scope = st->scope_;
+            // Held by the kernel `ComposerScopeBlock` (retained on construction below).
+            int64_t id = rdmaBlockRegisterPlugin(r, args[0].asObject(r).asFunction(r), "");
+            // ScopeUpdateScope.updateScope is a Compose-runtime call and must run
+            // on the UI thread; only the JS block registration happens here.
+            rdmaCallUi([scope, id]() -> RdmaResult {
+                JNIEnv* e = getEnv(g_composeCache.jvm);
+                if (!e) return RdmaResult::undefined();
+                jobject block = e->NewObject(g_composeCache.scopeBlockClass, g_composeCache.scopeBlockCtor, (jlong)id);
+                if (block) {
+                    e->CallVoidMethod(scope, g_composeCache.updateScope, block);
+                    e->DeleteLocalRef(block);
+                }
+                return RdmaResult::undefined();
+            });
+            return jsi::Value::undefined();
+        });
+}
+
 jsi::Object makeScopeUpdateScopeProxy(jsi::Runtime& rt, jobject scopeGlobal) {
-    auto host = std::make_shared<ScopeUpdateScopeProxyHost>(scopeGlobal);
-    return jsi::Object::createFromHostObject(rt, host);
+    static jsi::Object* proto = nullptr; // shared, intentionally leaked
+    if (!proto) proto = new jsi::Object(rdmaLazyProto(rt, resolveScopeMethod));
+    jsi::Object obj = jsi::Object::create(rt, jsi::Value(rt, *proto));
+    obj.setNativeState(rt, std::make_shared<ScopeProxyState>(scopeGlobal));
+    return obj;
 }
 
 static void setCurrentComposer(jobject composer) {
@@ -1022,15 +966,15 @@ void invokeRegisteredContent(jsi::Runtime& rt, jobject composerGlobal) {
 }
 
 void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composerGlobal, jint changed) {
-    auto it = g_scopeBlocks.find(blockId);
-    if (it == g_scopeBlocks.end()) return;
+    auto block = rdmaBlockGet(blockId);
+    if (!block) return;
     jobject prevComposer = g_currentComposer;
     bool prevInComposition = g_inComposition;
     setCurrentComposer(composerGlobal);
     g_inComposition = true;
     jsi::Object proxy = makeComposerProxy(rt, composerGlobal);
     try {
-        it->second->call(rt, proxy, changed);
+        block->call(rt, proxy, changed);
     } catch (...) {
         g_inComposition = prevInComposition;
         setCurrentComposer(prevComposer);
@@ -1041,15 +985,15 @@ void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composerGlobal, ji
 }
 
 void invokeScopeBlock1(jsi::Runtime& rt, long blockId, jobject composerGlobal, jint changed, jint p1) {
-    auto it = g_scopeBlocks.find(blockId);
-    if (it == g_scopeBlocks.end()) return;
+    auto block = rdmaBlockGet(blockId);
+    if (!block) return;
     jobject prevComposer = g_currentComposer;
     bool prevInComposition = g_inComposition;
     setCurrentComposer(composerGlobal);
     g_inComposition = true;
     jsi::Object proxy = makeComposerProxy(rt, composerGlobal);
     try {
-        it->second->call(rt, jsi::Value((double)p1), proxy, changed);
+        block->call(rt, jsi::Value((double)p1), proxy, changed);
     } catch (...) {
         g_inComposition = prevInComposition;
         setCurrentComposer(prevComposer);
@@ -1057,6 +1001,94 @@ void invokeScopeBlock1(jsi::Runtime& rt, long blockId, jobject composerGlobal, j
     }
     g_inComposition = prevInComposition;
     setCurrentComposer(prevComposer);
+}
+
+// ------------------------------------------------- hotfix slots (rework §6)
+
+namespace {
+// Slot cells by callable FQN (docs/design/runtime_rework.md §6). A cell is a generated
+// `RdmaSlotCell` of its kernel module; it registers itself from its static initializer,
+// and `RDMA.installSlot` writes its volatile `blockId`. Either may come first: an
+// install for a not-yet-registered cell waits in `pending`.
+struct SlotRegistry {
+    std::mutex mutex;
+    std::unordered_map<std::string, jobject> cells;      // global refs
+    std::unordered_map<std::string, int64_t> installed;  // fqn -> block id
+};
+SlotRegistry& slotRegistry() {
+    static auto* r = new SlotRegistry(); // never destroyed: used until process exit
+    return *r;
+}
+
+void writeCellBlockId(JNIEnv* env, jobject cell, int64_t blockId) {
+    jclass cls = env->GetObjectClass(cell);
+    jfieldID fid = env->GetFieldID(cls, "blockId", "J");
+    env->DeleteLocalRef(cls);
+    if (!fid) {
+        env->ExceptionClear();
+        return;
+    }
+    env->SetLongField(cell, fid, (jlong)blockId);
+}
+
+std::vector<std::string> splitDescs(const std::string& s) {
+    std::vector<std::string> out;
+    if (s.empty()) return out;
+    size_t start = 0;
+    while (true) {
+        size_t comma = s.find(',', start);
+        out.push_back(s.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return out;
+}
+
+std::string jstringUtf8(JNIEnv* env, jstring s) {
+    if (!s) return "";
+    const char* c = env->GetStringUTFChars(s, nullptr);
+    std::string out = c ? c : "";
+    if (c) env->ReleaseStringUTFChars(s, c);
+    return out;
+}
+} // namespace
+
+static jobject callJsTyped(jsi::Runtime& rt, const std::shared_ptr<jsi::Function>& fn, jobjectArray args,
+                          const std::string& paramDescs, const std::string& resultDesc);
+
+static jobject runSlot(jsi::Runtime& rt, int64_t blockId, jobjectArray args,
+                       const std::string& paramDescs, const std::string& resultDesc) {
+    auto fn = rdmaBlockGet(blockId);
+    if (!fn) throw jsi::JSError(rt, "hotfix implementation is no longer registered");
+    return callJsTyped(rt, fn, args, paramDescs, resultDesc);
+}
+
+// Calls a JS function with kernel arguments marshalled by `paramDescs` and converts the
+// result by `resultDesc`. Returns a NEW GLOBAL reference (null for Unit/null). Throws
+// jsi::JSError. Runs on the Hermes thread.
+static jobject callJsTyped(jsi::Runtime& rt, const std::shared_ptr<jsi::Function>& fn, jobjectArray args,
+                          const std::string& paramDescs, const std::string& resultDesc) {
+    JNIEnv* env = getEnv(g_composeCache.jvm);
+    if (!env) throw jsi::JSError(rt, "no JNI environment on the Hermes thread");
+    JniLocalFrame frame(env);
+    std::vector<std::string> descs = splitDescs(paramDescs);
+    std::vector<jsi::Value> jsArgs;
+    const jsize n = args ? env->GetArrayLength(args) : 0;
+    jsArgs.reserve((size_t)n);
+    for (jsize i = 0; i < n; i++) {
+        jobject elem = env->GetObjectArrayElement(args, i);
+        const bool typed = (size_t)i < descs.size() && !descs[(size_t)i].empty();
+        jsArgs.push_back(typed ? marshalByTypeDesc(rt, g_composeCache.jvm, elem, descs[(size_t)i])
+                               : wrapAny(rt, g_composeCache.jvm, elem));
+        if (elem) env->DeleteLocalRef(elem);
+    }
+    const jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
+    jsi::Value result = fn->call(rt, callArgs, jsArgs.size());
+    if (resultDesc.empty() || resultDesc == "kotlin.Unit") return nullptr;
+    jobject local = rdmaJsToJniTyped(env, rt, g_composeCache.jvm, result, resultDesc);
+    jobject global = local ? env->NewGlobalRef(local) : nullptr;
+    if (local) env->DeleteLocalRef(local);
+    return global;
 }
 
 // ------------------------------------------------------------ init (JNI/JSI)
@@ -1163,18 +1195,11 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
             TypeDesc d = TypeDesc::parseOrAny(descRaw);
             std::string elemDesc = (d.kind == TypeDesc::LIST && d.elem) ? d.elem->serialize() : "kotlin.Any";
             jsi::Object values = args[0].asObject(r);
-            // materializeArray returns either an OWNED global (fresh materialization) or a
-            // BORROWED `globalListRef_` (reusing a kernel handle) — only free what we own
-            // (same pattern as `putAll`: audit #2).
-            bool borrowed = false;
-            if (values.hasNativeState(r)) {
-                auto ns = std::dynamic_pointer_cast<ListNativeState>(values.getNativeState(r));
-                if (ns) borrowed = true;
-            }
+            // materializeArray returns an owned local reference.
             jobject arrayList = materializeArray(e, r, g_composeCache.jvm, values, elemDesc);
             checkAndThrowJs(e, r);
             jobject snap = e->CallStaticObjectMethod(g_composeCache.stateFactory, g_composeCache.stateFactoryNewList, arrayList);
-            if (arrayList && !borrowed) e->DeleteGlobalRef(arrayList);
+            if (arrayList) e->DeleteLocalRef(arrayList);
             checkAndThrowJs(e, r);
             if (!snap) return jsi::Value::undefined();
             jobject global = e->NewGlobalRef(snap);
@@ -1195,16 +1220,11 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
             std::string keyDesc = (d.kind == TypeDesc::MAP && d.key) ? d.key->serialize() : "kotlin.Any";
             std::string valueDesc = (d.kind == TypeDesc::MAP && d.value) ? d.value->serialize() : "kotlin.Any";
             jsi::Object values = args[0].asObject(r);
-            // Same borrowed/owned split as `mutableStateListOf` (audit #2).
-            bool borrowed = false;
-            if (values.hasNativeState(r)) {
-                auto ns = std::dynamic_pointer_cast<MapNativeState>(values.getNativeState(r));
-                if (ns) borrowed = true;
-            }
+            // materializeMap returns an owned local reference.
             jobject javaMap = materializeMap(e, r, g_composeCache.jvm, values, keyDesc, valueDesc);
             checkAndThrowJs(e, r);
             jobject snap = e->CallStaticObjectMethod(g_composeCache.stateFactory, g_composeCache.stateFactoryNewMap, javaMap);
-            if (javaMap && !borrowed) e->DeleteGlobalRef(javaMap);
+            if (javaMap) e->DeleteLocalRef(javaMap);
             checkAndThrowJs(e, r);
             if (!snap) return jsi::Value::undefined();
             jobject global = e->NewGlobalRef(snap);
@@ -1219,15 +1239,44 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
             if (count < 1 || !args[0].isObject() || !args[0].asObject(r).isFunction(r)) {
                 return jsi::Value::undefined();
             }
-            auto fn = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
-            int64_t id = g_nextScopeBlockId++;
-            g_scopeBlocks[id] = fn;
-            if (count > 1 && args[1].isString()) {
-                g_blockPluginId[id] = args[1].getString(r).utf8(r);
-            }
+            // Owned by the kernel holders of the id (docs/design/runtime_rework.md §4);
+            // the same function registered again keeps its id.
+            std::string pluginId = (count > 1 && args[1].isString()) ? args[1].getString(r).utf8(r) : "";
+            int64_t id = rdmaBlockRegisterPlugin(r, args[0].asObject(r).asFunction(r), pluginId);
             return jsi::Value((double)id);
         });
     rdma.setProperty(rt, "registerBlock", std::move(registerBlockFn));
+
+    // Hotfix slot registration (docs/design/runtime_rework.md §6.3): a polyfill bundle
+    // calls `RDMA.installSlot?.("<fqn>", fn)` next to `RDMA.<name> = fn`, so native
+    // callers of the callable run the JS implementation too. The block lives as long
+    // as the slot holds it (a later install of the same callable replaces it).
+    auto installSlotFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "installSlot"), 2,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 2 || !args[0].isString() || !args[1].isObject() || !args[1].asObject(r).isFunction(r)) {
+                return jsi::Value(false);
+            }
+            JNIEnv* e = getEnv(g_composeCache.jvm);
+            if (!e) return jsi::Value(false);
+            std::string fqn = args[0].getString(r).utf8(r);
+            int64_t id = rdmaBlockRegisterExplicit(
+                std::make_shared<jsi::Function>(args[1].asObject(r).asFunction(r)), "hotfix");
+            rdmaBlockRetain(id);
+            int64_t previous = 0;
+            {
+                auto& reg = slotRegistry();
+                std::lock_guard<std::mutex> lk(reg.mutex);
+                auto it = reg.installed.find(fqn);
+                if (it != reg.installed.end()) previous = it->second;
+                reg.installed[fqn] = id;
+                auto cell = reg.cells.find(fqn);
+                if (cell != reg.cells.end()) writeCellBlockId(e, cell->second, id);
+            }
+            if (previous != 0) rdmaBlockRelease(previous);
+            return jsi::Value(true);
+        });
+    rdma.setProperty(rt, "installSlot", std::move(installSlotFn));
 
     // Registers the two JS callbacks (result and error) that resume a plugin
     // suspend continuation. Returns the completion id; the generated `_<name>Async`
@@ -1278,13 +1327,12 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
             // Register the (single-use) effect body, then let the kernel decide
             // whether it is adopted by a freshly created observer.
             auto fn = std::make_shared<jsi::Function>(args[1].asObject(r).asFunction(r));
-            int64_t id = g_nextScopeBlockId++;
-            g_scopeBlocks[id] = fn;
+            int64_t id = rdmaBlockRegisterExplicit(fn);
 
             auto keysArr = args[0].asObject(r).asArray(r);
             JNIEnv* e = getEnv(g_composeCache.jvm);
             if (!e) {
-                g_scopeBlocks.erase(id);
+                rdmaBlockErase(id);
                 return jsi::Value::undefined();
             }
             jsize n = (jsize)keysArr.size(r);
@@ -1324,7 +1372,7 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
             // freshly registered block is unused and can be released immediately.
             if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
             if (!result.b) {
-                g_scopeBlocks.erase(id);
+                rdmaBlockErase(id);
             }
             return jsi::Value::undefined();
         });
@@ -1338,58 +1386,50 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
     LOGI("Compose bridge installed");
 }
 
+// Android hands JS no transient native buffers: nothing to reclaim after a task.
+void rdmaPlatformAfterJsTask() {}
+void rdmaPlatformAfterUiTask() {}
+
 // ---------------------------------------------------- callback/lambda (JS side)
 
-static void runCallback(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal) {
-    auto it = g_scopeBlocks.find(blockId);
-    if (it == g_scopeBlocks.end()) return;
+// Invokes a plugin callback/lambda block with kernel arguments. Arguments are
+// marshalled by the block's parameter descriptors when the bridge registered them
+// (a `List`/`Map` argument becomes a collection proxy), else by runtime shape.
+// The return value is ignored: these invocations are asynchronous.
+static void runBlockWithArgs(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal) {
+    auto block = rdmaBlockGet(blockId);
+    if (!block) return;
     std::vector<jsi::Value> jsArgs;
     if (argsGlobal) {
         JNIEnv* env = getEnv(g_composeCache.jvm);
         if (env) {
+            JniLocalFrame frame(env);
+            std::vector<std::string> descs = rdmaBlockParamDescs(blockId);
             jsize n = env->GetArrayLength(argsGlobal);
             jsArgs.reserve(n);
             for (jsize i = 0; i < n; i++) {
                 jobject elem = env->GetObjectArrayElement(argsGlobal, i);
-                jsArgs.push_back(wrapAny(rt, g_composeCache.jvm, elem));
+                const bool typed = (size_t)i < descs.size() && !descs[(size_t)i].empty();
+                jsArgs.push_back(typed ? marshalByTypeDesc(rt, g_composeCache.jvm, elem, descs[(size_t)i])
+                                       : wrapAny(rt, g_composeCache.jvm, elem));
                 if (elem) env->DeleteLocalRef(elem);
             }
         }
     }
     const jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
     try {
-        it->second->call(rt, callArgs, jsArgs.size());
+        block->call(rt, callArgs, jsArgs.size());
     } catch (const jsi::JSError& e) {
-        auto pid = g_blockPluginId.find(blockId);
-        rdmaUncaughtException(fromJSError(rt, e), pid != g_blockPluginId.end() ? pid->second : "");
+        rdmaUncaughtException(fromJSError(rt, e), rdmaBlockPluginId(blockId));
     }
 }
 
+static void runCallback(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal) {
+    runBlockWithArgs(rt, blockId, argsGlobal);
+}
+
 static void runLambda(jsi::Runtime& rt, jlong blockId, jobjectArray argsGlobal) {
-    auto it = g_scopeBlocks.find(blockId);
-    if (it == g_scopeBlocks.end()) return;
-    std::vector<jsi::Value> jsArgs;
-    if (argsGlobal) {
-        JNIEnv* env = getEnv(g_composeCache.jvm);
-        if (env) {
-            jsize n = env->GetArrayLength(argsGlobal);
-            jsArgs.reserve(n);
-            for (jsize i = 0; i < n; i++) {
-                jobject elem = env->GetObjectArrayElement(argsGlobal, i);
-                jsArgs.push_back(wrapAny(rt, g_composeCache.jvm, elem));
-                if (elem) env->DeleteLocalRef(elem);
-            }
-        }
-    }
-    const jsi::Value* callArgs = jsArgs.empty() ? nullptr : jsArgs.data();
-    // Return value intentionally ignored: service lambdas are Unit-returning and
-    // execute asynchronously.
-    try {
-        it->second->call(rt, callArgs, jsArgs.size());
-    } catch (const jsi::JSError& e) {
-        auto pid = g_blockPluginId.find(blockId);
-        rdmaUncaughtException(fromJSError(rt, e), pid != g_blockPluginId.end() ? pid->second : "");
-    }
+    runBlockWithArgs(rt, blockId, argsGlobal);
 }
 
 static void deleteGlobalRef(jobject ref) {
@@ -1533,6 +1573,126 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeLambd
     return nullptr; // async: no result
 }
 
+namespace facebook {
+namespace rdma {
+
+void rdmaSlotRegisterJni(JNIEnv* env, jobject cell, jstring fqnJ) {
+    const std::string fqn = jstringUtf8(env, fqnJ);
+    auto& reg = slotRegistry();
+    std::lock_guard<std::mutex> lk(reg.mutex);
+    auto old = reg.cells.find(fqn);
+    if (old != reg.cells.end()) env->DeleteGlobalRef(old->second);
+    reg.cells[fqn] = env->NewGlobalRef(cell);
+    auto it = reg.installed.find(fqn);
+    if (it != reg.installed.end()) writeCellBlockId(env, cell, it->second);
+}
+
+// The FQN a block was installed for (diagnostics only).
+static std::string slotFqnOf(int64_t blockId) {
+    auto& reg = slotRegistry();
+    std::lock_guard<std::mutex> lk(reg.mutex);
+    for (const auto& [fqn, id] : reg.installed) {
+        if (id == blockId) return fqn;
+    }
+    return "hotfix #" + std::to_string(blockId);
+}
+
+namespace {
+// One native → JS call executed on the Hermes thread on behalf of a waiting caller.
+// Lives on the heap: a timed-out caller may return before the task runs or finishes.
+struct JniJsCall {
+    JavaVM* jvm = nullptr;
+    jobject argsGlobal = nullptr;   // consumed by the task
+    jobject resultGlobal = nullptr; // produced by the task
+    RdmaExceptionInfo error;        // a JS exception, set by the task
+    bool ran = false;
+
+    void releaseArgs() {
+        if (!argsGlobal) return;
+        if (JNIEnv* e = getEnv(jvm)) e->DeleteGlobalRef(argsGlobal);
+        argsGlobal = nullptr;
+    }
+    void releaseAll() {
+        releaseArgs();
+        if (resultGlobal) {
+            if (JNIEnv* e = getEnv(jvm)) e->DeleteGlobalRef(resultGlobal);
+            resultGlobal = nullptr;
+        }
+    }
+};
+
+// Runs `run` (on the Hermes thread) for the caller and turns the outcome into the JNI
+// return value: the result as a new local reference, `fallthrough` when the runtime is
+// not up yet, or a thrown `RdmaException` (JS exception or timeout).
+jobject callJsForJni(JNIEnv* env, jobjectArray args, jobject fallthrough, const std::string& what,
+                     std::function<jobject(jsi::Runtime&, jobjectArray)> run) {
+    auto call = std::make_shared<JniJsCall>();
+    call->jvm = g_composeCache.jvm;
+    call->argsGlobal = args ? env->NewGlobalRef(args) : nullptr;
+    RdmaExceptionInfo waitErr = rdmaCallJsBlocking(
+        [call, run] {
+            facebook::jsi::Runtime* rt = getRdmaRuntime();
+            if (rt) {
+                call->ran = true;
+                try {
+                    call->resultGlobal = run(*rt, (jobjectArray)call->argsGlobal);
+                } catch (const facebook::jsi::JSError& e) {
+                    call->error = fromJSError(*rt, e);
+                }
+            }
+            call->releaseArgs();
+        },
+        [call] { call->releaseAll(); },
+        what);
+    if (!waitErr.empty()) {
+        throwIfError(env, waitErr);
+        return nullptr;
+    }
+    // Finished: the task no longer touches `call`.
+    if (!call->error.empty()) {
+        call->releaseAll();
+        throwIfError(env, call->error);
+        return nullptr;
+    }
+    if (!call->ran) return fallthrough;
+    jobject local = call->resultGlobal ? env->NewLocalRef(call->resultGlobal) : nullptr;
+    call->releaseAll();
+    return local;
+}
+} // namespace
+
+// A native call of an `open` method overridden by a plugin subclass (the vtable): the
+// override runs on the Hermes thread from any calling thread (§6.4); its result is
+// converted by the method's result descriptor; a JS exception or a timeout is thrown as
+// `RdmaException` (§2.8). `fallthrough` when the method is not overridden.
+jobject rdmaVtableInvokeJni(JNIEnv* env, jlong vtablePtr, jint vtableId, jobjectArray args,
+                            jstring paramDescs, jstring resultDesc, jobject fallthrough) {
+    if (vtablePtr == 0) return fallthrough;
+    auto* vt = reinterpret_cast<RdmaVtable*>(vtablePtr);
+    if (vtableId < 0 || (size_t)vtableId >= vt->entries.size() || !vt->entries[(size_t)vtableId]) return fallthrough;
+    std::shared_ptr<jsi::Function> fn = vt->entries[(size_t)vtableId];
+    const std::string pd = jstringUtf8(env, paramDescs);
+    const std::string rd = jstringUtf8(env, resultDesc);
+    return callJsForJni(env, args, fallthrough, "override #" + std::to_string(vtableId),
+                        [fn, pd, rd](jsi::Runtime& rt, jobjectArray argsGlobal) {
+                            return callJsTyped(rt, fn, argsGlobal, pd, rd);
+                        });
+}
+
+// A native caller of a hotfixed callable (rework §6.4, D5 = B): routed to the Hermes
+// thread from any thread; a JS exception or a timeout is thrown as `RdmaException`.
+jobject rdmaSlotInvokeJni(JNIEnv* env, jlong blockId, jobjectArray args, jstring paramDescs, jstring resultDesc, jobject fallthrough) {
+    const std::string pd = jstringUtf8(env, paramDescs);
+    const std::string rd = jstringUtf8(env, resultDesc);
+    return callJsForJni(env, args, fallthrough, slotFqnOf(blockId),
+                        [blockId, pd, rd](jsi::Runtime& rt, jobjectArray argsGlobal) {
+                            return runSlot(rt, blockId, argsGlobal, pd, rd);
+                        });
+}
+
+} // namespace rdma
+} // namespace facebook
+
 // ----------------------------------------------------------- DisposableEffect
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -1543,12 +1703,11 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeEffec
     RdmaExceptionInfo err = rdmaCallJs([blockId, &resultId] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (!rt) return;
-        auto it = g_scopeBlocks.find(blockId);
-        if (it == g_scopeBlocks.end()) return;
-        auto fn = it->second;
+        auto fn = rdmaBlockGet(blockId);
+        if (!fn) return;
         // The block is single-use: release it before running so reentrant calls
         // cannot observe a half-consumed block.
-        g_scopeBlocks.erase(it);
+        rdmaBlockErase(blockId);
         facebook::jsi::Value result = fn->call(*rt, nullptr, 0);
         if (result.isObject()) {
             auto obj = std::make_shared<facebook::jsi::Object>(result.asObject(*rt));
@@ -1586,8 +1745,43 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeFreeB
     rdmaCallJs([blockId] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (!rt) return;
-        g_scopeBlocks.erase(blockId);
+        rdmaBlockErase(blockId);
     });
+}
+
+// ------------------------------------------------- block holders (runtime_rework §4)
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeRetainBlock(
+    JNIEnv*, jclass, jlong blockId) {
+    facebook::rdma::rdmaBlockRetain(blockId);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeReleaseBlock(
+    JNIEnv*, jclass, jlong blockId) {
+    facebook::rdma::rdmaBlockRelease(blockId);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeSetBlockParamDescs(
+    JNIEnv* env, jclass, jlong blockId, jstring descs) {
+    const char* c = descs ? env->GetStringUTFChars(descs, nullptr) : nullptr;
+    facebook::rdma::rdmaBlockSetParamDescs(blockId, std::string(c ? c : ""));
+    if (c) env->ReleaseStringUTFChars(descs, c);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeBlockCount(JNIEnv*, jclass) {
+    return (jint)facebook::rdma::rdmaBlockCount();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeReleaseJsValue(
+    JNIEnv*, jclass, jlong valueId) {
+    using namespace facebook::rdma;
+    // Released by a JsValueHolder leaving the composition; erased on the JS thread.
+    rdmaPostJs([valueId] { g_jsValues.erase(valueId); });
 }
 
 // -------------------------------------------------------------- suspend resume

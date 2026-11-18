@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "RdmaRendezvous.h"
+#include "RdmaBlocks.h"
 
 #include <chrono>
 #include <deque>
@@ -191,6 +192,7 @@ void executeUiTask(UiRequest& req) {
            rdmaGetTid() == g_uiTid.load(std::memory_order_relaxed));
 #endif
     req.result = req.task();
+    rdmaPlatformAfterUiTask();
 }
 
 } // namespace
@@ -270,6 +272,67 @@ RdmaExceptionInfo rdmaCallJs(JsTask task) {
     }
     g_uiInRendezvous.fetch_sub(1, std::memory_order_release);
     return std::move(req->error);
+}
+
+namespace {
+// Shared by a background caller and its queued task; whoever finishes last frees it.
+struct BlockingJsCall {
+    std::mutex m;
+    std::condition_variable cv;
+    bool started = false;
+    bool done = false;
+    bool abandoned = false;
+};
+} // namespace
+
+RdmaExceptionInfo rdmaCallJsBlocking(JsTask body, JsTask discard, const std::string& what) {
+    const int64_t tid = rdmaGetTid();
+    if (tid == g_jsTid.load(std::memory_order_acquire)) {
+        body();
+        return {};
+    }
+    if (tid == g_uiTid.load(std::memory_order_acquire)) {
+        return rdmaCallJs(std::move(body));
+    }
+
+    auto call = std::make_shared<BlockingJsCall>();
+    rdmaPostJs([call, body = std::move(body), discard = std::move(discard)] {
+        {
+            std::lock_guard<std::mutex> lk(call->m);
+            if (call->abandoned) {
+                discard();
+                return;
+            }
+            call->started = true;
+        }
+        body();
+        std::lock_guard<std::mutex> lk(call->m);
+        call->done = true;
+        if (call->abandoned) discard();
+        call->cv.notify_all();
+    });
+
+    std::unique_lock<std::mutex> lk(call->m);
+    const auto isDone = [&] { return call->done; };
+    if (!call->cv.wait_for(lk, std::chrono::milliseconds(kRdmaJsWaitWarnMs), isDone)) {
+        LOGW("%s: thread %lld has waited %lld ms for the Hermes thread (%s)", what.c_str(),
+             (long long)tid, (long long)kRdmaJsWaitWarnMs,
+             call->started ? "running; likely blocked on something this thread holds" : "queued behind other work");
+        if (!call->cv.wait_for(lk, std::chrono::milliseconds(kRdmaJsWaitTimeoutMs - kRdmaJsWaitWarnMs), isDone)) {
+            const bool started = call->started;
+            call->abandoned = true;
+            RdmaExceptionInfo info;
+            info.originalExceptionType = "RdmaTimeoutException";
+            info.message = what + ": thread " + std::to_string(tid) + " timed out after " +
+                std::to_string(kRdmaJsWaitTimeoutMs) + " ms waiting for the Hermes thread (" +
+                (started ? "the call is running on the Hermes thread — likely waiting for something this thread "
+                           "holds, e.g. a lock held across the call"
+                         : "the call is still queued: the Hermes thread is busy") +
+                "; see docs/guide/threads_and_performance.md)";
+            return info;
+        }
+    }
+    return {};
 }
 
 void rdmaPostJs(JsTask task) {
@@ -445,6 +508,10 @@ static void jsThreadMain() {
             }
         }
         executeJsTask(*req);
+        // Blocks registered during this top-level task that no kernel holder
+        // retained can never be retained later (docs/design/runtime_rework.md §4).
+        rdmaBlockSweepUnretained();
+        rdmaPlatformAfterJsTask();
         if (req->hasError && !req->blocking) {
             rdmaUncaughtException(req->error, "");
         }

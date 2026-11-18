@@ -42,3 +42,12 @@ fun appendToList(list: List<Int>, value: Int): List<Int> {
 fun mutateInPlace(list: List<Int>) {
     (list as MutableList<Int>).add(100)
 }
+
+/**
+ * Invokes a plugin lambda and drops it: its holder becomes unreachable, so the JS block
+ * must be released (block-lifetime probe, docs/design/runtime_rework.md §4).
+ */
+@RDMA
+fun invokeNow(block: () -> Unit) {
+    block()
+}

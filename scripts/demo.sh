@@ -22,13 +22,13 @@ POLYFILL_OUT="$ROOT_DIR/demo/build/polyfill"
 # 1) Publish the framework to mavenLocal (idempotent).
 "$ROOT_DIR/scripts/publish.sh"
 
-# 2) Compile the demo kernel module to emit its rdma_analysis.json.
+# 2) Compile the demo kernel module to emit its kernel_manifest_android.json.
 ./gradlew -p "$ROOT_DIR/demo" --console=plain \
     :kernel:internal:compileAndroidMain
 
 # 3) Static-release the demo kernel into demo/versions (starting from empty).
 "$ROOT_DIR/scripts/release.sh" static-release \
-    "$ROOT_DIR/demo/kernel/internal/build/generated/rdma/rdma_analysis.json" \
+    "$ROOT_DIR/demo/kernel/internal/build/generated/rdma/kernel_manifest_android.json" \
     "$VERSIONS_DIR" \
     "$POLYFILL_OUT" \
     "internal" \

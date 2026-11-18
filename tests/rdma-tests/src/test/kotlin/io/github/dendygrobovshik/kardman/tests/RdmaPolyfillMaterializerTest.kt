@@ -99,6 +99,9 @@ class RdmaPolyfillMaterializerTest {
     fun `emits self registration for entries`() {
         val output = materialize(setOf("com.example.kernel.foo"), setOf("com.example.kernel.foo", "com.example.kernel.boo"))
         assertContains(output, "js(\"RDMA\").foo = ::foo")
+        // Native callers are routed to the hotfix on hosts with slots (runtime_rework §6.3).
+        assertContains(output, "rdmaInstallSlot(\"com.example.kernel.foo\", ::foo)")
+        assertContains(output, "if (rdma.installSlot != null) rdma.installSlot(fqn, fn)")
     }
 
     @Test

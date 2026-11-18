@@ -40,9 +40,13 @@ object RdmaKernelKeys {
     val KERNEL_PACKAGE: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("kernelPackage")
     val MODULE_ID: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("moduleId")
     val BACKEND: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("backend")
+    val GLUE_MODULES: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("glueModules")
 }
 
 private val RDMA_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RDMA")
+
+/** File name of a kernel module's API description (read by the plugin compiler). */
+const val API_FILE = "rdma_api.json"
 
 class RdmaKernelCommandLineProcessor : CommandLineProcessor {
     override val pluginId: String = "rdma-kernel-compiler-plugin"
@@ -50,10 +54,15 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
     override val pluginOptions: Collection<AbstractCliOption> = listOf(
         CliOption("backend", "<jni|capi>", "Native bridge backend: JNI (jvm/android) or C ABI (native)", required = false),
         CliOption("cppOutputDir", "<dir>", "Output directory for generated C++ glue", required = false),
-        CliOption("jsonOutputDir", "<dir>", "Output directory for rdma_manifest.json", required = false),
+        CliOption("jsonOutputDir", "<dir>", "Output directory for rdma_api.json and kernel_manifest_<platform>.json", required = false),
         CliOption("kotlinOutputDir", "<dir>", "Output directory for generated Kotlin widget entries", required = false),
         CliOption("kernelPackage", "<package>", "Package name of the user's kernel module", required = false),
         CliOption("moduleId", "<id>", "Sanitized identifier used to namespace this kernel module's generated C++", required = false),
+        CliOption(
+            "glueModules", "<moduleId=package=apiJson;…>",
+            "backend=capi-glue: the kernel modules whose generated C ABI glue this (app) compilation compiles",
+            required = false,
+        ),
     )
 
     override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
@@ -64,6 +73,7 @@ class RdmaKernelCommandLineProcessor : CommandLineProcessor {
             "kotlinOutputDir" -> configuration.put(RdmaKernelKeys.KOTLIN_OUTPUT_DIR, value)
             "kernelPackage" -> configuration.put(RdmaKernelKeys.KERNEL_PACKAGE, value)
             "moduleId" -> configuration.put(RdmaKernelKeys.MODULE_ID, value)
+            "glueModules" -> configuration.put(RdmaKernelKeys.GLUE_MODULES, value)
         }
     }
 }
@@ -81,7 +91,36 @@ class RdmaKernelCompilerRegistrar : CompilerPluginRegistrar() {
         val kernelPackage = configuration.get(RdmaKernelKeys.KERNEL_PACKAGE)
         val moduleId = configuration.get(RdmaKernelKeys.MODULE_ID)
         val backend = configuration.get(RdmaKernelKeys.BACKEND) ?: "jni"
+        if (backend == "capi-glue") {
+            val modules = configuration.get(RdmaKernelKeys.GLUE_MODULES).orEmpty()
+                .split(';').filter { it.isNotBlank() }
+                .map { it.split('=', limit = 3).let { (id, pkg, api) -> CAbiGlueModule(id, pkg, api) } }
+            IrGenerationExtension.registerExtension(CAbiGlueGenerationExtension(modules))
+            return
+        }
         IrGenerationExtension.registerExtension(RdmaKernelGenerationExtension(cppDir, jsonDir, kotlinDir, kernelPackage, moduleId, backend))
+    }
+}
+
+/** A kernel module whose generated C ABI glue the app's iOS compilation compiles. */
+data class CAbiGlueModule(val moduleId: String, val kernelPackage: String, val apiJson: String)
+
+/**
+ * The app's iOS compilation compiles the C ABI glue every kernel module generated during
+ * its own compilation (`capi/kotlin`), in the same build — like Android's `widget-kotlin`
+ * (docs/design/runtime_rework.md §11, iOS two-pass generation). Here the widget entry
+ * stubs of that glue get their bodies: a direct call of the lowered widget from the
+ * kernel klib.
+ */
+class CAbiGlueGenerationExtension(private val modules: List<CAbiGlueModule>) : IrGenerationExtension {
+    override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
+        for (m in modules) {
+            val file = File(m.apiJson)
+            if (!file.exists()) continue
+            val api = Json { ignoreUnknownKeys = true }.decodeFromString(RdmaManifest.serializer(), file.readText())
+            val widgets = api.functions.filter { it.composable }
+            CAbiWidgetIrGenerator(pluginContext, moduleFragment, m.moduleId, m.kernelPackage).generate(widgets)
+        }
     }
 }
 
@@ -116,6 +155,12 @@ class RdmaKernelGenerationExtension(
             fqn in rdmaClassFqns ||
                 fqn in rdmaEnumFqns ||
                 pluginContext.referenceClass(ClassId.topLevel(FqName(fqn)))?.owner?.hasAnnotation(RDMA_ANNOTATION) == true
+        }
+        RdmaCallbackDescs.isEnum = { fqn ->
+            fqn in rdmaEnumFqns ||
+                pluginContext.referenceClass(ClassId.topLevel(FqName(fqn)))?.owner?.let {
+                    it.kind == org.jetbrains.kotlin.descriptors.ClassKind.ENUM_CLASS && it.hasAnnotation(RDMA_ANNOTATION)
+                } == true
         }
         val errors = functions.flatMap { RdmaTypeValidator.validateFunction(it, isRdmaClass) } +
             classInfos.flatMap { RdmaTypeValidator.validateClass(it, isRdmaClass) } +
@@ -229,18 +274,27 @@ class RdmaKernelGenerationExtension(
         }
 
         jsonOutputDir?.let { dir ->
+            // API description of the module's @RDMA surface: what plugins may call, with types
+            // (the plugin compiler generates its kernel stubs from it). Platform-independent.
             val json = Json.encodeToString(RdmaManifest.serializer(), RdmaManifest(classInfos, functions, enums))
-            File(dir, "rdma_manifest.json").also { it.parentFile.mkdirs() }.writeText(json)
+            File(dir, API_FILE).also { it.parentFile.mkdirs() }.writeText(json)
 
+            // Kernel manifest of this platform's compilation: every declaration with its content
+            // hash, signature and uses — the input of kernel releases. Per platform, because
+            // `actual` implementations differ (and so do their hashes).
             val index = RdmaSymbolIndexer.index(moduleFragment)
             val analysis = RdmaAnalysis(moduleId ?: "", index.declarations, index.uses, index.polyfills)
             val analysisJson = Json.encodeToString(RdmaAnalysis.serializer(), analysis)
-            File(dir, "rdma_analysis.json").also { it.parentFile.mkdirs() }.writeText(analysisJson)
+            val platform = if (isCapi) "ios" else "android"
+            File(dir, "kernel_manifest_$platform.json").also { it.parentFile.mkdirs() }.writeText(analysisJson)
         }
 
         val transformer = RdmaVtableTransformer(pluginContext, pkg, isCapi)
         for (entry in classes) {
             transformer.transform(entry.cls, entry.info)
         }
+
+        // Hotfix dispatch slots for top-level @RDMA functions (docs/design/runtime_rework.md §6).
+        RdmaSlotTransformer(pluginContext, pkg).transform(moduleFragment, functions)
     }
 }

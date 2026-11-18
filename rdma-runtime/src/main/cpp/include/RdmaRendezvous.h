@@ -103,6 +103,23 @@ RdmaResult rdmaCallUi(UiTask task);
 // a non-empty description if the JS task threw (see docs/design/exception_propagation.md).
 RdmaExceptionInfo rdmaCallJs(JsTask task);
 
+// Synchronously runs `body` on the Hermes thread from ANY thread and waits for it
+// (docs/design/runtime_rework.md §6.4, D5 = B). JS is executed only by the Hermes
+// thread (§2.6), so the call is routed by the calling thread:
+//  - the Hermes thread: `body` runs inline;
+//  - the UI thread: through the rendezvous (`rdmaCallJs`);
+//  - any other thread: a task on the low-priority queue (never inside a composition);
+//    the caller waits with a timeout (a warning after kRdmaJsWaitWarnMs, an error after
+//    kRdmaJsWaitTimeoutMs). On timeout the call is abandoned: a pending task is
+//    skipped, a running one finishes; in both cases `discard` runs on the Hermes
+//    thread to release what the task owns, since nobody reads its result any more.
+// `body` and `discard` must capture only heap state (the caller may have returned).
+// `what` names the call in diagnostics. Returns a non-empty info on timeout or when a
+// rendezvous task threw; errors caught by `body` itself are the caller's business.
+constexpr int64_t kRdmaJsWaitWarnMs = 1000;
+constexpr int64_t kRdmaJsWaitTimeoutMs = 5000;
+RdmaExceptionInfo rdmaCallJsBlocking(JsTask body, JsTask discard, const std::string& what);
+
 // Non-blocking post of a low-priority (async) task to the JS thread. Used for
 // callbacks and service-lambda invocations that must not stall composition.
 void rdmaPostJs(JsTask task);
@@ -116,7 +133,7 @@ void rdmaPostJsHigh(JsTask task);
 // UI->JS rendezvous.
 void rdmaPostJsSelf(JsTask task);
 
-// Timers (Hermes-thread only; see docs/architecture.md#timers). setTimeout with
+// Timers (Hermes-thread only; see docs/internals/threading.md#coroutines-and-timers). setTimeout with
 // a positive delay schedules a callback; clearTimeout cancels a pending timer.
 // The event loop (jsThreadMain) reads the next deadline to drive wait_until and
 // pops due callbacks to run them on the low-priority queue.

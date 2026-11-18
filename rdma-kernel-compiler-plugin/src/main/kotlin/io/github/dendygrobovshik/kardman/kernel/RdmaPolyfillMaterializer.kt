@@ -123,16 +123,16 @@ object RdmaPolyfillMaterializer {
             val text = runCatching { File(range.file).readText() }.getOrNull() ?: continue
             val header = extractHeader(text)
             val body = stripPolyfillAnnotation(stripRdmaAnnotation(rewriteRdmaCalls(text.substring(range.start, range.end), externalFunctions)))
-            val targetName = target.substringAfterLast('.')
             val polyfillName = polyfill.fqn.substringAfterLast('.')
-            entries += header to (body to "    js(\"RDMA\").$targetName = ::$polyfillName")
+            entries += header to (body to registrationLines(target, polyfillName))
         }
         if (entries.isEmpty()) return emptyList()
 
         val registration = buildString {
             append("fun main() {\n")
             entries.forEach { append(it.second.second).append("\n") }
-            append("}")
+            append("}\n\n")
+            append(INSTALL_SLOT_HELPER)
         }
 
         val files = mutableListOf<PolyfillSourceFile>()
@@ -338,19 +338,36 @@ object RdmaPolyfillMaterializer {
     }
 
     private fun registrationBlock(entries: Set<String>, analysis: RdmaAnalysis): String {
-        val byName = entries
+        val fqns = entries
             .mapNotNull { fqn -> analysis.declarations.firstOrNull { it.fqn == fqn } }
             .filter { it.kind == RdmaSymbolKind.TOP_LEVEL_FUNCTION }
-            .map { it.fqn.substringAfterLast('.') }
-            .sorted()
-        if (byName.isEmpty()) return ""
-        val lines = byName.joinToString("\n") { name -> "    js(\"RDMA\").$name = ::$name" }
+            .map { it.fqn }
+            .sortedBy { it.substringAfterLast('.') }
+        if (fqns.isEmpty()) return ""
+        val lines = fqns.joinToString("\n") { fqn -> registrationLines(fqn, fqn.substringAfterLast('.')) }
         return buildString {
             append("fun main() {\n")
             append(lines)
-            append("\n}")
+            append("\n}\n\n")
+            append(INSTALL_SLOT_HELPER)
         }
     }
+
+    /**
+     * `RDMA.<name> = fn` serves JS callers (every host understands it); on a host with
+     * hotfix slots (docs/design/runtime_rework.md §6.3) `RDMA.installSlot` additionally
+     * routes native callers of the callable to the same implementation.
+     */
+    private fun registrationLines(fqn: String, implName: String): String {
+        val name = fqn.substringAfterLast('.')
+        return "    js(\"RDMA\").$name = ::$implName\n    rdmaInstallSlot(\"$fqn\", ::$implName)"
+    }
+
+    private const val INSTALL_SLOT_HELPER =
+        "private fun rdmaInstallSlot(fqn: String, fn: dynamic) {\n" +
+            "    val rdma = js(\"RDMA\")\n" +
+            "    if (rdma.installSlot != null) rdma.installSlot(fqn, fn)\n" +
+            "}\n"
 
     /**
      * Materializes the `R` polyfill — re-providing removed `@RDMA` symbols from their last-known

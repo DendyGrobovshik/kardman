@@ -196,7 +196,9 @@ void initRdmaRuntime(facebook::rdma::HostContext ctx) {
                         try {
                             fn->call(*rt, nullptr, 0);
                         } catch (const facebook::jsi::JSError& e) {
-                            LOGW("JSError in setTimeout handler: %s", e.what());
+                            // Fire-and-forget: nobody waits for a timer, so its error goes to
+                            // the global uncaught-exception handler (runtime_rework §2.8).
+                            facebook::rdma::rdmaUncaughtException(facebook::rdma::fromJSError(*rt, e), "");
                         }
                     });
                     return facebook::jsi::Value(0.0);

@@ -59,5 +59,11 @@ inline bool rdmaHostAttachThread(HostContext ctx) {
 #endif
 }
 
+// Called on the Hermes thread after every top-level JS task, and on the UI thread
+// after every UI task of the rendezvous: a point where no transient native buffer
+// handed to the JS side is still in use (the iOS string arena is cleared here).
+void rdmaPlatformAfterJsTask();
+void rdmaPlatformAfterUiTask();
+
 } // namespace rdma
 } // namespace facebook

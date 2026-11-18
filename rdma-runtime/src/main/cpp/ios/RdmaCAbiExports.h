@@ -24,13 +24,25 @@ void rdma_nativeInvokeContent(void);
 void rdma_nativeInvokeScopeBlock(int64_t blockId, int32_t changed);
 void rdma_nativeInvokeScopeBlock1(int64_t blockId, int32_t changed, int32_t p1);
 void rdma_nativeInvokeCallback(int64_t blockId, void* argsHandle);
+// Hotfix slot (docs/design/runtime_rework.md §6): runs the JS implementation and
+// returns a NEW handle to its kernel-typed result. `*status`: 0 = ok, 1 = fall
+// through to the native implementation (calling thread cannot run JS), 2 = error
+// (taken with rdma_takeNativeError). CONSUMES `argsHandle`.
+void* rdma_nativeInvokeSlot(int64_t blockId, void* argsHandle, const char* paramDescs, const char* resultDesc, int32_t* status);
 void rdma_nativeInvokeLambda(int64_t blockId, void* argsHandle);
 int64_t rdma_nativeInvokeEffectBody(int64_t blockId);
 void rdma_nativeInvokeDispose(int64_t resultId);
 void rdma_nativeInvokeFreeBlock(int64_t blockId);
+// Block holders (docs/design/runtime_rework.md §4): any thread.
+void rdma_nativeRetainBlock(int64_t blockId);
+void rdma_nativeReleaseBlock(int64_t blockId);
+void rdma_nativeSetBlockParamDescs(int64_t blockId, const char* descs);
+int32_t rdma_nativeBlockCount(void);
+void rdma_nativeReleaseJsValue(int64_t valueId);
 void rdma_nativeInvokeContinuation(int64_t completionId, void* valueHandle);
 void rdma_nativeInvokeContinuationError(int64_t completionId, const char* serialized);
-void* rdma_vtableDispatch(int64_t vtablePtr, int32_t vtableId);
+void* rdma_vtableDispatch(int64_t vtablePtr, int32_t vtableId, void* argsHandle, const char* paramDescs,
+                          const char* resultDesc, int32_t* status);
 void rdma_start(void* ctx);
 int32_t rdma_is_ready(void);
 void rdma_eval_bytes(const void* code, int32_t len);

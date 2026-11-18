@@ -25,6 +25,12 @@ open class Person(val name: String, val age: Int) {
         return "Hello, I'm $name"
     }
 
+    /** Overridden by the plugin with a non-`String` result (vtable result marshalling). */
+    open fun power(): Int = 1
+
+    /** Overridden by the plugin with a throwing body (vtable exception propagation). */
+    open fun risky(): String = "base"
+
     override fun toString(): String {
         return "(name='$name', age=$age, status=$status) said '${greet()}'"
     }

@@ -62,13 +62,13 @@ step_0_static_release() {
         -PrdmaPolicyFile="$ROOT_DIR/rdma.toml"
 
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-internal" "internal"
+    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-internal" "internal"
 
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-alice" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-alice" ""
 
     run_gradle :tests:stand:kernel:user:itest:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-itest" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-itest" ""
 }
 
 # 1) Build the iOS app. The Xcode build phase invokes Gradle; we pass the scratch
@@ -109,6 +109,16 @@ step_2_run_and_assert() {
     wait_marker "$log" "LIST_ITER: sum=20 joined=1,2,3,4"
     wait_marker "$log" "LIST_STR: \[1, 2, 3, 4\]"
     wait_marker "$log" "LIST_KSTR: \[5, 6\]"
+    # Kernel-returned collections are real Kotlin collections (runtime_rework §3).
+    wait_marker "$log" "COLL_LIST: loop=6 filter=\[2\] sorted=\[1, 2, 3\] first=3 contains=true isList=true"
+    wait_marker "$log" "COLL_MAP: keys=a,b entries=a=1,b=2 forEach=2 getOrElse=none"
+    wait_marker "$log" "COLL_NESTED: flat=10 max=2"
+    # A kernel subclass where its kernel superclass is expected (supertypes in the stubs).
+    wait_marker "$log" "SHAPE: square:9.0 name=square side=3"
+    # Plugin callbacks passed to a kernel constructor and method (lambda member params).
+    wait_marker "$log" "LAMBDA_CTOR: 1,2,3"
+    wait_marker "$log" "LAMBDA_METHOD: a"
+    wait_marker "$log" "LAMBDA_METHOD: b"
 
     kill "$launch_pid" 2>/dev/null || true
     trap - EXIT

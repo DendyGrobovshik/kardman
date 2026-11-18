@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlin.native.runtime.NativeRuntimeApi::class)
 
 package org.example
 
@@ -75,6 +75,17 @@ private fun Content() {
     }
     if (ready) {
         RdmaComposeHost.Content()
+        // Block-lifetime probe (docs/design/runtime_rework.md §4): once the plugins have
+        // run, collect garbage so the holders of dropped plugin lambdas are cleaned, let the
+        // release queue drain, then report how many JS blocks the registry still holds.
+        LaunchedEffect(Unit) {
+            delay(3000)
+            repeat(3) {
+                kotlin.native.runtime.GC.collect()
+                delay(300)
+            }
+            println("RDMA_TEST: BLOCKS=${RdmaComposeHost.nativeBlockCount()}")
+        }
     }
 }
 

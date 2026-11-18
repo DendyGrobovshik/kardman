@@ -20,7 +20,7 @@ POLYFILL_OUT="$DEMO_DIR/build/polyfill"
 # 2) Static-release the demo kernel into demo/versions (starting from empty).
 ./gradlew -p "$DEMO_DIR" --console=plain :kernel:internal:compileAndroidMain
 "$ROOT_DIR/scripts/release.sh" static-release \
-    "$DEMO_DIR/kernel/internal/build/generated/rdma/rdma_analysis.json" \
+    "$DEMO_DIR/kernel/internal/build/generated/rdma/kernel_manifest_android.json" \
     "$VERSIONS_DIR" \
     "$POLYFILL_OUT" \
     "internal" \

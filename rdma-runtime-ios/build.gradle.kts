@@ -59,6 +59,9 @@ kotlin {
             "common/RdmaRuntime.cpp",
             "common/RdmaRendezvous.cpp",
             "ios/RdmaComposeCAbi.cpp",
+            "ios/RdmaCollectionsCAbi.cpp",
+            "common/RdmaProxyCore.cpp",
+            "common/RdmaBlocks.cpp",
             "ios/generated/RdmaComposerProxy.cpp",
         )
         val includeDirs = listOf(
@@ -129,11 +132,19 @@ val packageNativeSdk by tasks.registering(Exec::class) {
 
     val arm64Lib = layout.buildDirectory.dir("cpp/iosArm64").get().asFile
     val simLib = layout.buildDirectory.dir("cpp/iosSimulatorArm64").get().asFile
+    // Without declared inputs the zip counted as up to date after a C++ rebuild and
+    // mavenLocal kept serving a stale librdma_core.a.
+    inputs.file(File(arm64Lib, "librdma_core.a"))
+    inputs.file(File(simLib, "librdma_core.a"))
+    inputs.dir(cppRoot.dir("common"))
+    inputs.dir(cppRoot.dir("include"))
+    inputs.dir(cppRoot.dir("ios"))
 
     val script = buildString {
         appendLine("set -e")
         appendLine("OUT=${out.absolutePath}")
         appendLine("STAGE=\$OUT/stage")
+        appendLine("rm -f ${zipFile.absolutePath}") // `zip -r` would update a stale archive in place
         appendLine("rm -rf \"\$STAGE\" && mkdir -p \"\$STAGE/cpp\" \"\$STAGE/lib/iosArm64\" \"\$STAGE/lib/iosSimulatorArm64\"")
         appendLine("cp -R ${cppRoot.dir("common").asFile.absolutePath} \"\$STAGE/cpp/common\"")
         appendLine("cp -R ${cppRoot.dir("include").asFile.absolutePath} \"\$STAGE/cpp/include\"")

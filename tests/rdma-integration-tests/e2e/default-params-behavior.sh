@@ -49,13 +49,13 @@ step_0_static_release() {
         -PrdmaPolicyFile="$ROOT_DIR/rdma.toml"
 
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-internal" "internal"
+    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-internal" "internal"
 
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-alice" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-alice" ""
 
     run_gradle :tests:stand:kernel:user:itest:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-itest" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-itest" ""
 }
 
 step_1_build_and_launch() {

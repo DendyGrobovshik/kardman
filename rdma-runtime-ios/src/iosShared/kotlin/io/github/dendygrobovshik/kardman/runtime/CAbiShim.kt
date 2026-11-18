@@ -174,13 +174,22 @@ fun rdma_valueAsFloat(handle: COpaquePointer): Float = handle.obj<Any>() as Floa
 
 fun rdma_valueAsBoolean(handle: COpaquePointer): Boolean = handle.obj<Any>() as Boolean
 
-// Arena for returned C strings. The C++ side copies the bytes immediately, so the
-// arena (valid until the next clear/GC) is sufficient; it is never cleared for the
-// demo lifetime.
-private val cstringArena = Arena()
+// Per-thread arena for returned C strings. The C++ side copies the bytes right away;
+// the runtime clears the calling thread's arena after every top-level JS task and UI
+// task (`rdma_clearStringArena`), so string crossings no longer accumulate memory and
+// the two threads never share an arena (docs/design/runtime_rework.md §4.6).
+@kotlin.native.concurrent.ThreadLocal
+private object CStringArena {
+    var arena = Arena()
+}
 
-/** Converts a Kotlin String to a NUL-terminated UTF-8 C string (valid until the next arena clear). */
-fun rdmaStringToCStr(s: String): CPointer<ByteVar>? = s.cstr.getPointer(cstringArena)
+/** Converts a Kotlin String to a NUL-terminated UTF-8 C string (valid until the thread's arena is cleared). */
+fun rdmaStringToCStr(s: String): CPointer<ByteVar>? = s.cstr.getPointer(CStringArena.arena)
+
+fun rdma_clearStringArena() {
+    CStringArena.arena.clear()
+    CStringArena.arena = Arena()
+}
 
 /** Converts a C string back to a Kotlin String (null becomes the empty string). */
 fun rdmaToKString(cstr: CPointer<ByteVar>?): String = cstr?.toKString() ?: ""
@@ -390,6 +399,24 @@ fun rdma_mapValueAt(mapHandle: COpaquePointer, index: Int): COpaquePointer? {
 fun rdma_mapRemoveValue(mapHandle: COpaquePointer, valueHandle: COpaquePointer?): Boolean {
     @Suppress("UNCHECKED_CAST")
     return (mapHandle.obj<Any>() as MutableMap<Any?, Any?>).values.remove(valueHandle?.obj<Any>())
+}
+
+// Snapshot helpers (docs/design/runtime_rework.md §3.6): the keys / values of a map as
+// one new list, so a JS-side iteration is one crossing instead of an index walk.
+fun rdma_mapKeysToList(mapHandle: COpaquePointer): COpaquePointer =
+    ArrayList<Any?>(mapHandle.obj<Map<Any?, Any?>>().keys).handle()
+
+fun rdma_mapValuesToList(mapHandle: COpaquePointer): COpaquePointer =
+    ArrayList<Any?>(mapHandle.obj<Map<Any?, Any?>>().values).handle()
+
+// `MutableMap.remove(key, value)`: removes the entry only when the key maps to an equal value.
+fun rdma_mapRemoveKV(mapHandle: COpaquePointer, keyHandle: COpaquePointer?, valueHandle: COpaquePointer?): Boolean {
+    @Suppress("UNCHECKED_CAST")
+    val map = mapHandle.obj<Any>() as MutableMap<Any?, Any?>
+    val key = keyHandle?.obj<Any>()
+    if (!map.containsKey(key) || map[key] != valueHandle?.obj<Any>()) return false
+    map.remove(key)
+    return true
 }
 
 fun rdma_emptyMap(): COpaquePointer = emptyMap<Any?, Any?>().handle()
@@ -634,6 +661,11 @@ private val _register = run {
     rdmaRegisterFunction("rdma_mapValueAt", staticCFunction(::rdma_mapValueAt))
     rdmaRegisterFunction("rdma_mapRemoveValue", staticCFunction(::rdma_mapRemoveValue))
     rdmaRegisterFunction("rdma_emptyMap", staticCFunction(::rdma_emptyMap))
+    rdmaRegisterFunction("rdma_clearStringArena", staticCFunction(::rdma_clearStringArena))
+    rdmaRegisterFunction("rdma_installSlot", staticCFunction(::rdma_installSlot))
+    rdmaRegisterFunction("rdma_mapKeysToList", staticCFunction(::rdma_mapKeysToList))
+    rdmaRegisterFunction("rdma_mapValuesToList", staticCFunction(::rdma_mapValuesToList))
+    rdmaRegisterFunction("rdma_mapRemoveKV", staticCFunction(::rdma_mapRemoveKV))
     rdmaRegisterFunction("rdma_mapCreate", staticCFunction(::rdma_mapCreate))
     rdmaRegisterFunction("rdma_composer_startRestartGroup", staticCFunction(::rdma_composer_startRestartGroup))
     rdmaRegisterFunction("rdma_composer_endRestartGroup", staticCFunction(::rdma_composer_endRestartGroup))

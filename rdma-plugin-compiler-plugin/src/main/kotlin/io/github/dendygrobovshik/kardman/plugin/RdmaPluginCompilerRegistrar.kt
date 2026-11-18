@@ -46,7 +46,7 @@ class RdmaPluginCommandLineProcessor : CommandLineProcessor {
     override val pluginId: String = "rdma-plugin-compiler-plugin"
 
     override val pluginOptions: Collection<AbstractCliOption> = listOf(
-        CliOption("rdmaManifest", "<path>", "Path(s) to rdma_manifest.json, joined by the platform path separator", required = false),
+        CliOption("rdmaManifest", "<path>", "Path(s) to rdma_api.json, joined by the platform path separator", required = false),
         CliOption("pluginPackage", "<package>", "Package of the plugin module", required = false),
         CliOption("runRdmaAppFqn", "<fqn>", "Fully-qualified name of the kernel's runRdmaApp entry point", required = false),
         CliOption("kernelRootPackage", "<package>", "Root package of the kernel modules (for visibility checks)", required = false),

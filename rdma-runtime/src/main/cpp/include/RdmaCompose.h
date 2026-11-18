@@ -26,6 +26,8 @@
 #include "RdmaPlatform.h"
 #include "RdmaException.h"
 #include "RdmaJsLong.h"
+#include "RdmaJniUtil.h"
+#include "RdmaBlocks.h"
 
 namespace facebook {
 namespace rdma {
@@ -284,6 +286,17 @@ JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeContinuationError(
     JNIEnv* env, jclass, jlong completionId, jthrowable throwable);
 }
+
+// Hotfix dispatch slots (docs/design/runtime_rework.md §6), called from the per-kernel-
+// module JNI exports generated into the app's user bridge: a generated `RdmaSlotCell`
+// registers itself by callable FQN; a native caller of a hotfixed callable invokes the
+// JS implementation (returns `fallthrough` when the calling thread cannot run JS).
+void rdmaSlotRegisterJni(JNIEnv* env, jobject cell, jstring fqn);
+jobject rdmaSlotInvokeJni(JNIEnv* env, jlong blockId, jobjectArray args, jstring paramDescs,
+                          jstring resultDesc, jobject fallthrough);
+// Native call of a plugin override of an `open` method (the vtable), from any thread.
+jobject rdmaVtableInvokeJni(JNIEnv* env, jlong vtablePtr, jint vtableId, jobjectArray args,
+                            jstring paramDescs, jstring resultDesc, jobject fallthrough);
 
 } // namespace rdma
 } // namespace facebook

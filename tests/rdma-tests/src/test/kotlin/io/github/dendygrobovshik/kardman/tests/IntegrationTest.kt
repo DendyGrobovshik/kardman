@@ -24,6 +24,7 @@ import io.github.dendygrobovshik.kardman.types.RdmaClassInfo
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class IntegrationTest {
@@ -156,14 +157,18 @@ class IntegrationTest {
     }
 
     @Test
-    fun `wrapUserObject dispatches to createXWrapper by class name`() {
+    fun `wrapUserObject dispatches to createXWrapper by cached class`() {
         val classes = listOf(personInfo, vampierInfo)
         val cppFiles = generateCpp(classes)
         val bridgeCpp = cppFiles["RdmaBridge.cpp"] ?: error("Bridge not generated")
 
         assertContains(bridgeCpp, "jsi::Value wrapUserObject")
-        assertContains(bridgeCpp, """if (name == "com.example.kernel.Person") return createPersonWrapper""")
-        assertContains(bridgeCpp, """if (name == "com.example.kernel.VeryOldVampier") return createVeryOldVampierWrapper""")
+        // Exact-class dispatch against the cached class refs — no Class.getName / string compare.
+        assertContains(bridgeCpp, "env->IsSameObject(objClass, g_rdmaCache.person_cache.clazz)")
+        assertContains(bridgeCpp, "result = createPersonWrapper(rt, jvm, env->NewGlobalRef(obj))")
+        assertContains(bridgeCpp, "env->IsSameObject(objClass, g_rdmaCache.veryoldvampier_cache.clazz)")
+        assertContains(bridgeCpp, "result = createVeryOldVampierWrapper(rt, jvm, env->NewGlobalRef(obj))")
+        assertFalse(bridgeCpp.contains("FindClass(\"java/lang/Class\")"), "wrapUserObject must not look classes up by name")
     }
 
     @Test

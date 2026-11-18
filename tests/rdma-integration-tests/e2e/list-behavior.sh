@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # End-to-end integration test for the List bridge: mutation, nested-list
-# materialization, and cross-runtime read/write (docs/user_guide/features.md §List).
+# materialization, and cross-runtime read/write (docs/internals/collections.md).
 # Driven against the in-repo stand on an Android emulator.
 #
 #   ./tests/rdma-integration-tests/e2e/list-behavior.sh
@@ -49,13 +49,13 @@ step_0_static_release() {
         -PrdmaPolicyFile="$ROOT_DIR/rdma.toml"
 
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-internal" "internal"
+    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-internal" "internal"
 
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-alice" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-alice" ""
 
     run_gradle :tests:stand:kernel:user:itest:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-itest" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-itest" ""
 }
 
 # 1) Build and launch the app.
@@ -100,6 +100,22 @@ step_5_iteration() {
     wait_logcat "RdmaRuntime" "LIST_KSTR: \[5, 6\]"
 }
 
+# 6) Kernel-returned collections are real Kotlin collections: stdlib idioms (for-in,
+#    filter, sorted, first, `in`, destructuring forEach, getOrElse, nested values) work on
+#    them (docs/design/runtime_rework.md §3).
+step_6_collection_idioms() {
+    step "6: stdlib idioms on kernel collections"
+    wait_logcat "RdmaRuntime" "COLL_LIST: loop=6 filter=\[2\] sorted=\[1, 2, 3\] first=3 contains=true isList=true"
+    wait_logcat "RdmaRuntime" "COLL_MAP: keys=a,b entries=a=1,b=2 forEach=2 getOrElse=none"
+    wait_logcat "RdmaRuntime" "COLL_NESTED: flat=10 max=2"
+    # A kernel subclass where its kernel superclass is expected (supertypes in the stubs).
+    wait_logcat "RdmaRuntime" "SHAPE: square:9.0 name=square side=3"
+    # Plugin callbacks passed to a kernel constructor and method (lambda member params).
+    wait_logcat "RdmaRuntime" "LAMBDA_CTOR: 1,2,3"
+    wait_logcat "RdmaRuntime" "LAMBDA_METHOD: a"
+    wait_logcat "RdmaRuntime" "LAMBDA_METHOD: b"
+}
+
 main() {
     adb_dev
     mkdir -p "$VERSIONS_DIR"
@@ -110,6 +126,7 @@ main() {
     step_3_nesting
     step_4_cross_runtime
     step_5_iteration
+    step_6_collection_idioms
 
     echo
     echo "ALL LIST-BEHAVIOR STEPS PASSED"

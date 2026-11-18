@@ -127,6 +127,7 @@ val extractNativeSdk by tasks.registering(Exec::class) {
     val out = layout.buildDirectory.dir("rdma-native-sdk").get().asFile
     outputs.dir(out)
     val zipFile = nativeSdk.singleFile
+    inputs.file(zipFile) // re-extract when a new SDK is published to mavenLocal
     doFirst { out.mkdirs() }
     commandLine(
         "/bin/bash", "-c",

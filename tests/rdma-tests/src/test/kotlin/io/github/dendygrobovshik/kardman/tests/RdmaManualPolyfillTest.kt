@@ -54,6 +54,7 @@ class RdmaManualPolyfillTest {
             val content = files[0].content
             assertTrue(content.contains("fun foo_polyfill(): Int = 42"))
             assertTrue(content.contains("js(\"RDMA\").foo = ::foo_polyfill"))
+            assertTrue(content.contains("rdmaInstallSlot(\"") && content.contains(", ::foo_polyfill)"))
             assertFalse(content.contains("@Polyfill"))
             assertFalse(content.contains("fun foo(): ")) // the auto target is not emitted
         } finally {

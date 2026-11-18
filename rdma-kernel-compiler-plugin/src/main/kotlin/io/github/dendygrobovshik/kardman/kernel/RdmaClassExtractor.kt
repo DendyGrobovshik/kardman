@@ -174,7 +174,16 @@ object RdmaClassExtractor {
             }
             .toList()
 
-        return RdmaClassInfo(packageName, className, qualifiedName, constructors, methods, properties, extractStatics(cls))
+        val superClass = cls.superTypes
+            .mapNotNull { (it as? IrSimpleType)?.classifier?.owner as? IrClass }
+            .firstOrNull { it.kind == ClassKind.CLASS && it.hasAnnotation(RDMA_ANNOTATION) }
+            ?.fqNameWhenAvailable?.asString()
+        val isOpen = cls.modality == Modality.OPEN || cls.modality == Modality.ABSTRACT
+        return RdmaClassInfo(
+            packageName, className, qualifiedName, constructors, methods, properties, extractStatics(cls),
+            superClass = superClass,
+            isOpen = isOpen,
+        )
     }
 
     /**
@@ -214,6 +223,7 @@ object RdmaClassExtractor {
             isMap = type.isMap(),
             mapKeyType = type.mapKeyType(),
             mapValueType = type.mapValueType(),
+            functionType = if (typeName.startsWith("kotlin.Function")) RdmaTypeParser.toRdmaTypeRef(type) else null,
         )
     }
 

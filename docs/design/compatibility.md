@@ -170,7 +170,7 @@ committed baseline:
 
 The only *compatible* signature change is appending trailing defaulted parameters, which is
 why defaulted parameters are constrained to be trailing (§ "Default parameter values" in
-[types.md](../types.md)). A defaulted parameter added this way is filled on the **receiving**
+[types.md](../guide/types.md)). A defaulted parameter added this way is filled on the **receiving**
 side — the native bridge fills it via a bitmask, the dynamic polyfill via a prologue that
 checks `arguments.length` — so both an old plugin (forward) and a new plugin that does not
 use the new parameter (backward) keep working.
@@ -237,7 +237,7 @@ fun foo_polyfill(...): ... = { /* emulatable implementation via @RDMA primitives
 
 The source Kotlin contains a function call; it compiles to a function call in JS. What actually gets invoked — native via JSI/JNI or the polyfill in JS — is determined **at bundle load time**. Mechanically this is just putting a function on a JS object; the caller doesn't care. **The polyfill takes priority over the native** (this is exactly a hotfix); the priority is remembered at load time, with no per-call dynamic checks.
 
-A polyfill overrides only the **JS-visible boundary** — what plugin code calls through `RDMA.*`. Native kernel code that calls another `@RDMA` symbol directly keeps calling the baked-in native implementation; it does not route through `global.RDMA`, so a polyfill that replaces a symbol does not redirect those internal native call sites.
+A polyfill replaces a kernel symbol **everywhere**: for plugin code, which calls it through `RDMA.*`, and for native kernel code, which reaches it through hotfix slots (`RDMA.installSlot`). JS is executed only by the Hermes thread, so a native caller on another thread waits for it ([runtime_rework.md §6.4](runtime_rework.md)). A change that some call sites could not run yet — today `suspend` functions, functions with function-typed parameters or results, widgets, class members and properties — is refused as a hotfix and needs a static release ([runtime_rework.md §6.8](runtime_rework.md)).
 
 ### 6.5 Shared-state detection (deferred optimization)
 
@@ -352,7 +352,7 @@ Separate documents: a guide for users (including LLM), examples, performance, wh
 
 The questions below concern the runtime/infrastructure and are only pointers here;
 the user-facing release commands and store endpoints are in
-[releases.md](../user_guide/releases.md):
+[hotfix_and_releases.md](../guide/hotfix_and_releases.md):
 
 - **Offline / store outage**: a fallback (basic versions baked into the cache), behavior without network.
 - **re-sync scale**: backoff/exponential delay against a "once a minute" storm.

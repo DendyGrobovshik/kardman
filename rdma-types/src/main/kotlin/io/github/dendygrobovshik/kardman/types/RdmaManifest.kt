@@ -26,6 +26,10 @@ data class RdmaClassInfo(
     val methods: List<MethodInfo>,
     val properties: List<PropertyInfo>,
     val statics: List<StaticInfo> = emptyList(),
+    /** FQN of the `@RDMA` superclass, if this class extends one (the plugin stub mirrors it). */
+    val superClass: String? = null,
+    /** True for an `open`/`abstract` class (its plugin stub is open too). */
+    val isOpen: Boolean = false,
 )
 
 /**
@@ -86,6 +90,11 @@ data class ParameterInfo(
     val isMap: Boolean = false,
     val mapKeyType: String? = null,
     val mapValueType: String? = null,
+    /**
+     * The full type when the parameter is a lambda (`type` is then `kotlin.FunctionN`): a
+     * callback a plugin passes to a method or constructor crosses as a block id.
+     */
+    val functionType: RdmaTypeRef? = null,
 )
 
 @Serializable

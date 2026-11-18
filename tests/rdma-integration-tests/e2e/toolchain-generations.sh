@@ -195,9 +195,9 @@ assert_target() { # assert_target <pluginId> <version> <generation> <expected>
 step_0_static_release() {
     step "0: static release the kernel"
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "static-release" "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-0"
+    release "static-release" "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-0"
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "static-release" "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-0"
+    release "static-release" "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-0"
 }
 
 step_1_generation_g1_and_launch() {

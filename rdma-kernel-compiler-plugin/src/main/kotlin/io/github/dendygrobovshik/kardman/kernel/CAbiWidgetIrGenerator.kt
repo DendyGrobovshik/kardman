@@ -96,7 +96,10 @@ class CAbiWidgetIrGenerator(
 
         for (fn in widgets) {
             val stubName = prefix + "compose" + fn.name
-            val widget = byFqn[fn.qualifiedName] ?: continue
+            // The glue is compiled by the app; there the kernel widget comes from a dependency
+            // in its source signature, so the C entry calls the glue's own `@Composable`
+            // trampoline, which the compose compiler lowered in this compilation.
+            val widget = byName[stubName + "_widget"] ?: byFqn[fn.qualifiedName] ?: continue
 
             if (fn.parameters.any { it.hasDefault }) {
                 // The entry stub already resolved defaults in source and delegates to the `_impl`

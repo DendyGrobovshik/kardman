@@ -66,7 +66,7 @@ fun releaseTask(name: String, command: String) = tasks.register<JavaExec>(name) 
     args(
         command,
         project.findProperty("analysisJson")?.toString()
-            ?: error("pass -PanalysisJson=/path/to/rdma_analysis.json"),
+            ?: error("pass -PanalysisJson=/path/to/kernel_manifest_<platform>.json"),
         project.findProperty("versionsDir")?.toString()
             ?: error("pass -PversionsDir=/path/to/versions"),
         project.findProperty("polyfillOutDir")?.toString() ?: "",

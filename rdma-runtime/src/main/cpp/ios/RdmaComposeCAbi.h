@@ -50,7 +50,8 @@ void rdma_nativeInvokeFreeBlock(int64_t blockId);
 // Vtable dispatch: casts `vtablePtr` to an RdmaVtable*, calls the JS override for
 // `vtableId` with no args, and returns a StableRef handle to the boxed String (or
 // null). Called from the generated Kotlin `rdmaVtableDispatch` (native actual).
-void* rdma_vtableDispatch(int64_t vtablePtr, int32_t vtableId);
+void* rdma_vtableDispatch(int64_t vtablePtr, int32_t vtableId, void* argsHandle, const char* paramDescs,
+                          const char* resultDesc, int32_t* status);
 
 // Runtime bootstrap.
 void rdma_start(void* ctx);
@@ -77,19 +78,19 @@ const char* rdma_takeEvalError(void);
 // --- Kotlin-provided functions (registered via rdma_registerFunction). ---
 
 // Value boxing (C++ -> Kotlin Any? handle). Caller owns the returned handle.
-inline void* rdma_boxInt(int32_t v) { return ((void* (*)(int32_t))rdma_lookupFunction("rdma_boxInt"))(v); }
-inline void* rdma_boxLong(int64_t v) { return ((void* (*)(int64_t))rdma_lookupFunction("rdma_boxLong"))(v); }
-inline void* rdma_boxDouble(double v) { return ((void* (*)(double))rdma_lookupFunction("rdma_boxDouble"))(v); }
-inline void* rdma_boxFloat(float v) { return ((void* (*)(float))rdma_lookupFunction("rdma_boxFloat"))(v); }
-inline void* rdma_boxBoolean(bool v) { return ((void* (*)(bool))rdma_lookupFunction("rdma_boxBoolean"))(v); }
-inline void* rdma_boxString(const char* v) { return ((void* (*)(const char*))rdma_lookupFunction("rdma_boxString"))(v); }
-inline void* rdma_boxObject() { return ((void* (*)())rdma_lookupFunction("rdma_boxObject"))(); }
-inline void* rdma_boxJsValueHolder(int64_t id) { return ((void* (*)(int64_t))rdma_lookupFunction("rdma_boxJsValueHolder"))(id); }
+inline void* rdma_boxInt(int32_t v) { static auto fn = (void* (*)(int32_t))rdma_lookupFunction("rdma_boxInt"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(int32_t))rdma_lookupFunction("rdma_boxInt"); return fn(v); }
+inline void* rdma_boxLong(int64_t v) { static auto fn = (void* (*)(int64_t))rdma_lookupFunction("rdma_boxLong"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(int64_t))rdma_lookupFunction("rdma_boxLong"); return fn(v); }
+inline void* rdma_boxDouble(double v) { static auto fn = (void* (*)(double))rdma_lookupFunction("rdma_boxDouble"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(double))rdma_lookupFunction("rdma_boxDouble"); return fn(v); }
+inline void* rdma_boxFloat(float v) { static auto fn = (void* (*)(float))rdma_lookupFunction("rdma_boxFloat"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(float))rdma_lookupFunction("rdma_boxFloat"); return fn(v); }
+inline void* rdma_boxBoolean(bool v) { static auto fn = (void* (*)(bool))rdma_lookupFunction("rdma_boxBoolean"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(bool))rdma_lookupFunction("rdma_boxBoolean"); return fn(v); }
+inline void* rdma_boxString(const char* v) { static auto fn = (void* (*)(const char*))rdma_lookupFunction("rdma_boxString"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(const char*))rdma_lookupFunction("rdma_boxString"); return fn(v); }
+inline void* rdma_boxObject() { static auto fn = (void* (*)())rdma_lookupFunction("rdma_boxObject"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)())rdma_lookupFunction("rdma_boxObject"); return fn(); }
+inline void* rdma_boxJsValueHolder(int64_t id) { static auto fn = (void* (*)(int64_t))rdma_lookupFunction("rdma_boxJsValueHolder"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(int64_t))rdma_lookupFunction("rdma_boxJsValueHolder"); return fn(id); }
 
 // Returns a NEW owned handle to the same underlying value — for values whose
 // handle is owned by a live JS wrapper but must cross into a store that
 // consumes its handle. Caller owns the returned handle.
-inline void* rdma_cloneHandle(void* handle) { return ((void* (*)(void*))rdma_lookupFunction("rdma_cloneHandle"))(handle); }
+inline void* rdma_cloneHandle(void* handle) { static auto fn = (void* (*)(void*))rdma_lookupFunction("rdma_cloneHandle"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(void*))rdma_lookupFunction("rdma_cloneHandle"); return fn(handle); }
 
 // Kernel enum `valueOf` bridges rebuild an entry from its name: the generated
 // per-module shims register a handle bridge under `rdma_enum_valueOf:<fqn>`
@@ -104,67 +105,69 @@ inline void* rdma_enumValueOfHandle(const char* fqn, const char* entryName) {
 }
 
 // Value classification + unboxing (Kotlin Any? -> C++). Read-only.
-inline int32_t rdma_classifyValue(void* handle) { return ((int32_t (*)(void*))rdma_lookupFunction("rdma_classifyValue"))(handle); }
-inline int32_t rdma_valueAsInt(void* h) { return ((int32_t (*)(void*))rdma_lookupFunction("rdma_valueAsInt"))(h); }
-inline int64_t rdma_valueAsLong(void* h) { return ((int64_t (*)(void*))rdma_lookupFunction("rdma_valueAsLong"))(h); }
-inline double rdma_valueAsDouble(void* h) { return ((double (*)(void*))rdma_lookupFunction("rdma_valueAsDouble"))(h); }
-inline float rdma_valueAsFloat(void* h) { return ((float (*)(void*))rdma_lookupFunction("rdma_valueAsFloat"))(h); }
-inline bool rdma_valueAsBoolean(void* h) { return ((bool (*)(void*))rdma_lookupFunction("rdma_valueAsBoolean"))(h); }
-inline const char* rdma_valueAsString(void* h) { return ((const char* (*)(void*))rdma_lookupFunction("rdma_valueAsString"))(h); }
-inline const char* rdma_valueAsEnumName(void* h) { return ((const char* (*)(void*))rdma_lookupFunction("rdma_valueAsEnumName"))(h); }
-inline int64_t rdma_valueAsJsValueId(void* h) { return ((int64_t (*)(void*))rdma_lookupFunction("rdma_valueAsJsValueId"))(h); }
+inline int32_t rdma_classifyValue(void* handle) { static auto fn = (int32_t (*)(void*))rdma_lookupFunction("rdma_classifyValue"); if (__builtin_expect(fn == nullptr, 0)) fn = (int32_t (*)(void*))rdma_lookupFunction("rdma_classifyValue"); return fn(handle); }
+inline int32_t rdma_valueAsInt(void* h) { static auto fn = (int32_t (*)(void*))rdma_lookupFunction("rdma_valueAsInt"); if (__builtin_expect(fn == nullptr, 0)) fn = (int32_t (*)(void*))rdma_lookupFunction("rdma_valueAsInt"); return fn(h); }
+inline int64_t rdma_valueAsLong(void* h) { static auto fn = (int64_t (*)(void*))rdma_lookupFunction("rdma_valueAsLong"); if (__builtin_expect(fn == nullptr, 0)) fn = (int64_t (*)(void*))rdma_lookupFunction("rdma_valueAsLong"); return fn(h); }
+inline double rdma_valueAsDouble(void* h) { static auto fn = (double (*)(void*))rdma_lookupFunction("rdma_valueAsDouble"); if (__builtin_expect(fn == nullptr, 0)) fn = (double (*)(void*))rdma_lookupFunction("rdma_valueAsDouble"); return fn(h); }
+inline float rdma_valueAsFloat(void* h) { static auto fn = (float (*)(void*))rdma_lookupFunction("rdma_valueAsFloat"); if (__builtin_expect(fn == nullptr, 0)) fn = (float (*)(void*))rdma_lookupFunction("rdma_valueAsFloat"); return fn(h); }
+inline bool rdma_valueAsBoolean(void* h) { static auto fn = (bool (*)(void*))rdma_lookupFunction("rdma_valueAsBoolean"); if (__builtin_expect(fn == nullptr, 0)) fn = (bool (*)(void*))rdma_lookupFunction("rdma_valueAsBoolean"); return fn(h); }
+inline const char* rdma_valueAsString(void* h) { static auto fn = (const char* (*)(void*))rdma_lookupFunction("rdma_valueAsString"); if (__builtin_expect(fn == nullptr, 0)) fn = (const char* (*)(void*))rdma_lookupFunction("rdma_valueAsString"); return fn(h); }
+inline const char* rdma_valueAsEnumName(void* h) { static auto fn = (const char* (*)(void*))rdma_lookupFunction("rdma_valueAsEnumName"); if (__builtin_expect(fn == nullptr, 0)) fn = (const char* (*)(void*))rdma_lookupFunction("rdma_valueAsEnumName"); return fn(h); }
+inline int64_t rdma_valueAsJsValueId(void* h) { static auto fn = (int64_t (*)(void*))rdma_lookupFunction("rdma_valueAsJsValueId"); if (__builtin_expect(fn == nullptr, 0)) fn = (int64_t (*)(void*))rdma_lookupFunction("rdma_valueAsJsValueId"); return fn(h); }
 
 // Thread-local Kotlin exception (set by the shim's try/catch wrappers). Returns a
 // NUL-terminated serialization of the last Kotlin exception on this thread, or
 // null. C++ reads it after every Kotlin call and rethrows as a JS Error.
-inline const char* rdma_takeError() { return ((const char* (*)())rdma_lookupFunction("rdma_takeError"))(); }
+inline const char* rdma_takeError() { static auto fn = (const char* (*)())rdma_lookupFunction("rdma_takeError"); if (__builtin_expect(fn == nullptr, 0)) fn = (const char* (*)())rdma_lookupFunction("rdma_takeError"); return fn(); }
 
 // Array access (lambda/callback args cross as an Array<Any?> handle).
-inline int32_t rdma_arraySize(void* arrayHandle) { return ((int32_t (*)(void*))rdma_lookupFunction("rdma_arraySize"))(arrayHandle); }
-inline void* rdma_arrayGet(void* arrayHandle, int32_t index) { return ((void* (*)(void*, int32_t))rdma_lookupFunction("rdma_arrayGet"))(arrayHandle, index); }
+inline int32_t rdma_arraySize(void* arrayHandle) { static auto fn = (int32_t (*)(void*))rdma_lookupFunction("rdma_arraySize"); if (__builtin_expect(fn == nullptr, 0)) fn = (int32_t (*)(void*))rdma_lookupFunction("rdma_arraySize"); return fn(arrayHandle); }
+inline void* rdma_arrayGet(void* arrayHandle, int32_t index) { static auto fn = (void* (*)(void*, int32_t))rdma_lookupFunction("rdma_arrayGet"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(void*, int32_t))rdma_lookupFunction("rdma_arrayGet"); return fn(arrayHandle, index); }
 
 // Composer proxy methods (called on the UI thread via rdmaCallUi). The composer
 // is read from the shim's global; these take no composer argument.
-inline void rdma_composer_startRestartGroup(int32_t key) { ((void (*)(int32_t))rdma_lookupFunction("rdma_composer_startRestartGroup"))(key); }
-inline void* rdma_composer_endRestartGroup() { return ((void* (*)())rdma_lookupFunction("rdma_composer_endRestartGroup"))(); }
-inline void rdma_composer_startReplaceGroup(int32_t key) { ((void (*)(int32_t))rdma_lookupFunction("rdma_composer_startReplaceGroup"))(key); }
-inline void rdma_composer_endReplaceGroup() { ((void (*)())rdma_lookupFunction("rdma_composer_endReplaceGroup"))(); }
-inline void rdma_composer_startMovableGroup(int32_t key, void* dataKey) { ((void (*)(int32_t, void*))rdma_lookupFunction("rdma_composer_startMovableGroup"))(key, dataKey); }
-inline void rdma_composer_endMovableGroup() { ((void (*)())rdma_lookupFunction("rdma_composer_endMovableGroup"))(); }
-inline void rdma_composer_startReusableGroup(int32_t key, void* dataKey) { ((void (*)(int32_t, void*))rdma_lookupFunction("rdma_composer_startReusableGroup"))(key, dataKey); }
-inline void rdma_composer_endReusableGroup() { ((void (*)())rdma_lookupFunction("rdma_composer_endReusableGroup"))(); }
-inline void rdma_composer_skipCurrentGroup() { ((void (*)())rdma_lookupFunction("rdma_composer_skipCurrentGroup"))(); }
-inline void rdma_composer_skipToGroupEnd() { ((void (*)())rdma_lookupFunction("rdma_composer_skipToGroupEnd"))(); }
-inline void rdma_composer_startDefaults() { ((void (*)())rdma_lookupFunction("rdma_composer_startDefaults"))(); }
-inline void rdma_composer_endDefaults() { ((void (*)())rdma_lookupFunction("rdma_composer_endDefaults"))(); }
-inline bool rdma_composer_getDefaultsInvalid() { return ((bool (*)())rdma_lookupFunction("rdma_composer_getDefaultsInvalid"))(); }
-inline bool rdma_composer_shouldExecute(bool cond, int32_t value) { return ((bool (*)(bool, int32_t))rdma_lookupFunction("rdma_composer_shouldExecute"))(cond, value); }
-inline bool rdma_composer_changed(void* key) { return ((bool (*)(void*))rdma_lookupFunction("rdma_composer_changed"))(key); }
-inline void* rdma_composer_rememberedValue() { return ((void* (*)())rdma_lookupFunction("rdma_composer_rememberedValue"))(); }
-inline void rdma_composer_updateRememberedValue(void* value) { ((void (*)(void*))rdma_lookupFunction("rdma_composer_updateRememberedValue"))(value); }
+inline void rdma_composer_startRestartGroup(int32_t key) { static auto fn = (void (*)(int32_t))rdma_lookupFunction("rdma_composer_startRestartGroup"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(int32_t))rdma_lookupFunction("rdma_composer_startRestartGroup"); fn(key); }
+inline void* rdma_composer_endRestartGroup() { static auto fn = (void* (*)())rdma_lookupFunction("rdma_composer_endRestartGroup"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)())rdma_lookupFunction("rdma_composer_endRestartGroup"); return fn(); }
+inline void rdma_composer_startReplaceGroup(int32_t key) { static auto fn = (void (*)(int32_t))rdma_lookupFunction("rdma_composer_startReplaceGroup"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(int32_t))rdma_lookupFunction("rdma_composer_startReplaceGroup"); fn(key); }
+inline void rdma_composer_endReplaceGroup() { static auto fn = (void (*)())rdma_lookupFunction("rdma_composer_endReplaceGroup"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)())rdma_lookupFunction("rdma_composer_endReplaceGroup"); fn(); }
+inline void rdma_composer_startMovableGroup(int32_t key, void* dataKey) { static auto fn = (void (*)(int32_t, void*))rdma_lookupFunction("rdma_composer_startMovableGroup"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(int32_t, void*))rdma_lookupFunction("rdma_composer_startMovableGroup"); fn(key, dataKey); }
+inline void rdma_composer_endMovableGroup() { static auto fn = (void (*)())rdma_lookupFunction("rdma_composer_endMovableGroup"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)())rdma_lookupFunction("rdma_composer_endMovableGroup"); fn(); }
+inline void rdma_composer_startReusableGroup(int32_t key, void* dataKey) { static auto fn = (void (*)(int32_t, void*))rdma_lookupFunction("rdma_composer_startReusableGroup"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(int32_t, void*))rdma_lookupFunction("rdma_composer_startReusableGroup"); fn(key, dataKey); }
+inline void rdma_composer_endReusableGroup() { static auto fn = (void (*)())rdma_lookupFunction("rdma_composer_endReusableGroup"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)())rdma_lookupFunction("rdma_composer_endReusableGroup"); fn(); }
+inline void rdma_composer_skipCurrentGroup() { static auto fn = (void (*)())rdma_lookupFunction("rdma_composer_skipCurrentGroup"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)())rdma_lookupFunction("rdma_composer_skipCurrentGroup"); fn(); }
+inline void rdma_composer_skipToGroupEnd() { static auto fn = (void (*)())rdma_lookupFunction("rdma_composer_skipToGroupEnd"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)())rdma_lookupFunction("rdma_composer_skipToGroupEnd"); fn(); }
+inline void rdma_composer_startDefaults() { static auto fn = (void (*)())rdma_lookupFunction("rdma_composer_startDefaults"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)())rdma_lookupFunction("rdma_composer_startDefaults"); fn(); }
+inline void rdma_composer_endDefaults() { static auto fn = (void (*)())rdma_lookupFunction("rdma_composer_endDefaults"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)())rdma_lookupFunction("rdma_composer_endDefaults"); fn(); }
+inline bool rdma_composer_getDefaultsInvalid() { static auto fn = (bool (*)())rdma_lookupFunction("rdma_composer_getDefaultsInvalid"); if (__builtin_expect(fn == nullptr, 0)) fn = (bool (*)())rdma_lookupFunction("rdma_composer_getDefaultsInvalid"); return fn(); }
+inline bool rdma_composer_shouldExecute(bool cond, int32_t value) { static auto fn = (bool (*)(bool, int32_t))rdma_lookupFunction("rdma_composer_shouldExecute"); if (__builtin_expect(fn == nullptr, 0)) fn = (bool (*)(bool, int32_t))rdma_lookupFunction("rdma_composer_shouldExecute"); return fn(cond, value); }
+inline bool rdma_composer_changed(void* key) { static auto fn = (bool (*)(void*))rdma_lookupFunction("rdma_composer_changed"); if (__builtin_expect(fn == nullptr, 0)) fn = (bool (*)(void*))rdma_lookupFunction("rdma_composer_changed"); return fn(key); }
+inline void* rdma_composer_rememberedValue() { static auto fn = (void* (*)())rdma_lookupFunction("rdma_composer_rememberedValue"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)())rdma_lookupFunction("rdma_composer_rememberedValue"); return fn(); }
+inline void rdma_composer_updateRememberedValue(void* value) { static auto fn = (void (*)(void*))rdma_lookupFunction("rdma_composer_updateRememberedValue"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(void*))rdma_lookupFunction("rdma_composer_updateRememberedValue"); fn(value); }
 
 // State. `rdma_mutableStateOf` takes the channel's value type descriptor (fixed
 // at creation): the state handle model it as a carrier (`RdmaTypedState`) so the
 // descriptor travels with the handle. State handles/initial values are only
 // read by the shim (borrowed) — the caller owns them.
 inline void* rdma_mutableStateOf(void* initialValue, const char* typeDesc) {
-    return ((void* (*)(void*, const char*))rdma_lookupFunction("rdma_mutableStateOf"))(initialValue, typeDesc);
+    static auto fn = (void* (*)(void*, const char*))rdma_lookupFunction("rdma_mutableStateOf");
+    if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(void*, const char*))rdma_lookupFunction("rdma_mutableStateOf");
+    return fn(initialValue, typeDesc);
 }
-inline const char* rdma_stateTypeDesc(void* stateHandle) { return ((const char* (*)(void*))rdma_lookupFunction("rdma_stateTypeDesc"))(stateHandle); }
-inline void* rdma_stateGetValue(void* stateHandle) { return ((void* (*)(void*))rdma_lookupFunction("rdma_stateGetValue"))(stateHandle); }
-inline void rdma_stateSetValue(void* stateHandle, void* value) { ((void (*)(void*, void*))rdma_lookupFunction("rdma_stateSetValue"))(stateHandle, value); }
+inline const char* rdma_stateTypeDesc(void* stateHandle) { static auto fn = (const char* (*)(void*))rdma_lookupFunction("rdma_stateTypeDesc"); if (__builtin_expect(fn == nullptr, 0)) fn = (const char* (*)(void*))rdma_lookupFunction("rdma_stateTypeDesc"); return fn(stateHandle); }
+inline void* rdma_stateGetValue(void* stateHandle) { static auto fn = (void* (*)(void*))rdma_lookupFunction("rdma_stateGetValue"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(void*))rdma_lookupFunction("rdma_stateGetValue"); return fn(stateHandle); }
+inline void rdma_stateSetValue(void* stateHandle, void* value) { static auto fn = (void (*)(void*, void*))rdma_lookupFunction("rdma_stateSetValue"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(void*, void*))rdma_lookupFunction("rdma_stateSetValue"); fn(stateHandle, value); }
 
 // Snapshot collections: copy the borrowed source list/map handle into a
 // `SnapshotStateList`/`SnapshotStateMap`. Caller owns the returned handle.
-inline void* rdma_mutableStateListOf(void* sourceList) { return ((void* (*)(void*))rdma_lookupFunction("rdma_mutableStateListOf"))(sourceList); }
-inline void* rdma_mutableStateMapOf(void* sourceMap) { return ((void* (*)(void*))rdma_lookupFunction("rdma_mutableStateMapOf"))(sourceMap); }
+inline void* rdma_mutableStateListOf(void* sourceList) { static auto fn = (void* (*)(void*))rdma_lookupFunction("rdma_mutableStateListOf"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(void*))rdma_lookupFunction("rdma_mutableStateListOf"); return fn(sourceList); }
+inline void* rdma_mutableStateMapOf(void* sourceMap) { static auto fn = (void* (*)(void*))rdma_lookupFunction("rdma_mutableStateMapOf"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(void*))rdma_lookupFunction("rdma_mutableStateMapOf"); return fn(sourceMap); }
 
 // Scope.
-inline void rdma_scopeUpdateScope(void* scopeHandle, int64_t blockId) { ((void (*)(void*, int64_t))rdma_lookupFunction("rdma_scopeUpdateScope"))(scopeHandle, blockId); }
+inline void rdma_scopeUpdateScope(void* scopeHandle, int64_t blockId) { static auto fn = (void (*)(void*, int64_t))rdma_lookupFunction("rdma_scopeUpdateScope"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(void*, int64_t))rdma_lookupFunction("rdma_scopeUpdateScope"); fn(scopeHandle, blockId); }
 
 // Effects (composer read from the shim global).
-inline void rdma_sideEffect(int64_t blockId) { ((void (*)(int64_t))rdma_lookupFunction("rdma_sideEffect"))(blockId); }
-inline bool rdma_disposableEffect(void* keysHandle, int64_t blockId) { return ((bool (*)(void*, int64_t))rdma_lookupFunction("rdma_disposableEffect"))(keysHandle, blockId); }
+inline void rdma_sideEffect(int64_t blockId) { static auto fn = (void (*)(int64_t))rdma_lookupFunction("rdma_sideEffect"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(int64_t))rdma_lookupFunction("rdma_sideEffect"); fn(blockId); }
+inline bool rdma_disposableEffect(void* keysHandle, int64_t blockId) { static auto fn = (bool (*)(void*, int64_t))rdma_lookupFunction("rdma_disposableEffect"); if (__builtin_expect(fn == nullptr, 0)) fn = (bool (*)(void*, int64_t))rdma_lookupFunction("rdma_disposableEffect"); return fn(keysHandle, blockId); }
 
 namespace facebook {
 namespace rdma {

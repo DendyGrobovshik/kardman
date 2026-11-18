@@ -61,6 +61,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Block-lifetime probe (docs/design/runtime_rework.md §4): collects garbage so the
+    // holders of dropped plugin lambdas are finalized, lets the release queue drain on
+    // the Hermes thread, then reports how many JS blocks the registry still holds.
+    private val blocksReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Thread {
+                repeat(3) {
+                    Runtime.getRuntime().gc()
+                    System.runFinalization()
+                    Thread.sleep(300)
+                }
+                Log.i("RDMA_TEST", "BLOCKS=${RdmaComposeHost.nativeBlockCount()}")
+            }.start()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -83,6 +99,7 @@ class MainActivity : ComponentActivity() {
         loadDevPolyfills()
 
         registerReceiver(resyncReceiver, IntentFilter(RESYNC_ACTION), Context.RECEIVER_EXPORTED)
+        registerReceiver(blocksReceiver, IntentFilter(BLOCKS_ACTION), Context.RECEIVER_EXPORTED)
 
         setContent {
             // Start unready so the LaunchedEffect below logs "Runtime ready" before the
@@ -121,6 +138,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         unregisterReceiver(resyncReceiver)
+        unregisterReceiver(blocksReceiver)
         super.onDestroy()
     }
 
@@ -226,6 +244,7 @@ class MainActivity : ComponentActivity() {
         // integration test's step 0 (internal + user:alice).
         const val DEMO_HOST_VERSION = 2
         const val RESYNC_ACTION = "org.example.rdma.RESYNC"
+        const val BLOCKS_ACTION = "org.example.rdma.BLOCKS"
         const val EXTRA_PLUGIN_ID = "pluginId"
         const val EXTRA_VERSION = "version"
         const val EXTRA_BUILT_AGAINST = "builtAgainst"

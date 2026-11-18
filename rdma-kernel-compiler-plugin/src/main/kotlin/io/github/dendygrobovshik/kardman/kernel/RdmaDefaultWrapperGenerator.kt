@@ -146,7 +146,10 @@ class RdmaDefaultWrapperGenerator(
             is RdmaType.Ref -> ty.fqn
             is RdmaType.ListType -> "List<${kotlinType(ty.element)}>"
             is RdmaType.MapType -> "Map<${kotlinType(ty.key)}, ${kotlinType(ty.value)}>"
-            is RdmaType.FunctionType -> "kotlin.Function${ty.parameters.size}"
+            is RdmaType.FunctionType -> {
+                val fn = "(" + ty.parameters.joinToString(", ") { kotlinType(it) } + ") -> " + kotlinType(ty.returnType)
+                return if (t.nullable) "($fn)?" else fn
+            }
         }
         return if (t.nullable && base != "Unit") "$base?" else base
     }
@@ -162,6 +165,7 @@ class RdmaDefaultWrapperGenerator(
     }
 
     private fun memberKotlinType(p: ParameterInfo): String {
+        p.functionType?.let { return kotlinType(it) }
         val base = when {
             p.isList -> "List<${descriptorKotlin(p.listElementType ?: "kotlin.Any")}>"
             p.isMap -> "Map<${descriptorKotlin(p.mapKeyType ?: "kotlin.Any")}, ${descriptorKotlin(p.mapValueType ?: "kotlin.Any")}>"

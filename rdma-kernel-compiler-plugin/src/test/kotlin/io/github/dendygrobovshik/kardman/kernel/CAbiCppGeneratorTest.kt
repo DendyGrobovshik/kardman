@@ -105,7 +105,7 @@ class CAbiCppGeneratorTest {
     }
 
     @Test
-    fun `wrapper attaches mutable property setters like the instance path`() {
+    fun `rehydrated proxies share the class prototype that carries mutable property setters`() {
         // Regression: the rehydration path (createXxxWrapper) must carry property setters,
         // not just the constructor path (createXxxInstance). Objects returned from the native
         // side (e.g. list elements) are rehydrated via the wrapper; writing a mutable property
@@ -120,7 +120,11 @@ class CAbiCppGeneratorTest {
         val generated = generate(listOf(device), emptyList())
         val cpp = generated["DeviceProxy.cpp"] ?: error("DeviceProxy.cpp not generated")
 
-        val wrapper = cpp.substringAfter("createDeviceWrapper(")
-        assertContains(wrapper, """setProperty(rt, "setStatus"""")
+        // The setter lives on the shared class prototype (docs/design/runtime_rework.md §3.7) …
+        val register = cpp.substringAfter("registerDeviceBridge(").substringBefore("createDeviceInstance(")
+        assertContains(register, """proto.setProperty(rt, "setStatus"""")
+        // … and both the rehydration path and the constructor path create proxies from it.
+        val wrapper = cpp.substringAfter("jsi::Object createDeviceWrapper(")
+        assertContains(wrapper, "jsi::Object::create(rt, jsi::Value(rt, *g_DeviceProto))")
     }
 }

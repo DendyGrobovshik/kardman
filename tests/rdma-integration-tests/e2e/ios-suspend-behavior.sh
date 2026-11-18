@@ -10,10 +10,6 @@ set -euo pipefail
 #
 # Requirements: Xcode + an available iPhone simulator, the framework published to
 # mavenLocal, and the Hermes compiler (third_party/bin/hermesc).
-#
-# The exception crash-test plugins (itest/exceptions{,2}) throw through `content`,
-# killing the app before the async suspend markers print; they are temporarily opted
-# out of the bake (rdmaBakeInApp=false) and restored afterwards.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GRADLE="$ROOT_DIR/gradlew"
@@ -23,8 +19,6 @@ PRODUCT="KardmanDemo"
 SIM_NAME="${IOS_SIM_NAME:-iPhone 17}"
 DERIVED="$ROOT_DIR/tests/stand/iosApp/build/ios-e2e-derived"
 
-EXCEPTIONS_1="$ROOT_DIR/tests/stand/plugin/itest/exceptions"
-EXCEPTIONS_2="$ROOT_DIR/tests/stand/plugin/itest/exceptions2"
 
 IT_DIR="$(mktemp -d)"
 VERSIONS_DIR="$IT_DIR/versions"
@@ -38,19 +32,9 @@ release() { # release <analysisJson> <polyfillOut> <internalModules>
     "$ROOT_DIR/scripts/release.sh" static-release "$1" "$VERSIONS_DIR" "$2" "$3" ""
 }
 
-drop_exception_plugins() {
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_1/gradle.properties"
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_2/gradle.properties"
-}
-
-restore_exception_plugins() {
-    rm -f "$EXCEPTIONS_1/gradle.properties" "$EXCEPTIONS_2/gradle.properties"
-}
-
 LAUNCH_PID=""
 cleanup() {
     [ -n "$LAUNCH_PID" ] && kill "$LAUNCH_PID" 2>/dev/null || true
-    restore_exception_plugins
     rm -rf "$IT_DIR"
 }
 trap cleanup EXIT
@@ -84,13 +68,13 @@ step_0_static_release() {
         -PrdmaPolicyFile="$ROOT_DIR/rdma.toml"
 
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-internal" "internal"
+    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-internal" "internal"
 
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-alice" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-alice" ""
 
     run_gradle :tests:stand:kernel:user:itest:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-itest" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-itest" ""
 }
 
 # 1) Build the iOS app. The Xcode build phase invokes Gradle; we pass the scratch
@@ -141,6 +125,19 @@ step_2_run_and_assert() {
     wait_marker "$log" "ENUM_SUSPEND_WHEN: post"
     wait_marker "$log" "ENUM_CONFIG: label=method=POST isGet=false"
     wait_marker "$log" "ENUM_MEMBERS: name=GET ordinal=0 valueOf=true default=true"
+    # Enums in generic positions: list elements, callback parameter, `when` expression (runtime_rework §5.0).
+    wait_marker "$log" "ENUM_GENERIC: codes=g,p names=GET,POST hasPost=true"
+    wait_marker "$log" "ENUM_CALLBACK: POST isPost=true ordinal=1"
+    # Plugin overrides called by native code (vtable, runtime_rework §6.4, §2.8).
+    wait_marker "$log" "VT_HERMES power=9000 greet=I am a cyborg! risky=caught:"
+    wait_marker "$log" "VT_UI power=9000 greet=I am a cyborg! risky=caught:"
+    # Block lifetime (runtime_rework §4): the 200 lambdas the plugin dropped in the kernel
+    # are released once their holders are cleaned (the host probes after a GC).
+    wait_marker "$log" "RDMA_TEST: BLOCKS="
+    local n
+    n=$(grep -o "RDMA_TEST: BLOCKS=[0-9]*" "$log" | tail -1 | cut -d= -f2)
+    echo "live blocks after GC: $n"
+    [ "$n" -lt 100 ] || fail "dropped lambdas were not released ($n live blocks)"
 
     kill "$LAUNCH_PID" 2>/dev/null || true
     LAUNCH_PID=""
@@ -152,7 +149,6 @@ main() {
     id="$(resolve_sim)"
     log="$(mktemp -t rdma-ios-suspend)"
 
-    drop_exception_plugins
     step_0_static_release
     step_1_build
     step_2_run_and_assert "$id" "$log"

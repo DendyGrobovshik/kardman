@@ -17,10 +17,8 @@ set -euo pipefail
 # mavenLocal, and the Hermes compiler (third_party/bin/hermesc).
 #
 # The stand renders the last plugin content registered; the state probe lives in
-# the alice/counter module (StateTypesProbe). The exception crash-test plugins
-# (itest/exceptions{,2}) throw through `content`, killing the app before the
-# probes run, so they are temporarily opted out of the bake (rdmaBakeInApp=false)
-# and restored afterwards — the same mechanism ios-suspend-behavior.sh uses.
+# the alice/counter module (StateTypesProbe). The crash-test plugins
+# (itest/exceptions{,2}) are not baked into the stand by default.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GRADLE="$ROOT_DIR/gradlew"
@@ -30,8 +28,6 @@ PRODUCT="KardmanDemo"
 SIM_NAME="${IOS_SIM_NAME:-iPhone 17}"
 DERIVED="$ROOT_DIR/tests/stand/iosApp/build/ios-e2e-derived"
 
-EXCEPTIONS_1="$ROOT_DIR/tests/stand/plugin/itest/exceptions"
-EXCEPTIONS_2="$ROOT_DIR/tests/stand/plugin/itest/exceptions2"
 
 IT_DIR="$(mktemp -d)"
 VERSIONS_DIR="$IT_DIR/versions"
@@ -52,19 +48,9 @@ release() { # release <analysisJson> <polyfillOut> <internalModules>
     "$ROOT_DIR/scripts/release.sh" static-release "$1" "$VERSIONS_DIR" "$2" "$3" ""
 }
 
-drop_exception_plugins() {
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_1/gradle.properties"
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_2/gradle.properties"
-}
-
-restore_exception_plugins() {
-    rm -f "$EXCEPTIONS_1/gradle.properties" "$EXCEPTIONS_2/gradle.properties"
-}
-
 LAUNCH_PID=""
 cleanup() {
     [ -n "$LAUNCH_PID" ] && kill "$LAUNCH_PID" 2>/dev/null || true
-    restore_exception_plugins
     rm -rf "$IT_DIR"
 }
 trap cleanup EXIT
@@ -98,10 +84,10 @@ step_0_static_release() {
         -PrdmaPolicyFile="$ROOT_DIR/rdma.toml"
 
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-internal" "internal"
+    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-internal" "internal"
 
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-alice" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-alice" ""
 }
 
 # 1) Build the iOS app (exception plugins dropped from the bake first). The Xcode
@@ -109,7 +95,6 @@ step_0_static_release() {
 #    ORG_GRADLE_PROJECT_* env convention.
 step_1_build() {
     step "1: build iOS app"
-    drop_exception_plugins
     "$ROOT_DIR/scripts/publish.sh"
     ORG_GRADLE_PROJECT_rdmaVersionsDir="$VERSIONS_DIR" \
         xcodebuild \

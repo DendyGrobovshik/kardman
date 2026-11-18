@@ -65,6 +65,13 @@ data class RdmaPluginEnum(
 )
 
 object RdmaPluginConfig {
+    fun parseRawManifest(json: String): RdmaManifest? =
+        try {
+            Json.decodeFromString(RdmaManifest.serializer(), json)
+        } catch (e: Exception) {
+            null
+        }
+
     fun parseManifest(json: String): RdmaPluginManifest {
         val raw = try {
             Json.decodeFromString(RdmaManifest.serializer(), json)

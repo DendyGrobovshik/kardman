@@ -117,6 +117,27 @@ object RdmaSymbolIndexer {
     private fun functionParameters(fn: IrSimpleFunction): List<IrValueParameter> =
         fn.parameters.filter { it.kind == IrParameterKind.Regular && !it.name.asString().startsWith("$") }
 
+    /**
+     * Why a changed top-level `@RDMA` function cannot be hotfixed yet: its native call sites
+     * have no slot (runtime_rework §6.2, §6.8). Null when it can.
+     */
+    private fun hotfixBlockerOf(fn: IrSimpleFunction, isRdma: Boolean): String? = when {
+        !isRdma -> null
+        fn.hasAnnotation(COMPOSABLE_ANNOTATION) -> "it is a @Composable widget"
+        fn.isSuspend -> "it is a suspend function"
+        (functionParameters(fn).map { it.type } + fn.returnType).any(::containsFunctionType) ->
+            "it has a function-typed parameter or result"
+        else -> null
+    }
+
+    private fun containsFunctionType(type: IrType): Boolean {
+        val fqn = type.classFqName?.asString() ?: return false
+        if (fqn.startsWith("kotlin.Function") || fqn.startsWith("kotlin.jvm.functions.Function") ||
+            fqn.startsWith("kotlin.coroutines.SuspendFunction") || fqn.startsWith("kotlin.reflect.KFunction")
+        ) return true
+        return (type as? IrSimpleType)?.arguments?.any { it.typeOrNull?.let(::containsFunctionType) == true } == true
+    }
+
     private fun constructorParameters(cls: IrClass): List<IrValueParameter> =
         cls.primaryConstructor?.parameters?.filter { it.kind == IrParameterKind.Regular } ?: emptyList()
 
@@ -205,6 +226,7 @@ object RdmaSymbolIndexer {
                     emulatable = !decl.hasAnnotation(COMPOSABLE_ANNOTATION),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
                     signature = signatureOf(functionParameters(decl), text),
+                    hotfixBlocker = if (memberOfClass) null else hotfixBlockerOf(decl, isRdma),
                 )
                 irToNode[decl] = fqn
             }

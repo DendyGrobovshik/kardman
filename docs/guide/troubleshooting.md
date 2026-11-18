@@ -15,8 +15,8 @@ limitations under the License.
 -->
 # Troubleshooting
 
-Symptoms, causes and fixes for the problems hit most often on a first setup. See
-[Setup](setup.md) for the happy path.
+Symptoms, causes and fixes for the problems hit most often. See
+[getting_started.md](getting_started.md) for the happy path.
 
 ## Setup and downloads
 
@@ -261,8 +261,8 @@ no outputs, so Xcode re-runs them on every build and warns about it.
 ### How do I force a full rebuild of the demo?
 
 ```bash
-rm -rf demo/kernel/internal/build demo/kernel/user/alice/build \
-       demo/plugin/alice/counter/build demo/.gradle/configuration-cache
+rm -rf demo/kernel/internal/build demo/plugin/generated/build \
+       demo/.gradle/configuration-cache
 ./gradlew -p demo :androidApp:assembleDebug --no-configuration-cache --rerun-tasks
 ```
 
@@ -275,3 +275,48 @@ cost hours to rebuild (see [Disk is full](#disk-is-full-enospc)),
 checkout that `scripts/setup/kotlin.sh` reclones. In `~/.m2/repository` keep the
 published `org.jetbrains.kotlin:<version>` artifacts — that is the compiler build you
 would otherwise repeat.
+
+## Your own app
+
+### Host renders a white/blank screen after loading
+
+The plugin's `registerContent` never ran because its dependencies were not loaded, or were
+loaded in the wrong order. The build generates `rdma-modules.json` (bundles in load
+order); the host must read it — **never hardcode the module list**, since the dependency
+set and order change with the compiler and Compose version. See the demo's
+`MainActivity` / `MainViewController`.
+
+### `Property 'RDMA' doesn't exist` / `ReferenceError`
+
+Plugin JS was evaluated before the runtime was initialized: `RdmaBridge.nativeInit()` must
+be called before `nativeEvalAsset()`.
+
+### Plugin bundles fail to load: `Wrong bytecode version. Expected N but got M`
+
+The `.hbc` bundles were compiled by a `hermesc` whose bytecode version differs from the
+runtime's — usually a stale vendored `third_party/bin/hermesc`. Keep
+`rdmaHermesc=third_party/bin/hermesc` in `gradle.properties` but delete the file; the
+`rdma-app` plugin then resolves the pinned `hermesc` from `mavenLocal`. Check with
+`hermesc --version`.
+
+### Native link fails: `undefined symbol: facebook::jsi::*`
+
+The published `hermes-android` was built with JSI as a separate library that is excluded
+from the AAR. Re-publish it with `./scripts/setup/hermes.sh`, which links JSI statically
+into `libhermesvm.so`. Verify:
+
+```bash
+nm -D <AAR>/prefab/modules/hermesvm/libs/android.arm64-v8a/libhermesvm.so \
+  | c++filt | grep 'facebook::jsi::Value::~Value()'   # must be T (defined), not U
+```
+
+### iOS link fails: `Undefined symbols … _rdma_…` after updating the framework
+
+The app links a stale copy of the iOS runtime's native library. Re-publish
+(`./scripts/publish.sh`) and rebuild; if it persists, delete `<app>/build/rdma-native-sdk`
+so the published SDK is extracted again.
+
+### A framework change has no effect
+
+The Kotlin daemon caches compiler plugins. After re-publishing the framework, run
+`./gradlew --stop` before building the app.

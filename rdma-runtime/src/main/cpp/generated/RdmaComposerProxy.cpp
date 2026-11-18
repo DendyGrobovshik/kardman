@@ -30,23 +30,33 @@ void initComposerProxyCache(JNIEnv* env) {
     g_composerProxyCache.shouldExecute = env->GetMethodID(g_composeCache.composerClass, "shouldExecute", "(ZI)Z");
 }
 
-class ComposerProxyHost : public jsi::HostObject, public std::enable_shared_from_this<ComposerProxyHost> {
-public:
-    explicit ComposerProxyHost(jobject composer) : composer_(composer) {}
-    ~ComposerProxyHost() override {
+// The Composer proxy is a NativeState object over a shared lazy prototype
+// (docs/design/runtime_rework.md §3.8): each protocol method is resolved ONCE per
+// runtime by its compile-mangled name and then found on the prototype directly.
+struct ComposerProxyState : public RdmaTaggedState {
+    explicit ComposerProxyState(jobject composer) : RdmaTaggedState(RdmaStateKind::Composer), composer_(composer) {}
+    ~ComposerProxyState() override {
         if (composer_ && g_composeCache.jvm) {
             JNIEnv* env = getEnv(g_composeCache.jvm);
             if (env) env->DeleteGlobalRef(composer_);
         }
     }
+    jobject composer_; // global ref
+};
 
-    jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& name) override {
-        std::string n = name.utf8(rt);
+static std::shared_ptr<ComposerProxyState> composerStateOf(jsi::Runtime& r, const jsi::Value& thisVal) {
+    auto st = rdmaStateAs<ComposerProxyState>(r, thisVal, RdmaStateKind::Composer);
+    if (!st) throw jsi::JSError(r, "receiver is not a Composer proxy");
+    return st;
+}
+
+static jsi::Value resolveComposerMethod(jsi::Runtime& rt, const std::string& n) {
         if (n.rfind("startRestartGroup", 0) == 0) {
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "startRestartGroup"), 1,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
@@ -62,14 +72,15 @@ public:
                         return RdmaResult::undefined();
                     });
                     if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
-                    return jsi::Object::createFromHostObject(r, self);
+                    return jsi::Value(r, thisVal);
                 });
         }
         if (n.rfind("endRestartGroup", 0) == 0) {
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "endRestartGroup"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::null();
 
@@ -92,7 +103,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "startReplaceGroup"), 1,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
@@ -114,7 +126,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "endReplaceGroup"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
@@ -135,7 +148,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "startMovableGroup"), 2,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
@@ -161,7 +175,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "endMovableGroup"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
@@ -182,7 +197,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "startReusableGroup"), 2,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
                     jint p0 = count > 0 && args[0].isNumber() ? (jint)args[0].getNumber() : 0;
@@ -208,7 +224,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "endReusableGroup"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
@@ -229,7 +246,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "skipCurrentGroup"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
@@ -250,7 +268,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "skipToGroupEnd"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
@@ -271,7 +290,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "startDefaults"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
@@ -292,7 +312,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "endDefaults"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
 
@@ -313,7 +334,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "get_defaultsInvalid"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value(false);
 
@@ -333,7 +355,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "rememberedValue"), 0,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
                     RdmaResult result = rdmaCallUi([composer = self->composer_]() -> RdmaResult {
@@ -379,7 +402,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "updateRememberedValue"), 1,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value::undefined();
                     if (count < 1) return jsi::Value::undefined();
@@ -421,7 +445,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "changed"), 1,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value(true);
                     // Box primitive keys so `equals` compares correctly; use an identity-unique
@@ -452,7 +477,8 @@ public:
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "shouldExecute"), 2,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value(false);
                     jboolean p0 = count > 0 && args[0].isBool() ? args[0].getBool() : false;
@@ -512,19 +538,16 @@ public:
         }
 
         return jsi::Value::undefined();
-    }
-
-    jobject composer() const { return composer_; }
-
-private:
-    jobject composer_; // global ref
-};
+}
 
 jsi::Object makeComposerProxy(jsi::Runtime& rt, jobject composer) {
+    static jsi::Object* proto = nullptr; // shared, intentionally leaked (lives as long as the runtime)
+    if (!proto) proto = new jsi::Object(rdmaLazyProto(rt, resolveComposerMethod));
     JNIEnv* env = getEnv(g_composeCache.jvm);
     jobject global = env->NewGlobalRef(composer);
-    auto host = std::make_shared<ComposerProxyHost>(global);
-    return jsi::Object::createFromHostObject(rt, host);
+    jsi::Object obj = jsi::Object::create(rt, jsi::Value(rt, *proto));
+    obj.setNativeState(rt, std::make_shared<ComposerProxyState>(global));
+    return obj;
 }
 
 } // namespace rdma

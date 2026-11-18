@@ -29,6 +29,7 @@ import com.example.kernel.internal.services.echoIntListMap
 import com.example.kernel.internal.services.echoIntListSuspend
 import com.example.kernel.internal.services.echoIntMapSuspend
 import com.example.kernel.internal.services.echoMethod
+import com.example.kernel.internal.services.echoMethodList
 import com.example.kernel.internal.services.echoMethodSuspend
 import com.example.kernel.internal.services.echoStringMap
 import com.example.kernel.internal.services.defaultMethod
@@ -37,6 +38,7 @@ import com.example.kernel.internal.services.failNestedSuspend
 import com.example.kernel.internal.services.failSuspend
 import com.example.kernel.internal.services.fetchPlatformInfoSuspend
 import com.example.kernel.internal.services.httpGet
+import com.example.kernel.internal.services.invokeNow
 import com.example.kernel.internal.services.HttpMethod
 import com.example.kernel.internal.services.mapValue
 import com.example.kernel.internal.services.maybeNullSuspend
@@ -45,7 +47,11 @@ import com.example.kernel.internal.services.platformInfo
 import com.example.kernel.internal.services.putMapValue
 import com.example.kernel.internal.services.sumList
 import com.example.kernel.internal.services.touchSuspend
+import com.example.kernel.internal.services.withMethod
 import com.example.kernel.internal.services.SuspendService
+import com.example.kernel.internal.services.Square
+import com.example.kernel.internal.services.Ticker
+import com.example.kernel.internal.services.describeShape
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -68,6 +74,10 @@ fun runServicesDemo() {
     runListNestingDemo()
     runListCrossRuntimeDemo()
     runListIterationDemo()
+    runCollectionIdiomsDemo()
+    runShapeDemo()
+    runLambdaMemberDemo()
+    runBlockLifetimeDemo()
     runMapMutationDemo()
     runMapNestingDemo()
     runMapCrossRuntimeDemo()
@@ -212,6 +222,21 @@ suspend fun runEnumDemo() {
         "ENUM_MEMBERS: name=${HttpMethod.GET.name} ordinal=${HttpMethod.GET.ordinal} " +
             "valueOf=${HttpMethod.valueOf("POST") == HttpMethod.POST} default=${defaultMethod() == HttpMethod.POST}",
     )
+
+    // Enums in generic positions (runtime_rework §5.0): list elements, a callback parameter
+    // and an exhaustive `when` expression without `else` — at run time the values are the
+    // entry-name strings the kernel hands out.
+    val methods = echoMethodList(listOf(HttpMethod.GET, HttpMethod.POST))
+    val codes = methods.map { m ->
+        when (m) {
+            HttpMethod.GET -> "g"
+            HttpMethod.POST -> "p"
+        }
+    }
+    println("ENUM_GENERIC: codes=${codes.joinToString(",")} names=${methods.joinToString(",") { it.name }} hasPost=${HttpMethod.POST in methods}")
+    withMethod(HttpMethod.POST) { m ->
+        println("ENUM_CALLBACK: ${m.name} isPost=${m == HttpMethod.POST} ordinal=${m.ordinal}")
+    }
 }
 
 fun runListMutationDemo() {
@@ -257,6 +282,57 @@ fun runListIterationDemo() {
     println("LIST_ITER: sum=${doubled.sum()} joined=${list.joinToString(",")}")
     println("LIST_STR: ${list.toString()}")
     println("LIST_KSTR: ${echoIntList(listOf(5, 6)).toString()}")
+}
+
+/**
+ * Collections returned by the kernel are real Kotlin collections in the plugin
+ * (docs/design/runtime_rework.md §3): stdlib idioms work on them as on plugin-created ones.
+ */
+fun runCollectionIdiomsDemo() {
+    val fromKernel = echoIntList(listOf(3, 1, 2))
+    var loopSum = 0
+    for (x in fromKernel) loopSum += x
+    println(
+        "COLL_LIST: loop=$loopSum filter=${fromKernel.filter { it % 2 == 0 }} sorted=${fromKernel.sorted()} " +
+            "first=${fromKernel.first()} contains=${2 in fromKernel} isList=${(fromKernel as Any) is List<*>}",
+    )
+    val map = echoStringMap(mapOf("a" to "1", "b" to "2"))
+    var visited = 0
+    map.forEach { (_, _) -> visited++ }
+    println(
+        "COLL_MAP: keys=${map.keys.sorted().joinToString(",")} " +
+            "entries=${map.map { (k, v) -> "$k=$v" }.sorted().joinToString(",")} forEach=$visited " +
+            "getOrElse=${map.getOrElse("z") { "none" }}",
+    )
+    val nested = echoIntListMap(mapOf(1 to listOf(1, 2), 2 to listOf(3, 4)))
+    println("COLL_NESTED: flat=${nested.values.flatten().sum()} max=${nested.values.maxOf { it.size }}")
+}
+
+/**
+ * 200 lambdas handed to the kernel and dropped there: their blocks must be released once
+ * the holders are collected (the e2e asserts the registry does not keep them).
+ */
+fun runBlockLifetimeDemo() {
+    var calls = 0
+    repeat(200) { invokeNow { calls++ } }
+    invokeNow { println("BLOCKS_DEMO: done") }
+}
+
+/** A kernel subclass passes where its kernel superclass is expected; inherited members work. */
+fun runShapeDemo() {
+    val square = Square(3.0)
+    println("SHAPE: ${describeShape(square)} name=${square.name} side=${square.side} area=${square.area()}")
+}
+
+/** Plugin callbacks passed to a kernel constructor and to a kernel method. */
+fun runLambdaMemberDemo() {
+    val seen = mutableListOf<Int>()
+    val ticker = Ticker { n ->
+        seen += n
+        if (n == 3) println("LAMBDA_CTOR: ${seen.joinToString(",")}")
+    }
+    ticker.tick(3)
+    ticker.each(listOf("a", "b")) { s -> println("LAMBDA_METHOD: $s") }
 }
 
 fun runMapMutationDemo() {

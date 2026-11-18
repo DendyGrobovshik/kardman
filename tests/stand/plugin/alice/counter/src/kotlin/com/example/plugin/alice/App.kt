@@ -26,6 +26,7 @@ import com.example.kernel.internal.ColumnWithDefault
 import com.example.kernel.internal.Text
 import com.example.kernel.internal.TextWithDefault
 import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.user.alice.PersonProbe
 
 @Composable
 fun Counter() {
@@ -37,6 +38,9 @@ fun Counter() {
         ColumnWithDefault()
     }
     StateTypesProbe()
+    // Overrides called by a kernel widget on the UI thread (vtable, runtime_rework §6.4).
+    val probe = remember { Cyborg("probe", 1) }
+    PersonProbe(probe)
 }
 
 fun main() {

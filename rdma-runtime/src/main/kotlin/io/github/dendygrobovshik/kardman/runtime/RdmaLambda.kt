@@ -15,18 +15,28 @@
  */
 package io.github.dendygrobovshik.kardman.runtime
 
-class RdmaFunction0<R>(private val id: Long) : Function0<R> {
-    override fun invoke(): R = RdmaComposeHost.nativeInvokeLambda(id, emptyArray()) as R
+// Kernel wrappers of a plugin lambda passed to an `@RDMA` function. Each one is a
+// holder of the JS block (docs/design/runtime_rework.md §4): the block lives exactly
+// as long as the wrapper; invocations post to the JS thread and `touch` the holder
+// after posting, so it cannot be finalized before the call is queued.
+class RdmaFunction0<R>(id: Long) : Function0<R> {
+    private val ref = RdmaBlockRef(id)
+    override fun invoke(): R = (RdmaComposeHost.nativeInvokeLambda(ref.id, emptyArray()) as R).also { ref.touch() }
 }
 
-class RdmaFunction1<P1, R>(private val id: Long) : Function1<P1, R> {
-    override fun invoke(p1: P1): R = RdmaComposeHost.nativeInvokeLambda(id, arrayOf(p1 as Any?)) as R
+class RdmaFunction1<P1, R>(id: Long) : Function1<P1, R> {
+    private val ref = RdmaBlockRef(id)
+    override fun invoke(p1: P1): R = (RdmaComposeHost.nativeInvokeLambda(ref.id, arrayOf(p1 as Any?)) as R).also { ref.touch() }
 }
 
-class RdmaFunction2<P1, P2, R>(private val id: Long) : Function2<P1, P2, R> {
-    override fun invoke(p1: P1, p2: P2): R = RdmaComposeHost.nativeInvokeLambda(id, arrayOf(p1 as Any?, p2 as Any?)) as R
+class RdmaFunction2<P1, P2, R>(id: Long) : Function2<P1, P2, R> {
+    private val ref = RdmaBlockRef(id)
+    override fun invoke(p1: P1, p2: P2): R =
+        (RdmaComposeHost.nativeInvokeLambda(ref.id, arrayOf(p1 as Any?, p2 as Any?)) as R).also { ref.touch() }
 }
 
-class RdmaFunction3<P1, P2, P3, R>(private val id: Long) : Function3<P1, P2, P3, R> {
-    override fun invoke(p1: P1, p2: P2, p3: P3): R = RdmaComposeHost.nativeInvokeLambda(id, arrayOf(p1 as Any?, p2 as Any?, p3 as Any?)) as R
+class RdmaFunction3<P1, P2, P3, R>(id: Long) : Function3<P1, P2, P3, R> {
+    private val ref = RdmaBlockRef(id)
+    override fun invoke(p1: P1, p2: P2, p3: P3): R =
+        (RdmaComposeHost.nativeInvokeLambda(ref.id, arrayOf(p1 as Any?, p2 as Any?, p3 as Any?)) as R).also { ref.touch() }
 }

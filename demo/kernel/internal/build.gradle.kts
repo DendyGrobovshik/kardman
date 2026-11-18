@@ -53,7 +53,6 @@ kotlin {
         }
         iosMain {
             kotlin.srcDir("build/generated/rdma/iosMain")
-            kotlin.srcDir("build/generated/rdma/capi/kotlin")
             dependencies {
                 implementation("io.github.dendygrobovshik.kardman:rdma-runtime-ios:1.0")
                 implementation(libs.kotlinx.serialization.json)

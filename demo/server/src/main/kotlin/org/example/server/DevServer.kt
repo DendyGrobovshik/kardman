@@ -83,7 +83,10 @@ fun main() {
             val request = json.decodeFromString(ResyncRequest.serializer(), exchange.requestBody.readBytes().decodeToString())
             val response = store.resync(request)
             respondJson(exchange, 200, json.encodeToString(ResyncResponse.serializer(), response))
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Throwable, not Exception: an Error escaping the handler makes HttpServer drop
+            // the connection silently ("unexpected end of stream" on the client).
+            e.printStackTrace()
             respondJson(exchange, 400, "{\"error\":\"${e.message}\"}")
         }
     }
@@ -94,7 +97,10 @@ fun main() {
                 ?: error("missing 'code'")
             val result = generate(store, versionsDir, demoDir, rootDir, hermesc, generatedSrc, pluginJson, code)
             respondJson(exchange, 200, "{\"pluginId\":\"${result.pluginId}\",\"version\":${result.version}}")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Throwable, not Exception: an Error escaping the handler makes HttpServer drop
+            // the connection silently ("unexpected end of stream" on the client).
+            e.printStackTrace()
             respondJson(exchange, 400, "{\"error\":\"${e.message}\"}")
         }
     }

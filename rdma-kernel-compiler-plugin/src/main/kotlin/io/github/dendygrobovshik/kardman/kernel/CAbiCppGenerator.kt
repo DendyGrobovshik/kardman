@@ -99,11 +99,15 @@ class CAbiCppGenerator(
         val decl = params.joinToString(", ") { "${it.first} ${it.second}" }
         val types = params.joinToString(", ") { it.first }
         val args = params.joinToString(", ") { it.second }
-        val fp = "(($ret (*)($types))rdma_lookupFunction(\"$name\"))"
+        // The registry lookup happens once per function (cached pointer), not per call
+        // (docs/design/runtime_rework.md §3.9).
+        val cast = "($ret (*)($types))"
+        val lookup = "static auto fn = ${cast}rdma_lookupFunction(\"$name\"); " +
+            "if (__builtin_expect(fn == nullptr, 0)) fn = ${cast}rdma_lookupFunction(\"$name\");"
         return if (ret == "void") {
-            "inline void $name($decl) { $fp($args); }"
+            "inline void $name($decl) { $lookup fn($args); }"
         } else {
-            "inline $ret $name($decl) { return $fp($args); }"
+            "inline $ret $name($decl) { $lookup return fn($args); }"
         }
     }
 
@@ -337,6 +341,12 @@ $argBlock    $setFn(state->handle(), $argExpr);
                     out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(r).utf8(r); }\n")
                     if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
+                } else if (param.functionType != null) {
+                    // A lambda crosses as its block id (wrapped into a Kotlin lambda on the C side).
+                    out.write("    int64_t cpp_${param.name} = 0;\n")
+                    out.write("    if (count > $idx && args[$idx].isNumber()) cpp_${param.name} = (int64_t)args[$idx].getNumber();\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    expr = "cpp_${param.name}"
                 } else if (isEnumType(param.type)) {
                     out.write("    std::string cpp_${param.name};\n")
                     out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(r).utf8(r); }\n")
@@ -417,7 +427,13 @@ $argBlock    $setFn(state->handle(), $argExpr);
         }
 
         // register bridge
-        out.write("""void register${info.className}Bridge(jsi::Runtime& rt) {
+        out.write("""// The shared prototype of every ${info.className} proxy (docs/design/runtime_rework.md §3.7):
+// built once at bridge install; a proxy is `Object.create(proto)` + its NativeState.
+// Intentionally leaked — it lives as long as the runtime.
+static jsi::Object* g_${info.className}Proto = nullptr;
+
+void register${info.className}Bridge(jsi::Runtime& rt) {
+    jsi::Object proto(rt);
 """)
         for (method in info.methods.filter { !it.isSuspend }) {
             out.write("""    {
@@ -426,7 +442,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
             [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
                 return ${info.className}_${method.name}(r, thisVal, args, count);
             });
-        rt.global().setProperty(rt, "__${info.className}_proto_${method.name}", std::move(fn));
+        proto.setProperty(rt, "${method.name}", std::move(fn));
     }
 """)
         }
@@ -438,7 +454,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
             [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
                 return ${info.className}_$getterName(r, thisVal);
             });
-        rt.global().setProperty(rt, "__${info.className}_proto_$getterName", std::move(fn));
+        proto.setProperty(rt, "$getterName", std::move(fn));
     }
 """)
             if (prop.isMutable) {
@@ -449,12 +465,12 @@ $argBlock    $setFn(state->handle(), $argExpr);
             [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
                 return ${info.className}_$setterName(r, thisVal, args, count);
             });
-        rt.global().setProperty(rt, "__${info.className}_proto_$setterName", std::move(fn));
+        proto.setProperty(rt, "$setterName", std::move(fn));
     }
 """)
             }
         }
-        out.write("}\n\n")
+        out.write("    g_${info.className}Proto = new jsi::Object(std::move(proto));\n}\n\n")
 
         // create instance
         out.write("""jsi::Object create${info.className}Instance(jsi::Runtime& rt, const jsi::Value* args, size_t count) {
@@ -474,6 +490,12 @@ $argBlock    $setFn(state->handle(), $argExpr);
                     out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(rt).utf8(rt); }\n")
                     if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
                     expr = "cpp_${param.name}.c_str()"
+                } else if (param.functionType != null) {
+                    // A lambda crosses as its block id (wrapped into a Kotlin lambda on the C side).
+                    out.write("    int64_t cpp_${param.name} = 0;\n")
+                    out.write("    if (count > $idx && args[$idx].isNumber()) cpp_${param.name} = (int64_t)args[$idx].getNumber();\n")
+                    if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
+                    expr = "cpp_${param.name}"
                 } else if (isEnumType(param.type)) {
                     out.write("    std::string cpp_${param.name};\n")
                     out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].isNull() ? \"\" : args[$idx].getString(rt).utf8(rt); }\n")
@@ -528,48 +550,19 @@ $argBlock    $setFn(state->handle(), $argExpr);
             }.joinToString(", ")
             out.write("    handle = ${cFn(info.className + "_new")}($callArgs);\n")
         }
-        out.write("""
-    auto jsObj = jsi::Object(rt);
-    auto nativeState = std::make_shared<${info.className}NativeState>(handle);
-    jsObj.setNativeState(rt, nativeState);
-""")
-        emitClassSurface(out, info)
-        out.write("    return jsObj;\n}\n\n")
+        out.write("    return create${info.className}Wrapper(rt, handle);\n}\n\n")
 
         // wrapper
         out.write("""jsi::Object create${info.className}Wrapper(jsi::Runtime& rt, void* handle) {
-    auto jsObj = jsi::Object(rt);
-    auto nativeState = std::make_shared<${info.className}NativeState>(handle);
-    jsObj.setNativeState(rt, nativeState);
+    auto jsObj = jsi::Object::create(rt, jsi::Value(rt, *g_${info.className}Proto));
+    jsObj.setNativeState(rt, std::make_shared<${info.className}NativeState>(handle));
+    return jsObj;
+}
+
 """)
-        emitClassSurface(out, info)
-        out.write("    return jsObj;\n}\n\n")
 
         out.write("$nsClose} // namespace rdma\n} // namespace facebook\n")
         out.close()
-    }
-
-    /**
-     * Emits the lines that attach an `@RDMA` class's public surface (non-suspend methods,
-     * property getters, and setters for mutable properties) onto a freshly created `jsObj`.
-     *
-     * This is the single source of truth for "what a `[RdmaClassInfo]` looks like on the JS
-     * side"; both the constructor path (`createXxxInstance`) and the rehydration path
-     * (`createXxxWrapper`) call it so the two cannot drift (see the property-setter bug where
-     * the wrapper omitted setters).
-     */
-    private fun emitClassSurface(out: BufferedWriter, info: RdmaClassInfo) {
-        for (method in info.methods.filter { !it.isSuspend }) {
-            out.write("    jsObj.setProperty(rt, \"${method.name}\", rt.global().getProperty(rt, \"__${info.className}_proto_${method.name}\"));\n")
-        }
-        for (prop in info.properties) {
-            val getterName = "get${prop.name.replaceFirstChar { it.uppercase() }}"
-            out.write("    jsObj.setProperty(rt, \"$getterName\", rt.global().getProperty(rt, \"__${info.className}_proto_$getterName\"));\n")
-            if (prop.isMutable) {
-                val setterName = "set${prop.name.replaceFirstChar { it.uppercase() }}"
-                out.write("    jsObj.setProperty(rt, \"$setterName\", rt.global().getProperty(rt, \"__${info.className}_proto_$setterName\"));\n")
-            }
-        }
     }
 
     // ------------------------------------------------------------------ bridge
@@ -751,115 +744,22 @@ jsi::Value wrapUserObject(jsi::Runtime& rt, void* handle) {
     }
 }
 
+// Collection proxies live in the runtime (RdmaCollectionsCAbi.cpp,
+// docs/design/runtime_rework.md §3); these module-level entry points delegate.
 jsi::Object createListHandle(jsi::Runtime& rt, void* listHandle, const std::string& elementType) {
-    // List handle wraps the Kotlin List via rdma_listSize/rdma_listGet.
-    auto host = std::make_shared<ListCAbiHost>(listHandle, elementType);
-    return jsi::Object::createFromHostObject(rt, host);
+    return rdmaCreateListHandleCAbi(rt, listHandle, elementType);
 }
 
 void* materializeList(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& elementType) {
-    int kind = -1;
-    {
-        auto rdma = rt.global().getProperty(rt, "RDMA");
-        if (rdma.isObject()) {
-            auto fn = rdma.asObject(rt).getProperty(rt, "listKind");
-            if (fn.isObject() && fn.asObject(rt).isFunction(rt)) {
-                auto res = fn.asObject(rt).asFunction(rt).call(rt, jsObj);
-                if (res.isNumber()) kind = (int)res.getNumber();
-            }
-        }
-    }
-    if (kind == 2) {
-        throw jsi::JSError(rt, "unsupported List implementation crossing the runtime boundary; only ArrayList and EmptyList are supported");
-    }
-    if (kind == 1) return rdma_emptyList();
-    // Already a list handle we produced earlier.
-    if (jsObj.isHostObject(rt)) {
-        auto ns = std::dynamic_pointer_cast<ListCAbiHost>(jsObj.getHostObject(rt));
-        if (ns) return ns->listHandle();
-    }
-    // A plugin-created list morphed into a proxy: reuse the native handle stored
-    // in the hidden `__rdma_proxy` property.
-    {
-        auto p = jsObj.getProperty(rt, "__rdma_proxy");
-        if (p.isObject()) {
-            auto h = std::dynamic_pointer_cast<ListCAbiHost>(p.asObject(rt).getHostObject(rt));
-            if (h) return h->listHandle();
-        }
-    }
-    // Plain JS array.
-    if (jsObj.isArray(rt)) {
-        auto arr = jsObj.asArray(rt);
-        size_t n = arr.size(rt);
-        std::vector<void*> handles;
-        handles.reserve(n);
-        for (size_t i = 0; i < n; i++) {
-            handles.push_back(jsiToHandle(rt, arr.getValueAtIndex(rt, i), elementType));
-        }
-        return rdma_listCreate(handles.data(), (int32_t)handles.size());
-    }
-    // Kotlin/JS List (ArrayList): wraps a backing JS array in an own field. The
-    // field is `array_1` in development output but minified in production, so scan
-    // own properties for the first JS array (same as the JNI materializeArray).
-    auto names = jsObj.getPropertyNames(rt);
-    size_t n = names.size(rt);
-    for (size_t i = 0; i < n; i++) {
-        auto name = names.getValueAtIndex(rt, i).getString(rt).utf8(rt);
-        auto val = jsObj.getProperty(rt, name.c_str());
-        if (val.isObject() && val.asObject(rt).isArray(rt)) {
-            auto backing = val.asObject(rt).asArray(rt);
-            size_t m = backing.size(rt);
-            std::vector<void*> handles;
-            handles.reserve(m);
-            for (size_t j = 0; j < m; j++) {
-                handles.push_back(jsiToHandle(rt, backing.getValueAtIndex(rt, j), elementType));
-            }
-            void* h = rdma_listCreate(handles.data(), (int32_t)handles.size());
-            morphListCAbi(rt, jsObj, h, elementType);
-            return h;
-        }
-    }
-    return nullptr;
+    return rdmaMaterializeListCAbi(rt, jsObj, elementType);
 }
 
 jsi::Object createMapHandle(jsi::Runtime& rt, void* mapHandle, const std::string& keyType, const std::string& valueType) {
-    auto host = std::make_shared<MapCAbiHost>(mapHandle, keyType, valueType);
-    return jsi::Object::createFromHostObject(rt, host);
+    return rdmaCreateMapHandleCAbi(rt, mapHandle, keyType, valueType);
 }
 
 void* materializeMap(jsi::Runtime& rt, jsi::Object& jsObj, const std::string& keyType, const std::string& valueType) {
-    int kind = -1;
-    {
-        auto rdma = rt.global().getProperty(rt, "RDMA");
-        if (rdma.isObject()) {
-            auto fn = rdma.asObject(rt).getProperty(rt, "mapKind");
-            if (fn.isObject() && fn.asObject(rt).isFunction(rt)) {
-                auto res = fn.asObject(rt).asFunction(rt).call(rt, jsObj);
-                if (res.isNumber()) kind = (int)res.getNumber();
-            }
-        }
-    }
-    if (kind == 3) {
-        throw jsi::JSError(rt, "unsupported Map implementation crossing the runtime boundary; only LinkedHashMap, HashMap and EmptyMap are supported");
-    }
-    if (kind == 2) return rdma_emptyMap();
-    // Already a map handle we produced earlier.
-    if (jsObj.isHostObject(rt)) {
-        auto ns = std::dynamic_pointer_cast<MapCAbiHost>(jsObj.getHostObject(rt));
-        if (ns) return ns->mapHandle();
-    }
-    // A plugin-created map morphed into a proxy: reuse the native handle stored
-    // in the hidden `__rdma_proxy` property.
-    {
-        auto p = jsObj.getProperty(rt, "__rdma_proxy");
-        if (p.isObject()) {
-            auto h = std::dynamic_pointer_cast<MapCAbiHost>(p.asObject(rt).getHostObject(rt));
-            if (h) return h->mapHandle();
-        }
-    }
-    void* h = buildMapHandleFromJs(rt, jsObj, keyType, valueType);
-    if (h) morphMapCAbi(rt, jsObj, h, keyType, valueType);
-    return h;
+    return rdmaMaterializeMapCAbi(rt, jsObj, keyType, valueType);
 }
 
 $nsClose} // namespace rdma

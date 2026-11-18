@@ -20,8 +20,6 @@ PRODUCT="KardmanDemo"
 SIM_NAME="${IOS_SIM_NAME:-iPhone 17}"
 DERIVED="$ROOT_DIR/tests/stand/iosApp/build/ios-e2e-derived"
 
-EXCEPTIONS_1="$ROOT_DIR/tests/stand/plugin/itest/exceptions"
-EXCEPTIONS_2="$ROOT_DIR/tests/stand/plugin/itest/exceptions2"
 
 IT_DIR="$(mktemp -d)"
 VERSIONS_DIR="$IT_DIR/versions"
@@ -35,23 +33,9 @@ release() { # release <analysisJson> <polyfillOut> <internalModules>
     "$ROOT_DIR/scripts/release.sh" static-release "$1" "$VERSIONS_DIR" "$2" "$3" ""
 }
 
-# The exception crash-test plugins register their own content AFTER the alice Counter
-# and throw through it, so they are opted out of the bake (rdmaBakeInApp=false) and
-# restored afterwards. Mirrors ios-suspend-behavior.sh; the widget-default markers
-# require the alice Counter to be the rendered content.
-drop_exception_plugins() {
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_1/gradle.properties"
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_2/gradle.properties"
-}
-
-restore_exception_plugins() {
-    rm -f "$EXCEPTIONS_1/gradle.properties" "$EXCEPTIONS_2/gradle.properties"
-}
-
 LAUNCH_PID=""
 cleanup() {
     [ -n "$LAUNCH_PID" ] && kill "$LAUNCH_PID" 2>/dev/null || true
-    restore_exception_plugins
     rm -rf "$IT_DIR"
 }
 trap cleanup EXIT
@@ -85,13 +69,13 @@ step_0_static_release() {
         -PrdmaPolicyFile="$ROOT_DIR/rdma.toml"
 
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-internal" "internal"
+    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-internal" "internal"
 
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-alice" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-alice" ""
 
     run_gradle :tests:stand:kernel:user:itest:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-itest" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-itest" ""
 }
 
 # 1) Build the iOS app. The Xcode build phase invokes Gradle; we pass the scratch
@@ -145,7 +129,6 @@ main() {
     id="$(resolve_sim)"
     log="$(mktemp -t rdma-ios-default-params)"
 
-    drop_exception_plugins
     step_0_static_release
     step_1_build
     step_2_run_and_assert "$id" "$log"

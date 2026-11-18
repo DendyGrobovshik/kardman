@@ -5,7 +5,7 @@ name: release
 #
 #   gh workflow run release.yml \
 #     -f command=dynamic-release \
-#     -f analysisJson=tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json \
+#     -f analysisJson=tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json \
 #     -f versionsDir=versions \
 #     -f internalModules=internal \
 #     -f hotfix=false
@@ -18,7 +18,7 @@ on:
         required: true
         default: "dynamic-release"
       analysisJson:
-        description: "Path to the freshly emitted rdma_analysis.json"
+        description: "Path to the freshly emitted kernel_manifest_android.json"
         required: true
       versionsDir:
         description: "Directory holding versions/changelog.json"

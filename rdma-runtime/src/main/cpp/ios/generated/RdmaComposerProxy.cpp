@@ -7,19 +7,16 @@
 namespace facebook {
 namespace rdma {
 
-class ComposerProxyHost : public jsi::HostObject, public std::enable_shared_from_this<ComposerProxyHost> {
-public:
-    ComposerProxyHost() = default;
-    // The Composer never crosses the boundary: the Kotlin shim reads it from its
-    // own global, so this proxy is stateless.
-
-    jsi::Value get(jsi::Runtime& rt, const jsi::PropNameID& name) override {
-        std::string n = name.utf8(rt);
+// The Composer never crosses the boundary: the Kotlin shim reads it from its own
+// global, so this proxy is stateless — a plain object over a shared lazy prototype
+// (docs/design/runtime_rework.md §3.8): each protocol method is resolved ONCE per
+// runtime by its compile-mangled name and then found on the prototype directly.
+static jsi::Value resolveComposerMethod(jsi::Runtime& rt, const std::string& n) {
         if (n.rfind("startRestartGroup", 0) == 0) {
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "startRestartGroup"), 1,
-                [self = shared_from_this()](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
             int32_t p0 = count > 0 && args[0].isNumber() ? (int32_t)args[0].getNumber() : 0;
 
                     RdmaResult result = rdmaCallUi([p0]() -> RdmaResult {
@@ -30,7 +27,7 @@ public:
                         return RdmaResult::undefined();
                     });
                     if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
-                    return jsi::Object::createFromHostObject(r, self);
+                    return jsi::Value(r, thisVal);
                 });
         }
         if (n.rfind("endRestartGroup", 0) == 0) {
@@ -369,14 +366,12 @@ public:
         }
 
         return jsi::Value::undefined();
-    }
-
-private:
-};
+}
 
 jsi::Object makeComposerProxy(jsi::Runtime& rt) {
-    auto host = std::make_shared<ComposerProxyHost>();
-    return jsi::Object::createFromHostObject(rt, host);
+    static jsi::Object* proto = nullptr; // shared, intentionally leaked (lives as long as the runtime)
+    if (!proto) proto = new jsi::Object(rdmaLazyProto(rt, resolveComposerMethod));
+    return jsi::Object::create(rt, jsi::Value(rt, *proto));
 }
 
 } // namespace rdma

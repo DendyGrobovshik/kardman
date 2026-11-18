@@ -17,9 +17,15 @@ package com.example.plugin.alice
 
 import com.example.kernel.user.alice.Person
 import com.example.kernel.user.alice.aliceTagline
+import com.example.kernel.user.alice.describePerson
 
 class Cyborg(name: String, age: Int) : Person(name, age) {
     override fun greet(): String = "I am a cyborg!"
+    override fun power(): Int = 9000
+
+    // Throws when run (a TypeError in JS): plugin overrides are carried as expression text
+    // for now (runtime_rework §11, "plugin subclassing redesign").
+    override fun risky(): String = null.toString()
 }
 
 fun runPersonDemo() {
@@ -32,6 +38,8 @@ fun runPersonDemo() {
     griev.status = "superposition"
     println(griev.greet())
     println(griev.toString())
+    // Overrides called by native code on the Hermes thread (vtable, runtime_rework §6.4).
+    println("VT_HERMES " + describePerson(griev))
 
     obi.fight(griev)
 

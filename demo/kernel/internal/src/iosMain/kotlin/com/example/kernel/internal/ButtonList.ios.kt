@@ -19,7 +19,9 @@ package com.example.kernel.internal
 
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.UIKitView
 import platform.UIKit.UIImage
@@ -37,7 +39,10 @@ private class ButtonListTabDelegate(val onSelect: (Int) -> Unit) : NSObject(), U
 
 @Composable
 internal actual fun PlatformButtonList(labels: List<String>, actions: List<() -> Unit>, selectedIndex: Int, icons: List<String>) {
-    val delegate = remember(labels) { ButtonListTabDelegate { i -> actions[i]() } }
+    // The delegate outlives recompositions, so it must read the latest `actions`: the
+    // previous ones are composition-owned plugin blocks, released once replaced.
+    val currentActions by rememberUpdatedState(actions)
+    val delegate = remember(labels) { ButtonListTabDelegate { i -> currentActions[i]() } }
     UIKitView(
         factory = {
             UITabBar().apply {

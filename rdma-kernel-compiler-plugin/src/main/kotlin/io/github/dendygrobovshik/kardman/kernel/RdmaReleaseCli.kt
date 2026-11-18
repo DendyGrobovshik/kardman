@@ -130,6 +130,7 @@ object RdmaReleaseCli {
                 println("changed: ${dirty.changed.sorted().joinToString()}")
                 println("entries: ${result.entries.sorted().joinToString()}")
                 println("nodes:   ${result.nodes.sorted().joinToString()}")
+                checkHotfixable(analysis, dirty, result)
 
                 val files = RdmaPolyfillMaterializer.materialize(analysis, result)
                 if (files.isEmpty()) {
@@ -425,6 +426,29 @@ object RdmaReleaseCli {
         for (e in report.errors) System.err.println("ERROR: $e")
         if (report.hasErrors) {
             System.err.println("Release rejected: incompatible @RDMA signature change (only trailing defaulted parameters may be appended).")
+            kotlin.system.exitProcess(1)
+        }
+    }
+
+    /**
+     * Release gate for partial hotfixes (runtime_rework §2.7, §6.8): an F polyfill may change
+     * an existing symbol only if every call site of it runs the new version. Added symbols
+     * have no native call sites on older hosts and pass.
+     */
+    private fun checkHotfixable(analysis: RdmaAnalysis, dirty: RdmaDirtySet, result: PolyfillResult) {
+        val byFqn = analysis.declarations.associateBy { it.fqn }
+        val errors = result.entries.filter { it !in dirty.added }.sorted().mapNotNull { fqn ->
+            val decl = byFqn[fqn] ?: return@mapNotNull null
+            val reason = when (decl.kind) {
+                RdmaSymbolKind.CLASS -> "class members are not hotfixable yet"
+                RdmaSymbolKind.TOP_LEVEL_PROPERTY -> "top-level properties are not hotfixable yet"
+                else -> decl.hotfixBlocker
+            } ?: return@mapNotNull null
+            "$fqn changed, but $reason: some call sites would keep running the old version"
+        }
+        for (e in errors) System.err.println("ERROR: $e")
+        if (errors.isNotEmpty()) {
+            System.err.println("Release rejected: these changes cannot be hotfixed yet — ship them with a static release.")
             kotlin.system.exitProcess(1)
         }
     }

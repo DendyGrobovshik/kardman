@@ -139,6 +139,9 @@ class RdmaWidgetGenerator(
         else -> "Ljava/lang/Object;"
     }
 
+    private fun isPrimitive(jvmType: String): Boolean =
+        jvmType in setOf("kotlin.Int", "kotlin.Long", "kotlin.Boolean", "kotlin.Double", "kotlin.Float")
+
     private fun Param.jniType(): String = when (this) {
         is Param.Value -> jniType(jvmType)
         is Param.Ref -> refJniType(fqn)
@@ -155,6 +158,13 @@ class RdmaWidgetGenerator(
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.currentComposer
 import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
+import io.github.dendygrobovshik.kardman.runtime.rdmaRememberCallback0
+import io.github.dendygrobovshik.kardman.runtime.rdmaRememberCallback1
+import io.github.dendygrobovshik.kardman.runtime.rdmaRememberCallback2
+import io.github.dendygrobovshik.kardman.runtime.rdmaRememberCallback3
+import io.github.dendygrobovshik.kardman.runtime.rdmaRememberCallbackList
+import io.github.dendygrobovshik.kardman.runtime.rdmaRememberContent0
+import io.github.dendygrobovshik.kardman.runtime.rdmaRememberContent1
 """)
         val imports = widgets.map { it.qualifiedName }.distinct().sorted()
         for (imp in imports) {
@@ -215,7 +225,10 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
      * the public widget's own parameter types are unchanged.
      */
     private fun rawKotlinType(p: Param): String = when (p) {
-        is Param.Value -> "${kotlinType(p.jvmType)}?"
+        // A primitive crosses JNI unboxed (`jniType` gives `I`/`J`/`Z`/`D`/`F`), so its
+        // raw must be the primitive itself: an omitted argument arrives as 0 and the
+        // mask selects the default.
+        is Param.Value -> if (isPrimitive(p.jvmType)) kotlinType(p.jvmType) else "${kotlinType(p.jvmType)}?"
         is Param.Ref -> "${simpleName(p.fqn)}?"
         is Param.Content, is Param.Callback -> "Long" // block id
         is Param.ListVal -> "List<${listKotlinType(p.elemFqn)}>?"
@@ -251,11 +264,7 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
         // does not propagate the `@Composable` expected type into branches). Use definite assignment
         // so each `content = ...` assignment coerces against the declared `@Composable` type.
         if (p is Param.Content && p.hasDefault && p.defaultValue != null) {
-            val converted = when (p.arity) {
-                0 -> "{ RdmaComposeHost.nativeInvokeScopeBlock(${RdmaDefaultSupport.raw(i)}, currentComposer, 0) }"
-                1 -> "{ p0 -> RdmaComposeHost.nativeInvokeScopeBlock1(${RdmaDefaultSupport.raw(i)}, currentComposer, 0, p0) }"
-                else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
-            }
+            val converted = contentExpr(p, RdmaDefaultSupport.raw(i))
             return "    val ${p.name}: ${resolvedType(p)}\n" +
                 "    if (${RdmaDefaultSupport.omitted(i)}) {\n" +
                 "        ${p.name} = {}\n" +
@@ -266,31 +275,34 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
         return "    val ${p.name}: ${resolvedType(p)} = ${resolvedExpr(p, i)}\n"
     }
 
+    private fun contentExpr(p: Param.Content, raw: String): String = when (p.arity) {
+        0 -> "rdmaRememberContent0($raw)"
+        1 -> "rdmaRememberContent1($raw)"
+        else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
+    }
+
     private fun resolvedExpr(p: Param, i: Int): String {
         val raw = RdmaDefaultSupport.raw(i)
         // The raw is nullable (an omitted argument arrives as `null`); the resolved
         // value asserts non-null where the parameter type is non-null — a caller that
         // omits a value without a default gets a loud error instead of a null leak.
-        val rawOrAssert = if (resolvedNullable(p)) raw else "$raw!!"
+        val rawOrAssert = if (resolvedNullable(p) || (p is Param.Value && isPrimitive(p.jvmType))) raw else "$raw!!"
         val converted = when (p) {
             is Param.Value, is Param.Ref, is Param.ListVal -> rawOrAssert
-            is Param.Content -> when (p.arity) {
-                0 -> "{ RdmaComposeHost.nativeInvokeScopeBlock($raw, currentComposer, 0) }"
-                1 -> "{ p0 -> RdmaComposeHost.nativeInvokeScopeBlock1($raw, currentComposer, 0, p0) }"
-                else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
-            }
+            // Composition-owned block lambdas (docs/design/runtime_rework.md §4.4): the
+            // holder is remembered by block id, so a stable plugin lambda yields the
+            // same Kotlin lambda (the widget can be skipped) and a replaced one is
+            // released at once.
+            is Param.Content -> contentExpr(p, raw)
             is Param.Callback -> if (p.arity == 0) {
-                "{ RdmaComposeHost.nativeInvokeCallback($raw, emptyArray<Any?>()) }"
+                "rdmaRememberCallback0($raw)"
             } else {
-                val lambdaParams = (0 until p.arity).joinToString(", ") { "p$it" }
-                val array = (0 until p.arity).joinToString(", ") { "p$it" }
-                "{ $lambdaParams -> RdmaComposeHost.nativeInvokeCallback($raw, arrayOf<Any?>($array)) }"
+                if (p.arity > 3) error("Callback arity ${p.arity} is not supported (at most 3)")
+                val typeArgs = p.paramTypes.joinToString(", ") { rdmaTypeKotlin(it) }
+                "rdmaRememberCallback${p.arity}<$typeArgs>($raw, \"${RdmaCallbackDescs.joined(p.paramTypes)}\")"
             }
             is Param.ListHandle -> when (p.arity) {
-                0 -> {
-                    val access = if (resolvedNullable(p)) "$raw?" else "$raw!!"
-                    "$access.map { { RdmaComposeHost.nativeInvokeCallback(it, emptyArray<Any?>()) } }"
-                }
+                0 -> if (resolvedNullable(p)) "$raw?.let { rdmaRememberCallbackList(it) }" else "rdmaRememberCallbackList($raw!!)"
                 else -> error("List callback arity ${p.arity} is not supported (only 0)")
             }
         }
@@ -401,7 +413,7 @@ $nsClose} // namespace rdma
         val callArgs = buildList {
             addAll(params.mapIndexed { i, p -> callArgExpr(i, p) })
             if (hasDefaults) add("mask")
-        }.joinToString(", ")
+        }.joinToString("") { "$it, " } // each argument carries its separator: a widget may have none
         val cleanups = params.mapIndexedNotNull { i, p ->
             when {
                 p is Param.Value && p.jvmType == "kotlin.String" -> "        if (j_p${i}g) e->DeleteGlobalRef(j_p${i}g);\n"
@@ -422,7 +434,7 @@ ${if (hasDefaults) "                int mask = 0;\n" else ""}$extractions
                 RdmaResult result = rdmaCallUi([jvm, composer$captureList]() -> RdmaResult {
                     JNIEnv* e = getEnv(jvm);
                     if (!e) return RdmaResult::undefined();
-                    e->CallStaticVoidMethod(g_widgetCache.entriesClass, g_widgetCache.$jsName, $callArgs, composer, $changedArgs);
+                    e->CallStaticVoidMethod(g_widgetCache.entriesClass, g_widgetCache.$jsName, ${callArgs}composer, $changedArgs);
                     RdmaResult err;
                     if (captureJniError(e, err)) return err;
 $cleanups
@@ -492,11 +504,14 @@ $cleanups
                 "                jlong cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? (jlong)args[$i].getNumber() : 0;\n" +
                     maskLine()
             is Param.ListVal, is Param.ListHandle -> {
-                val elemType = if (p is Param.ListVal) p.elemFqn else "kotlin.Long"
+                val elemType = if (p is Param.ListVal) p.elemFqn else "rdma.BlockId" // block ids are plain JS numbers
                 "                jobject cpp_p$i = nullptr;\n" +
                     "                if (${notUndef()}count > $i && args[$i].isObject()) {\n" +
                     "                    auto listObj_$i = args[$i].asObject(r);\n" +
-                    "                    cpp_p$i = materializeArray(e, r, jvm, listObj_$i, \"$elemType\");\n" +
+                    "                    // materializeArray returns a local reference; the UI-thread op needs a\n" +
+                    "                    // global one (released after the op).\n" +
+                    "                    jobject local_$i = materializeArray(e, r, jvm, listObj_$i, \"$elemType\");\n" +
+                    "                    if (local_$i) { cpp_p$i = e->NewGlobalRef(local_$i); e->DeleteLocalRef(local_$i); }\n" +
                     "                }\n" +
                     maskLine()
             }

@@ -50,6 +50,12 @@ fun echoMethodList(list: List<HttpMethod>): List<HttpMethod> = list
 @RDMA
 fun defaultMethod(): HttpMethod = HttpMethod.POST
 
+/** Hands an enum to a plugin callback: the argument must cross as the entry name. */
+@RDMA
+fun withMethod(method: HttpMethod, onMethod: (HttpMethod) -> Unit) {
+    onMethod(method)
+}
+
 @RDMA
 class EnumConfig(var method: HttpMethod) {
     fun methodLabel(): String = "method=${method.name}"

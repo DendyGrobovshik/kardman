@@ -15,9 +15,8 @@
  */
 package io.github.dendygrobovshik.kardman.plugin
 
+import io.github.dendygrobovshik.kardman.types.RdmaManifest
 import io.github.dendygrobovshik.kardman.types.RdmaPluginContract
-import kotlinx.serialization.builtins.MapSerializer
-import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -28,7 +27,19 @@ data class RdmaSubclass(
     val qualifiedName: String,
     val parentSimpleName: String,
     val overrides: List<Pair<String, String>>,
+    val parentQualifiedName: String = parentSimpleName,
 )
+
+/** Generated files of earlier toolchains that the stubs replace; removed on flush. */
+private val legacyGeneratedFiles = setOf(
+    "RdmaException.kt",
+    "RdmaFunctionBridge.kt",
+    "RdmaWidgetBridge.kt",
+    "RdmaStaticBridge.kt",
+    "RdmaEnumBridge.kt",
+)
+
+const val STUB_FILE_PREFIX = "RdmaKernelStubs_"
 
 object RdmaPluginTransformState {
     var outputDir: String = ""
@@ -48,6 +59,9 @@ object RdmaPluginTransformState {
     var functions: List<RdmaPluginFunction> = emptyList()
         private set
     var enums: List<RdmaPluginEnum> = emptyList()
+        private set
+    /** The kernel manifests as read, for the stub generator (full member types). */
+    var rawManifests: List<RdmaManifest> = emptyList()
         private set
 
     private val fileTexts = mutableMapOf<String, String>()
@@ -102,18 +116,22 @@ object RdmaPluginTransformState {
         val allTypes = mutableListOf<RdmaPluginType>()
         val allFunctions = mutableListOf<RdmaPluginFunction>()
         val allEnums = mutableListOf<RdmaPluginEnum>()
+        val raw = mutableListOf<RdmaManifest>()
         for (path in manifestPaths) {
             val file = File(path)
             if (file.exists()) {
-                val manifest = RdmaPluginConfig.parseManifest(file.readText())
+                val text = file.readText()
+                val manifest = RdmaPluginConfig.parseManifest(text)
                 allTypes += manifest.classes
                 allFunctions += manifest.functions
                 allEnums += manifest.enums
+                RdmaPluginConfig.parseRawManifest(text)?.let { raw += it }
             }
         }
         types = allTypes
         functions = allFunctions
         enums = allEnums
+        rawManifests = raw
     }
 
     fun recordUsedSymbol(fqn: String) {
@@ -131,6 +149,9 @@ object RdmaPluginTransformState {
     fun isFunctionQualifiedName(fqn: String): Boolean =
         functions.any { it.qualifiedName == fqn } || fqn == runRdmaAppFqn || fqn in composeBridgeable
 
+    /** Compose entry points the JVM pass still rewrites into typed runtime-bridge calls. */
+    fun isComposeEntryPoint(fqn: String): Boolean = fqn in composeBridgeable
+
     fun isBridgeableQualifiedName(fqn: String): Boolean =
         isClassQualifiedName(fqn) || isFunctionQualifiedName(fqn) || isEnumQualifiedName(fqn)
 
@@ -138,7 +159,6 @@ object RdmaPluginTransformState {
         kernelRootPackage.isNotEmpty() && (fqn == kernelRootPackage || fqn.startsWith("$kernelRootPackage."))
 
     fun bridgeNameFor(fqn: String): String = when (fqn) {
-        runRdmaAppFqn -> "rdmaRunApp"
         "androidx.compose.runtime.mutableStateOf" -> "rdmaMutableStateOf"
         "androidx.compose.runtime.mutableIntStateOf" -> "rdmaMutableIntStateOf"
         "androidx.compose.runtime.mutableStateListOf" -> "rdmaMutableStateListOf"
@@ -147,19 +167,43 @@ object RdmaPluginTransformState {
         "androidx.compose.runtime.DisposableEffect" -> "rdmaDisposableEffect"
         "androidx.compose.runtime.LaunchedEffect" -> "rdmaLaunchedEffect"
         "androidx.compose.runtime.rememberCoroutineScope" -> "rdmaRememberCoroutineScope"
-        else -> "rdma" + fqn.substringAfterLast('.').replaceFirstChar { it.uppercase() }
+        else -> error("not a compose entry point: $fqn")
     }
 
-    fun composeFnName(simpleName: String): String = "compose" + simpleName
+    private data class ConstructorCall(val path: String, val start: Int, val end: Int, val fqn: String, val argTexts: List<String>)
 
-    // pluginId escaped for embedding as a JS string literal in the generated bridge.
-    private val pluginIdJs: String get() = pluginId.replace("\\", "\\\\").replace("\"", "\\\"")
+    private val constructorCalls = mutableListOf<ConstructorCall>()
 
-    fun staticBridgeNameFor(className: String, staticName: String): String =
-        "rdma" + className + staticName.replaceFirstChar { it.uppercase() }
+    /** A plugin-class constructor call; rewritten in [flush] if the class subclasses a kernel class. */
+    fun recordConstructorCall(path: String, start: Int, end: Int, fqn: String, argTexts: List<String>) {
+        constructorCalls += ConstructorCall(path, start, end, fqn, argTexts)
+    }
 
-    fun staticJsName(className: String, staticName: String): String =
-        className.replaceFirstChar { it.lowercase() } + staticName.replaceFirstChar { it.uppercase() }
+    /**
+     * Constructor calls of plugin subclasses of `open` kernel classes become
+     * `RDMA.createWithOverrides(...)`, typed as the parent.
+     */
+    private fun rewriteSubclassConstructorCalls() {
+        for (call in constructorCalls) {
+            val subclass = subclasses[call.fqn] ?: continue
+            recordUsedSymbol(subclass.parentQualifiedName)
+            val overridesJs = subclass.overrides.joinToString(", ") { (n, b) -> "$n: function() { return $b; }" }
+            val replacement = buildString {
+                append("js(\"\"\"RDMA.createWithOverrides('")
+                append(subclass.parentSimpleName)
+                append("', [")
+                append(call.argTexts.joinToString(", "))
+                append("], { ")
+                append(overridesJs)
+                append(" })\"\"\").unsafeCast<")
+                append(subclass.parentQualifiedName)
+                append(">()")
+            }
+            removeEditsWithin(call.path, call.start, call.end)
+            addEdit(call.path, call.start, call.end, replacement)
+        }
+        constructorCalls.clear()
+    }
 
     fun registerSubclass(qualifiedName: String, subclass: RdmaSubclass) {
         subclasses[qualifiedName] = subclass
@@ -195,24 +239,16 @@ object RdmaPluginTransformState {
     fun isCovered(path: String, start: Int, end: Int): Boolean =
         edits[path]?.any { it.start <= start && it.end >= end } == true
 
-    fun enumOrdinalBridgeName(enumSimpleName: String): String =
-        "rdma" + enumSimpleName + "Ordinal"
-
-    fun enumValueOfBridgeName(enumSimpleName: String): String =
-        "rdma" + enumSimpleName + "ValueOf"
-
-    fun enumJsName(enumSimpleName: String, member: String): String =
-        enumSimpleName.replaceFirstChar { it.lowercase() } + member.replaceFirstChar { it.uppercase() }
-
     fun flush() {
         if (outputDir.isBlank()) return
+        rewriteSubclassConstructorCalls()
         val outDir = File(outputDir)
         // Remove stale rewritten sources so deleting a plugin file does not leave
         // a dangling `*_rdma.kt` that still references removed kernel symbols. Also
         // remove the old per-plugin `RdmaException.kt` bridge, which is no longer
         // generated (uncaught exceptions now use a single global host handler).
         outDir.listFiles { f ->
-            f.isFile && (f.name.endsWith("_rdma.kt") || f.name == "RdmaException.kt")
+            f.isFile && (f.name.endsWith("_rdma.kt") || f.name in legacyGeneratedFiles || f.name.startsWith(STUB_FILE_PREFIX))
         }?.forEach { it.delete() }
         // Emit every plugin source file: edited ones get the rewrites applied, and
         // untouched files (plain data classes / helpers with no @RDMA usage) are
@@ -236,35 +272,20 @@ object RdmaPluginTransformState {
             outDir.mkdirs()
             File(outDir, outName).writeText(content)
         }
-        writeFunctionBridge(outDir)
-        writeWidgetBridge(outDir)
-        writeStaticBridge(outDir)
-        writeEnumBridge(outDir)
+        writeKernelStubs(outDir)
         writeContract(outDir)
     }
 
     /**
-     * Plugin-side enum member bridges: `<enum>Ordinal(entryName)` and
-     * `<enum>ValueOf(name)`. Entry *references* are inlined as string literals by the
-     * FIR checkers; only members that need kernel knowledge go through RDMA.
+     * The plugin's typed view of the kernel (docs/design/runtime_rework.md §5.0): one
+     * file of `inline` stubs per kernel package, so plugin source compiles to JS
+     * unchanged while emitting exactly call form v1.
      */
-    private fun writeEnumBridge(outDir: File) {
-        val bridgeFile = File(outDir, "RdmaEnumBridge.kt")
-        if (enums.isEmpty()) {
-            bridgeFile.delete()
-            return
-        }
+    private fun writeKernelStubs(outDir: File) {
+        val files = RdmaKernelStubGenerator(rawManifests, pluginId, pluginPackage, runRdmaAppFqn).generate()
+        if (files.isEmpty()) return
         outDir.mkdirs()
-        val sb = StringBuilder()
-        sb.appendLine("package $pluginPackage")
-        sb.appendLine()
-        for (e in enums) {
-            sb.appendLine("fun ${enumOrdinalBridgeName(e.simpleName)}(entry: dynamic): dynamic = js(\"RDMA\").${enumJsName(e.simpleName, "ordinal")}(entry)")
-            sb.appendLine()
-            sb.appendLine("fun ${enumValueOfBridgeName(e.simpleName)}(name: dynamic): dynamic = js(\"RDMA\").${enumJsName(e.simpleName, "valueOf")}(name)")
-            sb.appendLine()
-        }
-        bridgeFile.writeText(sb.toString())
+        for ((name, content) in files) File(outDir, name).writeText(content)
     }
 
     private fun writeContract(outDir: File) {
@@ -284,183 +305,9 @@ object RdmaPluginTransformState {
         File(outDir, "plugin.json").writeText(json.encodeToString(RdmaPluginContract.serializer(), contract))
     }
 
-    private fun writeFunctionBridge(outDir: File) {
-        val bridgeFile = File(outDir, "RdmaFunctionBridge.kt")
-        val plain = functions.filter { !it.composable }
-        val suspendMethodCount = types.sumOf { it.suspendMethods.size }
-        if (plain.isEmpty() && suspendMethodCount == 0) {
-            bridgeFile.delete()
-            return
-        }
-        outDir.mkdirs()
-        bridgeFile.writeText(buildFunctionBridge(plain))
-    }
-
-    private fun writeWidgetBridge(outDir: File) {
-        val bridgeFile = File(outDir, "RdmaWidgetBridge.kt")
-        val widgets = functions.filter { it.composable }
-        if (widgets.isEmpty()) {
-            bridgeFile.delete()
-            return
-        }
-        outDir.mkdirs()
-        bridgeFile.writeText(buildWidgetBridge(widgets))
-    }
-
-    private fun writeStaticBridge(outDir: File) {
-        val bridgeFile = File(outDir, "RdmaStaticBridge.kt")
-        val statics = types.flatMap { type -> type.statics.map { type to it } }
-        if (statics.isEmpty()) {
-            bridgeFile.delete()
-            return
-        }
-        outDir.mkdirs()
-        bridgeFile.writeText(buildStaticBridge(statics))
-    }
-
-    internal fun buildStaticBridge(statics: List<Pair<RdmaPluginType, String>>): String {
-        val sb = StringBuilder()
-        sb.appendLine("package $pluginPackage")
-        sb.appendLine()
-        for ((type, name) in statics) {
-            sb.appendLine("fun ${staticBridgeNameFor(type.simpleName, name)}(): dynamic = js(\"RDMA\").${staticJsName(type.simpleName, name)}()")
-            sb.appendLine()
-        }
-        return sb.toString()
-    }
-
-    internal fun buildFunctionBridge(plainFunctions: List<RdmaPluginFunction>): String {
-        val sb = StringBuilder()
-        sb.appendLine("package $pluginPackage")
-        sb.appendLine()
-        val suspendFns = plainFunctions.filter { it.suspend }
-        val suspendMethods = types.flatMap { t -> t.suspendMethods.map { t to it } }
-        if (suspendFns.isNotEmpty() || suspendMethods.isNotEmpty()) {
-            sb.appendLine("import kotlin.coroutines.Continuation")
-            sb.appendLine("import kotlin.coroutines.suspendCoroutine")
-            sb.appendLine("import kotlin.coroutines.resume")
-            sb.appendLine("import kotlin.coroutines.resumeWithException")
-            sb.appendLine()
-        }
-        for (fn in plainFunctions.filter { !it.suspend }) {
-            if (fn.composable) continue
-            val bridgeName = bridgeNameFor(fn.qualifiedName)
-            val params = fn.parameters.map { p ->
-                val base = when (p.kind) {
-                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE, RdmaParamKind.LIST_HANDLE -> "${p.name}: dynamic"
-                    else -> {
-                        val inner = (0 until (p.lambdaArity ?: 0)).joinToString(", ") { "dynamic" }
-                        "${p.name}: ($inner) -> dynamic"
-                    }
-                }
-                if (p.hasDefault) "$base = js(\"undefined\")" else base
-            }.joinToString(", ")
-            val args = fn.parameters.map { p ->
-                when (p.kind) {
-                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
-                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
-                }
-            }.joinToString(", ")
-            sb.appendLine("fun $bridgeName($params): dynamic {")
-            sb.appendLine("    rdmaListKindInstalled")
-            sb.appendLine("    return js(\"RDMA\").${fn.name}($args)")
-            sb.appendLine("}")
-            sb.appendLine()
-        }
-        for (fn in suspendFns) {
-            val bridgeName = bridgeNameFor(fn.qualifiedName)
-            val params = fn.parameters.map { p ->
-                val base = when (p.kind) {
-                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE, RdmaParamKind.LIST_HANDLE -> "${p.name}: dynamic"
-                    else -> {
-                        val inner = (0 until (p.lambdaArity ?: 0)).joinToString(", ") { "dynamic" }
-                        "${p.name}: ($inner) -> dynamic"
-                    }
-                }
-                if (p.hasDefault) "$base = js(\"undefined\")" else base
-            }.joinToString(", ")
-            val args = fn.parameters.map { p ->
-                when (p.kind) {
-                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE -> "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
-                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
-                }
-            }.joinToString(", ")
-            sb.appendLine("suspend fun $bridgeName($params): dynamic {")
-            sb.appendLine("    return suspendCoroutine { cont: Continuation<Any?> ->")
-            sb.appendLine("        val id = js(\"RDMA\").registerContinuation(")
-            sb.appendLine("            { v: dynamic -> cont.resume(v) },")
-            sb.appendLine("            { e: dynamic -> cont.resumeWithException(e) }")
-            sb.appendLine("        )")
-            sb.appendLine("        js(\"RDMA\")._${fn.name}Async(id${if (args.isEmpty()) "" else ", $args"})")
-            sb.appendLine("    }")
-            sb.appendLine("}")
-            sb.appendLine()
-        }
-        for ((type, m) in suspendMethods) {
-            val bridgeName = methodBridgeName(type.simpleName, m.name)
-            val params = listOf("self: dynamic") + (0 until m.paramCount).map { i ->
-                "p$i: dynamic" + (if (m.defaulted.getOrElse(i) { false }) " = js(\"undefined\")" else "")
-            }
-            val args = listOf("self") + (0 until m.paramCount).map { "p$it" }
-            sb.appendLine("suspend fun $bridgeName(${params.joinToString(", ")}): dynamic {")
-            sb.appendLine("    return suspendCoroutine { cont: Continuation<Any?> ->")
-            sb.appendLine("        val id = js(\"RDMA\").registerContinuation(")
-            sb.appendLine("            { v: dynamic -> cont.resume(v) },")
-            sb.appendLine("            { e: dynamic -> cont.resumeWithException(e) }")
-            sb.appendLine("        )")
-            sb.appendLine("        js(\"RDMA\")._${type.simpleName}_${m.name}Async(id${if (args.isEmpty()) "" else ", ${args.joinToString(", ")}"})")
-            sb.appendLine("    }")
-            sb.appendLine("}")
-            sb.appendLine()
-        }
-        return sb.toString()
-    }
-
-    fun methodBridgeName(className: String, methodName: String): String =
-        "rdma" + className + methodName.replaceFirstChar { it.uppercase() }
-
-    internal fun buildWidgetBridge(widgets: List<RdmaPluginFunction>): String {
-        val sb = StringBuilder()
-        sb.appendLine("package $pluginPackage")
-        sb.appendLine()
-        sb.appendLine("import androidx.compose.runtime.Composable")
-        sb.appendLine()
-        for (fn in widgets) {
-            if (!fn.composable) continue
-            val bridgeName = bridgeNameFor(fn.qualifiedName)
-            val params = fn.parameters.joinToString(", ") { p ->
-                if (p.hasDefault) {
-                    "${p.name}: ${p.kotlinType} = js(\"undefined\")"
-                } else {
-                    "${p.name}: ${p.kotlinType}"
-                }
-            }
-            val args = fn.parameters.joinToString(", ") { p ->
-                when (p.kind) {
-                    RdmaParamKind.VALUE, RdmaParamKind.LIST_VALUE -> p.name
-                    RdmaParamKind.LIST_HANDLE ->
-                        if (p.hasDefault) {
-                            "(if (${p.name} === js(\"undefined\")) js(\"undefined\") else ${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") })"
-                        } else {
-                            "${p.name}.map { js(\"RDMA\").registerBlock(it, \"$pluginIdJs\") }"
-                        }
-                    else -> "js(\"RDMA\").registerBlock(${p.name}, \"$pluginIdJs\")"
-                }
-            }
-            val composeName = composeFnName(fn.name)
-            sb.appendLine("@Composable")
-            sb.appendLine("fun $bridgeName($params) {")
-            sb.appendLine("    js(\"RDMA\").$composeName($args)")
-            sb.appendLine("}")
-            sb.appendLine()
-        }
-        return sb.toString()
-    }
-
     fun reset() {
         fileTexts.clear()
         edits.clear()
+        constructorCalls.clear()
     }
 }

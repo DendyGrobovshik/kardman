@@ -50,7 +50,12 @@ object RdmaSignatureClassifier {
         return Report(errors)
     }
 
-    private fun classifyCallable(fqn: String, oldSig: List<RdmaParameterSignature>, newSig: List<RdmaParameterSignature>): List<String> {
+    private fun classifyCallable(fqn: String, oldSigRaw: List<RdmaParameterSignature>, newSigRaw: List<RdmaParameterSignature>): List<String> {
+        // The committed baseline keeps only (name, type, hasDefault) — `RdmaSignatureEntry` —
+        // so the default-expression text is not part of the comparison: changing a default
+        // value is compatible (a MODIFY, handled by the hash diff).
+        val oldSig = oldSigRaw.map { it.copy(defaultValue = null) }
+        val newSig = newSigRaw.map { it.copy(defaultValue = null) }
         // Identical: a body / default-value-only change (handled by the hash diff as MODIFY).
         if (oldSig == newSig) return emptyList()
         // Appending trailing *defaulted* parameters is compatible.

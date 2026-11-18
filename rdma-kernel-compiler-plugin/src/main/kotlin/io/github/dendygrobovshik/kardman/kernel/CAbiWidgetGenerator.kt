@@ -137,6 +137,7 @@ package $widgetEntriesPackage
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.currentComposer
+import io.github.dendygrobovshik.kardman.runtime.RdmaBlockRef
 import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 import io.github.dendygrobovshik.kardman.runtime.rdmaRegisterFunction
 import io.github.dendygrobovshik.kardman.runtime.rdmaToKString
@@ -181,6 +182,7 @@ import kotlinx.cinterop.staticCFunction
         }
         for (fn in widgets) {
             if (classify(fn).any { it.hasDefault }) out.write(implStub(fn))
+            out.write(trampoline(fn))
         }
         out.write(registration(widgets))
         out.close()
@@ -191,13 +193,18 @@ import kotlinx.cinterop.staticCFunction
         return classify(fn).mapNotNull { p -> helper(cName, p) }.joinToString("")
     }
 
+    // Each helper wraps the block id into a holder (docs/design/runtime_rework.md §4):
+    // the lambda keeps the plugin block alive while the composition holds the lambda,
+    // and callbacks carry their parameter descriptors (§4.5).
     private fun helper(cName: String, p: Param): String? = when (p) {
         is Param.Content -> {
             when (p.arity) {
-                0 -> "fun ${cName}_${p.name}(${p.idName}: Long): @Composable () -> Unit = { " +
-                    "RdmaComposeHost.nativeInvokeScopeBlock(${p.idName}, currentComposer, 0) }\n"
-                1 -> "fun ${cName}_${p.name}(${p.idName}: Long): @Composable (Int) -> Unit = { p0 -> " +
-                    "RdmaComposeHost.nativeInvokeScopeBlock1(${p.idName}, currentComposer, 0, p0) }\n"
+                0 -> "fun ${cName}_${p.name}(${p.idName}: Long): @Composable () -> Unit {\n" +
+                    "    val ref = RdmaBlockRef(${p.idName})\n" +
+                    "    return { RdmaComposeHost.nativeInvokeScopeBlock(ref.id, currentComposer, 0); ref.touch() }\n}\n"
+                1 -> "fun ${cName}_${p.name}(${p.idName}: Long): @Composable (Int) -> Unit {\n" +
+                    "    val ref = RdmaBlockRef(${p.idName})\n" +
+                    "    return { p0 -> RdmaComposeHost.nativeInvokeScopeBlock1(ref.id, currentComposer, 0, p0); ref.touch() }\n}\n"
                 else -> error("Content lambda arity ${p.arity} is not supported (only 0 or 1)")
             }
         }
@@ -205,20 +212,26 @@ import kotlinx.cinterop.staticCFunction
             val ret = if (p.arity == 0) "() -> Unit"
             else "(" + p.paramTypes.joinToString(", ") { refKotlinType(it) } + ") -> Unit"
             val lambda = if (p.arity == 0) {
-                "{ RdmaComposeHost.nativeInvokeCallback(${p.idName}, emptyArray<Any?>()) }"
+                "{ RdmaComposeHost.nativeInvokeCallback(ref.id, emptyArray<Any?>()); ref.touch() }"
             } else {
                 val params = (0 until p.arity).joinToString(", ") { "p$it" }
                 val arr = (0 until p.arity).joinToString(", ") { "p$it" }
-                "{ $params -> RdmaComposeHost.nativeInvokeCallback(${p.idName}, arrayOf<Any?>($arr)) }"
+                "{ $params -> RdmaComposeHost.nativeInvokeCallback(ref.id, arrayOf<Any?>($arr)); ref.touch() }"
             }
-            "fun ${cName}_${p.name}(${p.idName}: Long): $ret = $lambda\n"
+            val descs = if (p.arity == 0) "" else RdmaCallbackDescs.joined(p.paramTypes)
+            "fun ${cName}_${p.name}(${p.idName}: Long): $ret {\n" +
+                "    val ref = RdmaBlockRef(${p.idName}).withParamDescs(\"$descs\")\n" +
+                "    return $lambda\n}\n"
         }
         is Param.ListVal -> {
             val elemKotlin = refKotlinType(p.elemType)
             "fun ${cName}_${p.name}(${p.name}: COpaquePointer): List<$elemKotlin> = ${p.name}.obj<List<$elemKotlin>>()\n"
         }
         is Param.ListHandle -> when (p.arity) {
-            0 -> "fun ${cName}_${p.name}(${p.name}: COpaquePointer): List<() -> Unit> = ${p.name}.obj<List<Long>>().map { { RdmaComposeHost.nativeInvokeCallback(it, emptyArray<Any?>()) } }\n"
+            0 -> "fun ${cName}_${p.name}(${p.name}: COpaquePointer): List<() -> Unit> = ${p.name}.obj<List<Long>>().map { id ->\n" +
+                "    val ref = RdmaBlockRef(id)\n" +
+                "    val fn: () -> Unit = { RdmaComposeHost.nativeInvokeCallback(ref.id, emptyArray<Any?>()); ref.touch() }\n" +
+                "    fn\n}\n"
             else -> error("List callback arity ${p.arity} is not supported (only 0)")
         }
         else -> null
@@ -255,6 +268,20 @@ import kotlinx.cinterop.staticCFunction
         }
         val implArgs = params.joinToString(", ") { it.name }
         return "fun $cName($sig) {\n$resolutions    ${cName}_impl($implArgs)\n}\n"
+    }
+
+    /**
+     * A source-level `@Composable` trampoline to the kernel widget. The glue is compiled by the
+     * app's iOS compilation, where the kernel widget comes from a dependency in its source
+     * signature; the compose compiler lowers this trampoline (and its call of the widget), and
+     * [CAbiWidgetIrGenerator] calls the lowered trampoline from the C entry.
+     */
+    private fun trampoline(fn: RdmaFunctionInfo): String {
+        val params = classify(fn)
+        val cName = prefix + "compose" + fn.name
+        val sig = params.joinToString(", ") { "${it.name}: ${resolvedType(it)}" }
+        val args = params.joinToString(", ") { "${it.name} = ${it.name}" }
+        return "@Composable\nfun ${cName}_widget($sig) {\n    ${fn.qualifiedName}($args)\n}\n"
     }
 
     private fun implStub(fn: RdmaFunctionInfo): String {
@@ -335,7 +362,9 @@ import kotlinx.cinterop.staticCFunction
             (if (hasDefaults) (if (params.isNotEmpty()) ", " else "") + "int32_t" else "")
         val args = params.joinToString(", ") { it.idName } +
             (if (hasDefaults) (if (params.isNotEmpty()) ", " else "") + "mask" else "")
-        return "inline void $cName($decl) { ((void (*)($types))rdma_lookupFunction(\"$cName\"))($args); }"
+        // Cached registry lookup: once per function, not per call (runtime_rework §3.9).
+        return "inline void $cName($decl) { static auto fn = (void (*)($types))rdma_lookupFunction(\"$cName\"); " +
+            "if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)($types))rdma_lookupFunction(\"$cName\"); fn($args); }"
     }
 
     // ---------------------------------------------------------------- C++ glue
@@ -474,7 +503,7 @@ ${if (hasDefaults) "                int32_t mask = 0;\n" else ""}$extractions
                 "                int64_t cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? (int64_t)args[$i].getNumber() : 0;\n" +
                     maskLine()
             is Param.ListVal, is Param.ListHandle -> {
-                val elemType = if (p is Param.ListVal) elemTypeFqn(p.elemType) else "kotlin.Long"
+                val elemType = if (p is Param.ListVal) elemTypeFqn(p.elemType) else "rdma.BlockId" // block ids are plain JS numbers
                 "                void* cpp_p$i = nullptr;\n" +
                     "                if (${notUndef()}count > $i && args[$i].isObject()) {\n" +
                     "                    auto listObj_$i = args[$i].asObject(r);\n" +

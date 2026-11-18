@@ -28,8 +28,11 @@ import androidx.compose.runtime.remember
  */
 @Composable
 fun sideEffect(blockId: Long) {
+    // The composition holds the block while this call site keeps it (runtime_rework §4).
+    val ref = rdmaRememberBlock(blockId)
     SideEffect {
-        RdmaComposeHost.nativeInvokeCallback(blockId, emptyArray<Any?>())
+        RdmaComposeHost.nativeInvokeCallback(ref.id, emptyArray<Any?>())
+        ref.touch()
     }
 }
 

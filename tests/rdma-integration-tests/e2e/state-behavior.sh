@@ -12,10 +12,8 @@ set -euo pipefail
 # Driven against the in-repo stand on an Android emulator.
 #
 # The stand renders the last plugin content registered; the state probe lives in
-# the alice/counter module (StateProbe.kt). The exception crash-test plugins
-# (itest/exceptions{,2}) throw through `content` and kill the app before these
-# markers print, so they are temporarily opted out of the bake (rdmaBakeInApp=false)
-# and restored afterwards — the same mechanism suspend-behavior.sh uses.
+# the alice/counter module (StateProbe.kt). The crash-test plugins
+# (itest/exceptions{,2}) are not baked into the stand by default.
 #
 #   ./tests/rdma-integration-tests/e2e/state-behavior.sh
 #
@@ -27,8 +25,6 @@ GRADLE="$ROOT_DIR/gradlew"
 
 APP_ID="org.example"
 
-EXCEPTIONS_1="$ROOT_DIR/tests/stand/plugin/itest/exceptions"
-EXCEPTIONS_2="$ROOT_DIR/tests/stand/plugin/itest/exceptions2"
 
 IT_DIR="$(mktemp -d)"
 VERSIONS_DIR="$IT_DIR/versions"
@@ -53,17 +49,7 @@ release() { # release <analysisJson> <polyfillOut> <internalModules>
     "$ROOT_DIR/scripts/release.sh" static-release "$1" "$VERSIONS_DIR" "$2" "$3" ""
 }
 
-drop_exception_plugins() {
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_1/gradle.properties"
-    echo "rdmaBakeInApp=false" > "$EXCEPTIONS_2/gradle.properties"
-}
-
-restore_exception_plugins() {
-    rm -f "$EXCEPTIONS_1/gradle.properties" "$EXCEPTIONS_2/gradle.properties"
-}
-
 cleanup() {
-    restore_exception_plugins
     rm -rf "$IT_DIR"
 }
 trap cleanup EXIT
@@ -76,10 +62,10 @@ step_0_static_release() {
         -PrdmaPolicyFile="$ROOT_DIR/rdma.toml"
 
     run_gradle :tests:stand:kernel:internal:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-internal" "internal"
+    release "$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-internal" "internal"
 
     run_gradle :tests:stand:kernel:user:alice:compileAndroidMain
-    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/rdma_analysis.json" "$IT_DIR/polyfill-alice" ""
+    release "$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json" "$IT_DIR/polyfill-alice" ""
 }
 
 # 1) Build and launch the app.
@@ -189,7 +175,6 @@ main() {
     adb_dev
     mkdir -p "$VERSIONS_DIR"
 
-    drop_exception_plugins
     step_0_static_release
     step_1_build_and_launch_app
     step_2_scalars
