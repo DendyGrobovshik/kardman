@@ -23,6 +23,6 @@ expect fun runtimeReady(): Boolean
 /** Monotonically increasing content-registration version (drives preview re-composition). */
 expect fun contentVersion(): Int
 
-/** Renders the currently registered plugin content (`RdmaComposeHost.Content()`). */
+/** Renders the generated plugin's component (`RdmaComposeHost.Component("generated/main")`). */
 @Composable
 expect fun PreviewContent()

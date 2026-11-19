@@ -56,7 +56,7 @@ is an `Error` whose `name`/`message` mirror the original, `stack` is the native 
 
 `rdmaUncaughtException(info, pluginId)` delivers fire-and-forget errors to one handler set by
 the app (`RdmaBridge.setUncaughtExceptionHandler`), with the plugin id recorded at
-`registerBlock`/`registerContent`. Without a handler the full chain is logged (`LOGW`); the
+`registerBlock`/`registerComponent`. Without a handler the full chain is logged (`LOGW`); the
 app does not crash. There is no per-plugin handler.
 
 ## Platforms

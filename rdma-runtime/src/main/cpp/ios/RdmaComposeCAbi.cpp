@@ -21,10 +21,12 @@
 #include "RdmaVtable.h"
 #include "RdmaLog.h"
 #include "RdmaBlocks.h"
+#include "RdmaIdentity.h"
 
 #include <jsi/jsi.h>
 #include <string>
 #include <vector>
+#include <mutex>
 #include <unordered_map>
 #include <atomic>
 #include <utility>
@@ -57,7 +59,6 @@ void* rdma_lookupFunction(const char* name) {
 namespace facebook {
 namespace rdma {
 
-static std::shared_ptr<jsi::Function> g_content;
 static std::atomic<int> g_contentVersion{0};
 std::shared_ptr<jsi::Object> g_empty;
 // Plugin JS blocks referenced by id live in the shared registry (RdmaBlocks.h).
@@ -219,9 +220,20 @@ static void* boxStateValueCAbi(jsi::Runtime& rt, const jsi::Value& v, const Type
     throwTypeErrorCAbi(rt, "value does not fit the state type " + d.serialize());
 }
 
+// A Compose key (docs/internals/compose_protocol.md#object-keys): primitives are boxed and
+// compare by value; a kernel object or a state is the native object itself (its `equals`);
+// any other JS object crosses as its identity, so the same object is "unchanged".
+void* rdmaBoxComposeKeyCAbi(jsi::Runtime& rt, const jsi::Value& v) {
+    if (!v.isObject()) return boxJsiValue(rt, v);
+    if (void* state = stateProxyHandle(rt, v)) return rdma_cloneHandle(state);
+    if (auto objState = rdmaStateAs<RdmaObjectNativeStateCAbi>(rt, v, RdmaStateKind::Object)) {
+        if (objState->handle()) return rdma_cloneHandle(objState->handle());
+    }
+    return rdma_boxIdentityKey(rdmaJsIdentity(rt, v.asObject(rt)));
+}
+
 static void* boxKeyForRemember(jsi::Runtime& rt, const jsi::Value& v) {
-    if (v.isObject()) return rdma_boxObject();
-    return boxJsiValue(rt, v);
+    return rdmaBoxComposeKeyCAbi(rt, v);
 }
 
 // The channel type descriptor a state handle carries (empty for a remembered raw
@@ -738,20 +750,6 @@ void* jsiToHandle(jsi::Runtime& rt, const jsi::Value& v, const std::string& elem
 
 // ------------------------------------------------------------- content/scope
 
-void invokeRegisteredContent(jsi::Runtime& rt) {
-    if (!g_content) return;
-    bool prevInComposition = g_inComposition;
-    g_inComposition = true;
-    jsi::Object proxy = makeComposerProxy(rt);
-    try {
-        g_content->call(rt, proxy, 0);
-    } catch (...) {
-        g_inComposition = prevInComposition;
-        throw;
-    }
-    g_inComposition = prevInComposition;
-}
-
 void invokeScopeBlock(jsi::Runtime& rt, int64_t blockId, int32_t changed) {
     auto block = rdmaBlockGet(blockId);
     if (!block) return;
@@ -775,6 +773,80 @@ void invokeScopeBlock1(jsi::Runtime& rt, int64_t blockId, int32_t changed, int32
     jsi::Object proxy = makeComposerProxy(rt);
     try {
         block->call(rt, jsi::Value((double)p1), proxy, changed);
+    } catch (...) {
+        g_inComposition = prevInComposition;
+        throw;
+    }
+    g_inComposition = prevInComposition;
+}
+
+// ------------------------------------------------------------- components
+
+namespace {
+struct ComponentRegistry {
+    std::mutex mutex;
+    std::unordered_map<std::string, int64_t> ids; // name -> retained block
+};
+ComponentRegistry& componentRegistry() {
+    static ComponentRegistry r;
+    return r;
+}
+using ComponentsChangedFn = void (*)();
+} // namespace
+
+int64_t rdmaComponentBlockCAbi(const std::string& name) {
+    auto& reg = componentRegistry();
+    std::lock_guard<std::mutex> lk(reg.mutex);
+    auto it = reg.ids.find(name);
+    return it == reg.ids.end() ? 0 : it->second;
+}
+
+static void registerComponentBlock(jsi::Runtime& rt, const std::string& name, const std::string& paramDescs,
+                                   const jsi::Function& fn, const std::string& pluginId) {
+    int64_t id = rdmaBlockRegisterPlugin(rt, fn, pluginId);
+    rdmaBlockSetParamDescs(id, paramDescs);
+    rdmaBlockRetain(id);
+    int64_t old = 0;
+    {
+        auto& reg = componentRegistry();
+        std::lock_guard<std::mutex> lk(reg.mutex);
+        auto it = reg.ids.find(name);
+        if (it != reg.ids.end()) old = it->second;
+        reg.ids[name] = id;
+    }
+    if (old) rdmaBlockRelease(old);
+    // Hosts that want new code at once (not at the next appearance) key on this.
+    g_contentVersion.fetch_add(1, std::memory_order_release);
+    LOGI("Component registered: %s", name.c_str());
+    static auto changed = (ComponentsChangedFn)rdma_lookupFunction("rdma_onComponentsChanged");
+    if (changed) changed();
+}
+
+// Runs component block `blockId` against the current composer (held by the Kotlin host).
+// CONSUMES `argsHandle`.
+void invokeComponentCAbi(jsi::Runtime& rt, int64_t blockId, void* argsHandle) {
+    auto block = rdmaBlockGet(blockId);
+    if (!block) {
+        if (argsHandle) rdma_disposeStableRef(argsHandle);
+        return;
+    }
+    std::vector<std::string> descs = rdmaBlockParamDescs(blockId);
+    std::vector<jsi::Value> callArgs;
+    if (argsHandle) {
+        int32_t n = rdma_arraySize(argsHandle);
+        for (int32_t i = 0; i < n; i++) {
+            void* elem = rdma_arrayGet(argsHandle, i);
+            const bool typed = (size_t)i < descs.size() && !descs[(size_t)i].empty();
+            callArgs.push_back(typed ? rdmaWrapTypedHandleCAbi(rt, elem, descs[(size_t)i]) : wrapAnyCAbi(rt, nullptr, elem));
+        }
+        rdma_disposeStableRef(argsHandle);
+    }
+    bool prevInComposition = g_inComposition;
+    g_inComposition = true;
+    callArgs.push_back(jsi::Value(rt, makeComposerProxy(rt)));
+    callArgs.push_back(jsi::Value(0));
+    try {
+        block->call(rt, static_cast<const jsi::Value*>(callArgs.data()), callArgs.size());
     } catch (...) {
         g_inComposition = prevInComposition;
         throw;
@@ -868,6 +940,59 @@ static void* callJsTypedCAbi(jsi::Runtime& rt, const std::shared_ptr<jsi::Functi
     return jsiToHandle(rt, result, resultDesc);
 }
 
+// ------------------------------------------- kernel lambdas handed to JS
+
+namespace {
+// Owns the StableRef of a kernel lambda wrapped as a JS host function; released when
+// Hermes collects the JS function.
+struct KotlinLambdaHolder {
+    void* handle;
+    explicit KotlinLambdaHolder(void* h) : handle(h) {}
+    KotlinLambdaHolder(const KotlinLambdaHolder&) = delete;
+    KotlinLambdaHolder& operator=(const KotlinLambdaHolder&) = delete;
+    ~KotlinLambdaHolder() {
+        if (handle) rdma_disposeStableRef(handle);
+    }
+};
+using FunctionBlockIdFn = int64_t (*)(void*);
+using InvokeFunctionFn = void* (*)(void*, int32_t, void**);
+} // namespace
+
+jsi::Value rdmaWrapNativeFunctionCAbi(jsi::Runtime& rt, void* handle, const std::string& paramDescs,
+                                      const std::string& resultDesc) {
+    if (!handle) return jsi::Value::null();
+    static auto blockIdOf = (FunctionBlockIdFn)rdma_lookupFunction("rdma_functionBlockId");
+    static auto invoke = (InvokeFunctionFn)rdma_lookupFunction("rdma_invokeFunction");
+    // A plugin lambda that went through the kernel comes back as the plugin's function.
+    if (int64_t id = blockIdOf ? blockIdOf(handle) : 0) {
+        if (auto js = rdmaBlockGet(id)) {
+            rdma_disposeStableRef(handle);
+            return jsi::Value(rt, *js);
+        }
+    }
+    std::vector<std::string> descs = splitSlotDescs(paramDescs);
+    if (descs.size() > 3 || !invoke) {
+        rdma_disposeStableRef(handle);
+        throw jsi::JSError(rt, "a kernel lambda with " + std::to_string(descs.size()) + " parameters cannot cross (at most 3)");
+    }
+    auto holder = std::make_shared<KotlinLambdaHolder>(handle);
+    return jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "rdmaKernelLambda"), (unsigned)descs.size(),
+        [holder, descs, resultDesc](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            std::vector<void*> argv(descs.size(), nullptr);
+            for (size_t i = 0; i < descs.size(); i++) {
+                argv[i] = i < count ? jsiToHandle(r, args[i], descs[i]) : nullptr;
+            }
+            void* res = invoke(holder->handle, (int32_t)argv.size(), argv.empty() ? nullptr : argv.data());
+            checkKotlinError(r);
+            if (resultDesc.empty() || resultDesc == "kotlin.Unit") {
+                if (res) rdma_disposeStableRef(res);
+                return jsi::Value::undefined();
+            }
+            return rdmaWrapTypedHandleCAbi(r, res, resultDesc);
+        });
+}
+
 // ------------------------------------------- global uncaught handler (H2)
 
 // Thread-local buffers backing the C strings passed to the Kotlin dispatcher; they
@@ -905,17 +1030,18 @@ void rdmaInstallUncaughtHandlerCAbi() {
 void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
     jsi::Object rdma(rt);
 
-    auto registerFn = jsi::Function::createFromHostFunction(
-        rt, jsi::PropNameID::forAscii(rt, "registerContent"), 1,
+    auto registerComponentFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "registerComponent"), 4,
         [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-            if (count > 0 && args[0].isObject() && args[0].asObject(r).isFunction(r)) {
-                g_content = std::make_shared<jsi::Function>(args[0].asObject(r).asFunction(r));
-                g_contentVersion.fetch_add(1, std::memory_order_release);
-                LOGI("Content registered");
+            if (count < 3 || !args[0].isString() || !args[2].isObject() || !args[2].asObject(r).isFunction(r)) {
+                throw jsi::JSError(r, "registerComponent(name, paramDescs, content, pluginId): bad arguments");
             }
+            std::string descs = args[1].isString() ? args[1].getString(r).utf8(r) : "";
+            std::string pid = (count > 3 && args[3].isString()) ? args[3].getString(r).utf8(r) : "";
+            registerComponentBlock(r, args[0].getString(r).utf8(r), descs, args[2].asObject(r).asFunction(r), pid);
             return jsi::Value::undefined();
         });
-    rdma.setProperty(rt, "registerContent", std::move(registerFn));
+    rdma.setProperty(rt, "registerComponent", std::move(registerComponentFn));
 
     auto setEmptyFn = jsi::Function::createFromHostFunction(
         rt, jsi::PropNameID::forAscii(rt, "setComposerEmpty"), 1,
@@ -1063,6 +1189,18 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
             return jsi::Value((double)id);
         });
     rdma.setProperty(rt, "registerContinuation", std::move(registerContinuationFn));
+
+    // The plugin cancelled the coroutine waiting for completion `id`: cancel the kernel call.
+    auto cancelContinuationFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "cancelContinuation"), 1,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 1 || !args[0].isNumber()) return jsi::Value::undefined();
+            using CancelFn = void (*)(int64_t);
+            static auto cancel = (CancelFn)rdma_lookupFunction("rdma_cancelSuspend");
+            if (cancel) cancel((int64_t)args[0].getNumber());
+            return jsi::Value::undefined();
+        });
+    rdma.setProperty(rt, "cancelContinuation", std::move(cancelContinuationFn));
 
     auto sideEffectFn = jsi::Function::createFromHostFunction(
         rt, jsi::PropNameID::forAscii(rt, "sideEffect"), 1,
@@ -1250,15 +1388,6 @@ static void* callJsForCAbi(void* argsHandle, int32_t* status, const std::string&
 
 extern "C" {
 
-void rdma_nativeInvokeContent() {
-    using namespace facebook::rdma;
-    RdmaExceptionInfo err = rdmaCallJs([] {
-        facebook::jsi::Runtime* rt = getRdmaRuntime();
-        if (rt) invokeRegisteredContent(*rt);
-    });
-    if (!err.empty()) storeCaughtError(err);
-}
-
 void rdma_nativeInvokeScopeBlock(int64_t blockId, int32_t changed) {
     using namespace facebook::rdma;
     RdmaExceptionInfo err = rdmaCallJs([blockId, changed] {
@@ -1273,6 +1402,20 @@ void rdma_nativeInvokeScopeBlock1(int64_t blockId, int32_t changed, int32_t p1) 
     RdmaExceptionInfo err = rdmaCallJs([blockId, changed, p1] {
         facebook::jsi::Runtime* rt = getRdmaRuntime();
         if (rt) invokeScopeBlock1(*rt, blockId, changed, p1);
+    });
+    if (!err.empty()) storeCaughtError(err);
+}
+
+int64_t rdma_componentBlock(const char* name) {
+    return name ? facebook::rdma::rdmaComponentBlockCAbi(name) : 0;
+}
+
+void rdma_nativeInvokeComponent(int64_t blockId, void* argsHandle) {
+    using namespace facebook::rdma;
+    RdmaExceptionInfo err = rdmaCallJs([blockId, argsHandle] {
+        facebook::jsi::Runtime* rt = getRdmaRuntime();
+        if (rt) invokeComponentCAbi(*rt, blockId, argsHandle);
+        else if (argsHandle) rdma_disposeStableRef(argsHandle);
     });
     if (!err.empty()) storeCaughtError(err);
 }

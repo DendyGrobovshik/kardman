@@ -18,7 +18,7 @@ package com.example.plugin.itest
 import androidx.compose.runtime.Composable
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 import com.example.kernel.user.itest.itestFireAndForget
 import com.example.kernel.user.itest.itestThrow
 
@@ -44,7 +44,7 @@ fun Exceptions2Content() {
         // deliberately throws to exercise two boundary behaviours at once:
         //
         //  1. S1a (JS -> host, sync): the content body throws, the bridge rethrows
-        //     RdmaException on the host from nativeInvokeContent, and MainActivity
+        //     RdmaException on the host from nativeInvokeComponent, and MainActivity
         //     catches it around a plain (non-@Composable) call.
         //  2. Double crossing (host -> JS -> host): itestThrow() makes the HOST throw;
         //     the bridge turns it into a JS Error carrying the host exception in
@@ -61,5 +61,5 @@ fun Exceptions2Content() {
 
 fun main() {
     runExceptionScenarios()
-    runRdmaApp { Exceptions2Content() }
+    registerComponent("main") { Exceptions2Content() }
 }

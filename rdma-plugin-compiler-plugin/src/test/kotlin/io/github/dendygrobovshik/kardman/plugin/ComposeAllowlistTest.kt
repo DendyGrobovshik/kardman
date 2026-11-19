@@ -60,7 +60,7 @@ class ComposeAllowlistTest {
     fun `allows non-compose symbols`() {
         val allowed = listOf(
             "com.example.kernel.Text",
-            "com.example.kernel.runRdmaApp",
+            "com.example.kernel.registerComponent",
             "kotlin.collections.List",
         )
         for (fqn in allowed) {

@@ -114,6 +114,23 @@ step_6_collection_idioms() {
     wait_logcat "RdmaRuntime" "LAMBDA_CTOR: 1,2,3"
     wait_logcat "RdmaRuntime" "LAMBDA_METHOD: a"
     wait_logcat "RdmaRuntime" "LAMBDA_METHOD: b"
+    # Lambdas as values: results, kernel lambdas, properties, identity, background calls.
+    wait_logcat "RdmaRuntime" "LAMBDA_RESULT: \\[#7\\] twice=18"
+    wait_logcat "RdmaRuntime" "KERNEL_LAMBDA: 15 Hi, Ann"
+    wait_logcat "RdmaRuntime" "LAMBDA_PROP: \\[x1\\] same=true call=x2"
+    wait_logcat "RdmaRuntime" "LAMBDA_EVENT: ping"
+    wait_logcat "RdmaRuntime" "LAMBDA_BG: x9"
+    # A component with parameters rendered twice by the host, each with its own state.
+    wait_logcat "RdmaRuntime" "CARD: a 1 state=a#1"
+    wait_logcat "RdmaRuntime" "CARD: b 2 state=b#2"
+    # Modifiers (@RDMA class): the chain applies, scope elements only in their container, an
+    # equal chain lets the widget skip, a changed one recomposes it, a click reaches the plugin.
+    wait_logcat "RdmaRuntime" "MOD_APPLIED: column=\\[padding(4.0) background testTag\\] stable=\\[weight(1.0)@Row clickable testTag\\] noscope=\\[weight(ignored) testTag\\] button=\\[padding(2.0) testTag\\]"
+    wait_logcat "RdmaRuntime" "MOD_SKIP: stable=+0 colstable=+0 changing=+3"
+    wait_logcat "RdmaRuntime" "MOD_CLICK: clicked=true clicks=1"
+    # Object keys: when the parent recomposes, the same plugin object, an equal kernel object
+    # and the same content lambda count as unchanged (no rerun, no recompute, no restart).
+    wait_logcat "RdmaRuntime" "KEYS: body=+3 itemRow=+0 rememberItem=+0 rememberKernel=+0 effect=+0 row=+0"
 }
 
 main() {

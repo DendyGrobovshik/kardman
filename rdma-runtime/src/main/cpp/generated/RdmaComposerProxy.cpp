@@ -449,16 +449,9 @@ static jsi::Value resolveComposerMethod(jsi::Runtime& rt, const std::string& n) 
                     auto self = composerStateOf(r, thisVal);
                     JNIEnv* e = getEnv(g_composeCache.jvm);
                     if (!e) return jsi::Value(true);
-                    // Box primitive keys so `equals` compares correctly; use an identity-unique
-                    // holder for object keys (which we cannot faithfully marshal yet).
-                    jobject arg = nullptr;
-                    if (count > 0) {
-                        if (args[0].isObject()) {
-                            arg = e->NewObject(g_composeCache.objectClass, g_composeCache.objectCtor);
-                        } else {
-                            arg = boxJsi(e, r, args[0]);
-                        }
-                    }
+                    // Primitive keys are boxed (compared by value); objects cross as kernel
+                    // objects/states or as their JS identity (rdmaBoxComposeKey).
+                    jobject arg = count > 0 ? rdmaBoxComposeKey(e, r, args[0]) : nullptr;
                     jobject argG = arg ? e->NewGlobalRef(arg) : nullptr;
                     if (arg) e->DeleteLocalRef(arg);
                     RdmaResult result = rdmaCallUi([composer = self->composer_, argG]() -> RdmaResult {

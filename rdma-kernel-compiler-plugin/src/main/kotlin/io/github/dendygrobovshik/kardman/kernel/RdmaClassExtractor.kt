@@ -15,6 +15,7 @@
  */
 package io.github.dendygrobovshik.kardman.kernel
 
+import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import io.github.dendygrobovshik.kardman.types.ConstructorInfo
 import io.github.dendygrobovshik.kardman.types.MethodInfo
 import io.github.dendygrobovshik.kardman.types.ParameterInfo
@@ -147,6 +148,7 @@ object RdmaClassExtractor {
                     mapKeyType = fn.returnType.mapKeyType(),
                     mapValueType = fn.returnType.mapValueType(),
                     vtableId = -1,
+                    returnFunctionType = fn.returnType.functionTypeRef(),
                 )
             }
             .let { list ->
@@ -170,6 +172,7 @@ object RdmaClassExtractor {
                     isMap = type.isMap(),
                     mapKeyType = type.mapKeyType(),
                     mapValueType = type.mapValueType(),
+                    functionType = type.functionTypeRef(),
                 )
             }
             .toList()
@@ -233,6 +236,10 @@ object RdmaClassExtractor {
     private fun IrProperty.type(): IrType = getter?.returnType ?: backingField?.type ?: error("no type")
 
     private fun IrType.toTypeName(): String = classFqName?.asString() ?: "kotlin.Any"
+
+    /** The full type of a lambda-typed property or method result; null for any other type. */
+    private fun IrType.functionTypeRef(): RdmaTypeRef? =
+        if (toTypeName().startsWith("kotlin.Function")) RdmaTypeParser.toRdmaTypeRef(this) else null
 
     private fun IrType.isList(): Boolean {
         val fqn = toTypeName()

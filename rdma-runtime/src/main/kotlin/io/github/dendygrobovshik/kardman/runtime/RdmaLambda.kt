@@ -21,22 +21,46 @@ package io.github.dendygrobovshik.kardman.runtime
 // after posting, so it cannot be finalized before the call is queued.
 class RdmaFunction0<R>(id: Long) : Function0<R> {
     private val ref = RdmaBlockRef(id)
+    /** The plugin block this lambda calls (read by the runtime to hand the plugin its own function back). */
+    val blockId: Long get() = ref.id
+    // Two wrappers of one plugin block are equal: a memoized plugin lambda passed again
+    // (e.g. inside a Modifier element) compares equal, so Compose can skip.
+    override fun equals(other: Any?): Boolean = other is RdmaFunction0<*> && other.blockId == blockId
+    override fun hashCode(): Int = blockId.hashCode()
     override fun invoke(): R = (RdmaComposeHost.nativeInvokeLambda(ref.id, emptyArray()) as R).also { ref.touch() }
 }
 
 class RdmaFunction1<P1, R>(id: Long) : Function1<P1, R> {
     private val ref = RdmaBlockRef(id)
+    /** The plugin block this lambda calls (read by the runtime to hand the plugin its own function back). */
+    val blockId: Long get() = ref.id
+    // Two wrappers of one plugin block are equal: a memoized plugin lambda passed again
+    // (e.g. inside a Modifier element) compares equal, so Compose can skip.
+    override fun equals(other: Any?): Boolean = other is RdmaFunction1<*, *> && other.blockId == blockId
+    override fun hashCode(): Int = blockId.hashCode()
     override fun invoke(p1: P1): R = (RdmaComposeHost.nativeInvokeLambda(ref.id, arrayOf(p1 as Any?)) as R).also { ref.touch() }
 }
 
 class RdmaFunction2<P1, P2, R>(id: Long) : Function2<P1, P2, R> {
     private val ref = RdmaBlockRef(id)
+    /** The plugin block this lambda calls (read by the runtime to hand the plugin its own function back). */
+    val blockId: Long get() = ref.id
+    // Two wrappers of one plugin block are equal: a memoized plugin lambda passed again
+    // (e.g. inside a Modifier element) compares equal, so Compose can skip.
+    override fun equals(other: Any?): Boolean = other is RdmaFunction2<*, *, *> && other.blockId == blockId
+    override fun hashCode(): Int = blockId.hashCode()
     override fun invoke(p1: P1, p2: P2): R =
         (RdmaComposeHost.nativeInvokeLambda(ref.id, arrayOf(p1 as Any?, p2 as Any?)) as R).also { ref.touch() }
 }
 
 class RdmaFunction3<P1, P2, P3, R>(id: Long) : Function3<P1, P2, P3, R> {
     private val ref = RdmaBlockRef(id)
+    /** The plugin block this lambda calls (read by the runtime to hand the plugin its own function back). */
+    val blockId: Long get() = ref.id
+    // Two wrappers of one plugin block are equal: a memoized plugin lambda passed again
+    // (e.g. inside a Modifier element) compares equal, so Compose can skip.
+    override fun equals(other: Any?): Boolean = other is RdmaFunction3<*, *, *, *> && other.blockId == blockId
+    override fun hashCode(): Int = blockId.hashCode()
     override fun invoke(p1: P1, p2: P2, p3: P3): R =
         (RdmaComposeHost.nativeInvokeLambda(ref.id, arrayOf(p1 as Any?, p2 as Any?, p3 as Any?)) as R).also { ref.touch() }
 }

@@ -291,11 +291,9 @@ static jsi::Value resolveComposerMethod(jsi::Runtime& rt, const std::string& n) 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "changed"), 1,
                 [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    void* key = nullptr;
-                    if (count > 0) {
-                        if (args[0].isObject()) key = rdma_boxObject();
-                        else key = boxJsiValue(r, args[0]);
-                    }
+                    // Primitive keys are boxed (compared by value); objects cross as kernel
+                    // objects/states or as their JS identity (rdmaBoxComposeKeyCAbi).
+                    void* key = count > 0 ? rdmaBoxComposeKeyCAbi(r, args[0]) : nullptr;
                     RdmaResult result = rdmaCallUi([key]() -> RdmaResult {
                         bool res = rdma_composer_changed(key);
                         RdmaResult err;

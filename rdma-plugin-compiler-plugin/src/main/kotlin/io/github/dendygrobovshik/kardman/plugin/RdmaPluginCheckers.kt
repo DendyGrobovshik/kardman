@@ -35,6 +35,7 @@ import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
 import org.jetbrains.kotlin.fir.expressions.FirOperation
 import org.jetbrains.kotlin.fir.expressions.FirPropertyAccessExpression
 import org.jetbrains.kotlin.fir.expressions.FirTypeOperatorCall
+import org.jetbrains.kotlin.fir.types.FirTypeProjectionWithVariance
 import org.jetbrains.kotlin.fir.expressions.FirVariableAssignment
 import org.jetbrains.kotlin.fir.expressions.FirWhenExpression
 import org.jetbrains.kotlin.fir.expressions.impl.FirElseIfTrueCondition
@@ -231,6 +232,10 @@ object RdmaPluginComposeEntryCallChecker : FirExpressionChecker<FirFunctionCall>
         val fqn = callableId.asSingleFqName().asString()
         if (!RdmaPluginTransformState.isFunctionQualifiedName(fqn)) return
         RdmaPluginTransformState.recordUsedSymbol(fqn)
+        if (fqn == RdmaPluginTransformState.registerComponentFqn) {
+            insertComponentParamDescs(expression)
+            return
+        }
         if (!RdmaPluginTransformState.isComposeEntryPoint(fqn)) return
 
         val nameSrc = expression.calleeReference.source ?: return
@@ -260,6 +265,31 @@ object RdmaPluginComposeEntryCallChecker : FirExpressionChecker<FirFunctionCall>
         if (insertAt <= nameSrc.endOffset) return // unexpected call shape; leave the rename only
         RdmaPluginTransformState.addEdit(path, insertAt, insertAt, ", typeDesc = \"$desc\"")
     }
+}
+
+/**
+ * `registerComponent(name) { a: A, b: B -> … }`: the host passes the component's arguments
+ * through an erased channel, so the JVM pass bakes their descriptors into the call —
+ * `registerComponent(name, "<descA>,<descB>") { … }` (docs/internals/compose_protocol.md).
+ */
+context(context: CheckerContext, reporter: DiagnosticReporter)
+private fun insertComponentParamDescs(expression: FirFunctionCall) {
+    val typeArgs = expression.typeArguments.mapNotNull { (it as? FirTypeProjectionWithVariance)?.typeRef?.coneType }
+    if (typeArgs.isEmpty()) return
+    val src = expression.source ?: return
+    val descs = typeArgs.map { stateTypeDescOf(it) }
+    if (descs.any { it == null }) {
+        reporter.reportOn(
+            src,
+            FirErrors.UNSUPPORTED,
+            "component parameters must have concrete boundary types — primitives, @RDMA classes/enums, " +
+                "List/Map of those (docs/guide/how_to_write_plugin.md)",
+        )
+        return
+    }
+    val nameArg = expression.argumentList.arguments.firstOrNull()?.source ?: return
+    val path = filePathOf(context) ?: return
+    RdmaPluginTransformState.addEdit(path, nameArg.endOffset, nameArg.endOffset, ", \"${descs.joinToString(",")}\"")
 }
 
 /** Records kernel class / enum usage through properties, statics and enum entries. */

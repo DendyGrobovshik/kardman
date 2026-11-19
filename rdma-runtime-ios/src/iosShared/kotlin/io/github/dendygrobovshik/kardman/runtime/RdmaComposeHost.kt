@@ -22,9 +22,15 @@ package io.github.dendygrobovshik.kardman.runtime
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composer
+import androidx.compose.runtime.RememberObserver
 import androidx.compose.runtime.currentComposer
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_componentBlock
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeComponent
+import platform.darwin.dispatch_async
+import platform.darwin.dispatch_get_main_queue
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeCallback
-import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeContent
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeContinuation
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeContinuationError
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_nativeInvokeDispose
@@ -57,17 +63,46 @@ import kotlinx.cinterop.toKString
  * entry points are the `rdma_nativeInvoke*` functions imported via cinterop.
  */
 object RdmaComposeHost {
-    // Call this from the host composition (e.g. iosApp `setContent`).
+    /**
+     * Renders the plugin component [name] (`"<pluginId>/<component>"`) with [args], typed by
+     * the component's declared parameters. Any number of call sites may render the same
+     * component, each with its own state. A call site keeps the version it first rendered
+     * until it leaves the composition; one that is waiting for a component not registered
+     * yet composes as soon as it is.
+     */
     @Composable
-    fun Content() {
+    fun Component(name: String, vararg args: Any?) {
+        val slot = remember(name) { ComponentSlot() }
+        if (slot.ref == null) {
+            componentsVersion.intValue // recompose when a component is registered
+            val id = rdma_componentBlock(name)
+            if (id != 0L) slot.ref = RdmaBlockRef(id)
+        }
+        val ref = slot.ref ?: return
         val prev = currentComposerHolder
         currentComposerHolder = currentComposer
         try {
-            rdma_nativeInvokeContent()
+            rdma_nativeInvokeComponent(ref.id, StableRef.create(arrayOf(*args)).asCPointer())
             throwIfNativeError()
         } finally {
             currentComposerHolder = prev
         }
+        ref.touch()
+    }
+
+    private val componentsVersion = mutableIntStateOf(0)
+
+    /** Called by the runtime (Hermes thread) when a plugin registers a component. */
+    internal fun onComponentsChanged() {
+        // Kotlin/Native state must be written on the main thread to reach the Recomposer.
+        dispatch_async(dispatch_get_main_queue()) { componentsVersion.intValue++ }
+    }
+
+    private class ComponentSlot : RememberObserver {
+        var ref: RdmaBlockRef? = null
+        override fun onRemembered() {}
+        override fun onForgotten() { ref?.release() }
+        override fun onAbandoned() { ref?.release() }
     }
 
     fun nativeInvokeScopeBlock(blockId: Long, composer: Composer, changed: Int) {
@@ -199,6 +234,12 @@ class ComposerScopeBlock1(blockId: Long) : (Int, Composer, Int) -> Unit {
  * A plugin JS value stored in a kernel `remember` slot. Compose reports when the slot
  * forgets it, and the JS value is released then (docs/design/runtime_rework.md §4).
  */
+/**
+ * A plugin JS object as a Compose key (`changed`, effect keys): its identity id, the same
+ * for the same object, never reused (docs/internals/compose_protocol.md#object-keys).
+ */
+data class JsIdentityKey(val id: Long)
+
 class JsValueHolder(val id: Long) : androidx.compose.runtime.RememberObserver {
     private val released = kotlin.concurrent.AtomicInt(0)
     private fun release() {
@@ -243,3 +284,6 @@ fun rdmaVtableSet(obj: Any, ptr: Long) {
 }
 
 fun rdmaVtableGet(obj: Any): Long = vtables[obj] ?: 0L
+
+/** `rdma_onComponentsChanged` (registered in the C ABI function registry). */
+fun rdma_onComponentsChanged() = RdmaComposeHost.onComponentsChanged()

@@ -21,7 +21,7 @@ ordinary `suspend` function. Why it is built this way:
 
 ```
 plugin: fetch(url)                       (suspend inline stub)
-  → suspendCoroutine { cont -> RDMA._fetchAsync(RDMA.registerContinuation(cont), url) }
+  → suspendCancellableCoroutine { cont -> RDMA._fetchAsync(RDMA.registerContinuation(cont), url) }
   → kernel: _fetchAsync launches fetch(url), then completeResult / completeError
   → nativeInvokeContinuation(id, result) → low queue → cont.resume(result)   (Hermes)
 ```
@@ -57,10 +57,18 @@ chooses its real dispatcher with `withContext`. The bridge exposes it as
 - An error is serialized like any exception ([exceptions.md](exceptions.md)) and resumes the
   continuation with it.
 
+## Cancellation
+
+The stub waits in `suspendCancellableCoroutine`. When the plugin coroutine is cancelled,
+`invokeOnCancellation` calls `RDMA.cancelContinuation(id)`; the runtime calls
+`RdmaSuspend.cancel(id)`, which cancels the `Job` that `RdmaSuspend.launch(completionId)`
+recorded for the call. The kernel coroutine stops at its next suspension point; its
+completion (with `CancellationException`) still frees the continuation block, and the
+plugin ignores it because its continuation is already cancelled. A host without
+`cancelContinuation` lets the call finish.
+
 ## Limits
 
-- `suspendCoroutine` is not cancellable: cancelling the plugin coroutine does not cancel the
-  kernel call.
 - `suspend` methods cannot be `open`; the plugin cannot pass its own `suspend` functions to
   the kernel.
 - `suspend` functions are not hotfixable yet (no slot): a native caller would need to

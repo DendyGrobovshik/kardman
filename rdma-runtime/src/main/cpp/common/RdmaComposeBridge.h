@@ -21,7 +21,7 @@
 namespace facebook {
 namespace rdma {
 
-// Installs the RDMA JSI namespace (registerContent / setComposerEmpty /
+// Installs the RDMA JSI namespace (registerComponent / setComposerEmpty /
 // mutableStateOf / registerBlock / sideEffect / disposableEffect) and invokes the
 // registered user-bridge hook. JSI-only; runs on the Hermes thread. Each platform
 // backend (JNI / C ABI) provides its own implementation and its own user-bridge

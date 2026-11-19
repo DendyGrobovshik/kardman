@@ -34,13 +34,16 @@ plugin awaits the result instead of passing a callback, and exceptions resume it
   completion carries the result's [descriptor](type_descriptors.md).
 - **Completion on the low-priority queue**, so a resume never runs in the middle of a
   composition.
+- **Cancellation follows the plugin.** The plugin waits in a cancellable coroutine; when it
+  is cancelled, the runtime cancels the kernel's `Job` for that completion. Kotlin
+  cancellation is cooperative, so the kernel call stops at its next suspension point. A
+  host without the cancel entry lets the call finish and the plugin ignores the result, so
+  the call form stays compatible.
 - **The kernel picks the dispatcher.** The framework only owns the launching scope; the body
   moves to IO with `withContext`, as in any Kotlin code.
 
 ## Deferred
 
-- Cancellation: `suspendCoroutine` is not cancellable, so cancelling the plugin coroutine
-  does not cancel the kernel call.
 - Overriding `open suspend` methods; plugin `suspend` functions passed to the kernel.
 - Hotfix slots for `suspend` functions (a native caller would have to suspend on a JS
   result).

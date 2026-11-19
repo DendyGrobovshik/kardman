@@ -87,9 +87,16 @@ class CppGenerator(
             append("        jlong id_${param.name} = (jlong)args[$idx].getNumber();\n")
             append("        arg_${param.name} = createRdmaFunction(env, ${fn.parameters.size}, id_${param.name});\n")
             if (descs.isNotEmpty()) append("        rdmaBlockSetParamDescs(id_${param.name}, \"$descs\");\n")
+            append(resultDescLine("id_${param.name}", fn, "        "))
             append("    }\n")
             if (guarded) append("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
         }
+    }
+
+    /** Registers a lambda's result descriptor: a block with a result is invoked synchronously. */
+    private fun resultDescLine(idExpr: String, fn: RdmaType.FunctionType, indent: String): String {
+        val rd = RdmaCallbackDescs.of(fn.returnType)
+        return if (rd == "kotlin.Unit") "" else "${indent}rdmaBlockSetResultDesc($idExpr, \"$rd\");\n"
     }
 
     private fun isObjectRef(typeName: String): Boolean =
@@ -453,6 +460,12 @@ ${info.className}NativeState::~${info.className}NativeState() {
             val retType = JniTypeMapper.forType(prop.type)
             val getterName = "get${prop.name.replaceFirstChar { it.uppercase() }}"
             val returnExpr = when {
+                prop.functionType != null -> {
+                    val ft = prop.functionType!!.type as RdmaType.FunctionType
+                    "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}); checkAndThrowJs(env, r); " +
+                        "auto ret = rdmaWrapNativeFunction(r, jvm, jret, \"${RdmaCallbackDescs.joined(ft.parameters)}\", \"${RdmaCallbackDescs.of(ft.returnType)}\"); " +
+                        "if (jret) env->DeleteLocalRef(jret); return ret;"
+                }
                 prop.isList -> {
                     val nullCheck = if (prop.nullable) "if (jret == nullptr) return jsi::Value::null(); " else ""
                     val elemType = prop.listElementType ?: "kotlin.Any"
@@ -477,7 +490,7 @@ ${info.className}NativeState::~${info.className}NativeState() {
                         "auto jname = (jstring)env->CallObjectMethod(jret, g_rdmaCache.enumName); auto cstr = env->GetStringUTFChars(jname, nullptr); auto result = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jname, cstr); env->DeleteLocalRef(jname); env->DeleteLocalRef(jret); return result;"
                 }
                 prop.type == "kotlin.Int" -> "return jsi::Value((double)env->CallIntMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
-                prop.type == "kotlin.Boolean" -> "return jsi::Value(env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
+                prop.type == "kotlin.Boolean" -> "return jsi::Value(env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}) == JNI_TRUE);"
                 prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "return jsi::Value(env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}));"
                 prop.type == "kotlin.Long" -> "return rdmaLongToJs(r, (long long)env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name})); // guarded crossing"
                 else -> "return jsi::Value::undefined();"
@@ -496,6 +509,16 @@ static jsi::Value ${info.className}_${getterName}(jsi::Runtime& r, JavaVM* jvm, 
             if (prop.isMutable) {
                 val setterName = "set${prop.name.replaceFirstChar { it.uppercase() }}"
                 val callExpr = when {
+                    prop.functionType != null -> {
+                        // A plugin lambda assigned to the property: the kernel holds it as an RdmaFunctionN.
+                        val ft = prop.functionType!!.type as RdmaType.FunctionType
+                        val pd = RdmaCallbackDescs.joined(ft.parameters)
+                        val rd = RdmaCallbackDescs.of(ft.returnType)
+                        "jobject arg = nullptr; if (args[0].isNumber()) { jlong id = (jlong)args[0].getNumber(); arg = createRdmaFunction(env, ${ft.parameters.size}, id); " +
+                            (if (pd.isNotEmpty()) "rdmaBlockSetParamDescs(id, \"$pd\"); " else "") +
+                            (if (rd != "kotlin.Unit") "rdmaBlockSetResultDesc(id, \"$rd\"); " else "") +
+                            "} env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, arg); if (arg) env->DeleteLocalRef(arg);"
+                    }
                     prop.isList -> {
                         val elemType = prop.listElementType ?: "kotlin.Any"
                         "auto listObj = args[0].asObject(r); jobject argList = materializeArray(env, r, jvm, listObj, \"$elemType\"); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, argList);"
@@ -690,7 +713,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     "kotlin.Boolean" -> if (hasDefaults) "auto result = env->CallStaticBooleanMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto result = env->CallBooleanMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
                     "kotlin.Double", "kotlin.Float" -> if (hasDefaults) "auto result = env->CallStaticDoubleMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto result = env->CallDoubleMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
                     "kotlin.Long" -> if (hasDefaults) "auto result = env->CallStaticLongMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto result = env->CallLongMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
-                    else -> if (isObjectRef(method.returnType) || method.isList || method.isMap) {
+                    else -> if (isObjectRef(method.returnType) || method.isList || method.isMap || method.returnFunctionType != null) {
                         if (hasDefaults) "auto jret = env->CallStaticObjectMethod(g_rdmaCache.wrappersClazz, g_rdmaCache.$methodField, state->getObject()$paramsCall);" else "auto jret = env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.$methodField$paramsCall);"
                     } else ""
                 }
@@ -707,11 +730,16 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                 when (method.returnType) {
                     "kotlin.String" -> out.write("    auto cstr = env->GetStringUTFChars(jret, nullptr); auto ret = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jret, cstr); env->DeleteLocalRef(jret); return ret;\n")
                     "kotlin.Int" -> out.write("    return jsi::Value((double)result);\n")
-                    "kotlin.Boolean" -> out.write("    return jsi::Value(result);\n")
+                    "kotlin.Boolean" -> out.write("    return jsi::Value(result == JNI_TRUE); // jboolean would pick Value(int)\n")
                     "kotlin.Double", "kotlin.Float" -> out.write("    return jsi::Value(result);\n")
                     "kotlin.Long" -> out.write("    return rdmaLongToJs(r, (long long)result); // guarded crossing\n")
                     else -> {
-                        if (method.isList) {
+                        if (method.returnFunctionType != null) {
+                            val ft = method.returnFunctionType!!.type as RdmaType.FunctionType
+                            out.write("    auto ret = rdmaWrapNativeFunction(r, jvm, jret, \"${RdmaCallbackDescs.joined(ft.parameters)}\", \"${RdmaCallbackDescs.of(ft.returnType)}\");\n")
+                            out.write("    if (jret) env->DeleteLocalRef(jret);\n")
+                            out.write("    return ret;\n")
+                        } else if (method.isList) {
                             out.write("    if (jret != nullptr) {\n")
                             out.write("        jobject globalRet = env->NewGlobalRef(jret);\n")
                             out.write("        env->DeleteLocalRef(jret);\n")
@@ -1607,7 +1635,8 @@ $body}
                 // Typed callback arguments (runtime_rework §4.5): the block marshals
                 // kernel -> plugin arguments by these descriptors.
                 val descs = RdmaCallbackDescs.joined(t.parameters)
-                val setDescs = if (descs.isEmpty()) "" else "    rdmaBlockSetParamDescs(id_${p.name}, \"$descs\");\n"
+                val setDescs = (if (descs.isEmpty()) "" else "    rdmaBlockSetParamDescs(id_${p.name}, \"$descs\");\n") +
+                    resultDescLine("id_${p.name}", t, "    ")
                 if (guarded) {
                     "    jlong id_${p.name} = 0;\n" +
                         "    if (!args[$i].isUndefined()) { id_${p.name} = (jlong)args[$i].getNumber(); } else { mask |= (1 << $i); }\n" +
@@ -1662,7 +1691,7 @@ $body}
                         (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
                         "    auto cstr = env->GetStringUTFChars(jret, nullptr); auto ret = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jret, cstr); env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
                 "kotlin.Int" -> "    auto result = env->CallStaticIntMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value((double)result);\n"
-                "kotlin.Boolean" -> "    auto result = env->CallStaticBooleanMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value(result);\n"
+                "kotlin.Boolean" -> "    auto result = env->CallStaticBooleanMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value(result == JNI_TRUE);\n"
                 "kotlin.Double", "kotlin.Float" -> "    auto result = env->CallStaticDoubleMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value(result);\n"
                 "kotlin.Long" -> "    auto result = env->CallStaticLongMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return rdmaLongToJs(r, (long long)result); // guarded crossing\n"
                 else -> "    return jsi::Value::undefined();\n"
@@ -1704,7 +1733,11 @@ $body}
                     "    checkAndThrowJs(env, r);\n" +
                     "    if (jret != nullptr) {\n        jobject globalRet = env->NewGlobalRef(jret);\n        env->DeleteLocalRef(jret);\n        return createMapHandle(r, jvm, globalRet, \"$key\", \"$value\");\n    }\n$deleteJStrings    return jsi::Value::null();\n"
             }
-            is RdmaType.FunctionType -> "    return jsi::Value::undefined();\n"
+            is RdmaType.FunctionType ->
+                "    auto jret = env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
+                    "    checkAndThrowJs(env, r);\n" +
+                    "    auto ret = rdmaWrapNativeFunction(r, jvm, jret, \"${RdmaCallbackDescs.joined(t.parameters)}\", \"${RdmaCallbackDescs.of(t.returnType)}\");\n" +
+                    "    if (jret) env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
         }
     }
 }

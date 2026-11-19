@@ -8,7 +8,7 @@ import androidx.compose.runtime.setValue
 import com.example.kernel.internal.ButtonList
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 
 @Composable
 fun GeneratedContent() {
@@ -28,5 +28,5 @@ fun GeneratedContent() {
 }
 
 fun main() {
-    runRdmaApp { GeneratedContent() }
+    registerComponent("main") { GeneratedContent() }
 }

@@ -62,6 +62,8 @@ data class MethodInfo(
     val mapKeyType: String? = null,
     val mapValueType: String? = null,
     val vtableId: Int = -1,
+    /** The full return type when the method returns a lambda (`returnType` is then `kotlin.FunctionN`). */
+    val returnFunctionType: RdmaTypeRef? = null,
 )
 
 @Serializable
@@ -75,6 +77,8 @@ data class PropertyInfo(
     val isMap: Boolean = false,
     val mapKeyType: String? = null,
     val mapValueType: String? = null,
+    /** The full type when the property holds a lambda (`type` is then `kotlin.FunctionN`). */
+    val functionType: RdmaTypeRef? = null,
 )
 
 @Serializable

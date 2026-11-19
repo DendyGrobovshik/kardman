@@ -38,7 +38,7 @@ object RdmaPublicApiChecker {
     private val CNAME_ANNOTATION = FqName("kotlin.native.CName")
 
     // Framework entry points / scaffolding that are public by design but not `@RDMA`.
-    private val allowlist = setOf("runRdmaApp", "rdmaVtableDispatch")
+    private val allowlist = setOf("registerComponent", "rdmaVtableDispatch")
 
     fun check(moduleFragment: IrModuleFragment): List<String> {
         val errors = mutableListOf<String>()

@@ -62,6 +62,7 @@ kotlin {
             "ios/RdmaCollectionsCAbi.cpp",
             "common/RdmaProxyCore.cpp",
             "common/RdmaBlocks.cpp",
+            "common/RdmaIdentity.cpp",
             "ios/generated/RdmaComposerProxy.cpp",
         )
         val includeDirs = listOf(

@@ -18,7 +18,7 @@ package com.example.plugin.itest
 import androidx.compose.runtime.Composable
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 import com.example.kernel.user.itest.itestThrow
 
 // S2: Native -> JS (host throws, plugin catches a JS Error).
@@ -39,5 +39,5 @@ fun ExceptionsContent() {
 
 fun main() {
     runExceptionScenarios()
-    runRdmaApp { ExceptionsContent() }
+    registerComponent("main") { ExceptionsContent() }
 }

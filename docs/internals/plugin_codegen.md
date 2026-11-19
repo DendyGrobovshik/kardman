@@ -30,7 +30,7 @@ A plugin is compiled twice:
 |---|---|---|
 | `RdmaKernelStubs_<package>.kt` | compiler plugin | kernel stubs, one file per kernel package |
 | `<File>_rdma.kt` | compiler plugin | the plugin's files with the few rewrites below |
-| `RdmaRuntimeBridge.kt` | Gradle plugin | the guest bridge: `external object RDMA`, `rdmaRunApp`, state factories, effect helpers, collection classifiers, prototype hooks |
+| `RdmaRuntimeBridge.kt` | Gradle plugin | the guest bridge: `external object RDMA`, `rdmaRegisterComponent`, state factories, effect helpers, collection classifiers, prototype hooks |
 | `plugin.json` | compiler plugin | the plugin contract: id, the kernel symbols it uses, the kernel version it was built against |
 
 ## Kernel stubs
@@ -61,11 +61,13 @@ inline fun Person(name: String, age: Int): Person = RdmaAbi.createPerson(name, a
   positions (`List<HttpMethod>`, `MutableState<HttpMethod>`, lambda parameters).
 - **Widgets** are non-inline `@Composable` functions, so the Compose compiler handles them
   as usual; the body calls `RdmaAbi.compose<Name>(…)`.
-- **`suspend`** stubs are `suspend inline` and use `suspendCoroutine` +
-  `RDMA.registerContinuation` ([suspend.md](suspend.md)).
+- **`suspend`** stubs are `suspend inline` and use `suspendCancellableCoroutine` +
+  `RDMA.registerContinuation`; cancellation calls `RDMA.cancelContinuation` when the host
+  has it ([suspend.md](suspend.md)).
 - **Lambda parameters** are registered: `RDMA.registerBlock(fn, "<pluginId>")`.
 - **Omitted defaulted arguments** pass `undefined`; the kernel fills the default.
-- `runRdmaApp { … }` forwards to `rdmaRunApp`.
+- `registerComponent(name) { … }` forwards to `rdmaRegisterComponent`; with parameters the
+  JVM pass inserts their descriptors after the name ([compose_protocol.md](compose_protocol.md#components)).
 - Internal names in stub bodies carry an `rdma` prefix so they never shadow user names.
 
 ### Call form v1

@@ -17,6 +17,7 @@
 
 package org.example
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,7 +48,7 @@ import platform.posix.ftell
 /**
  * iOS host entry point. Bootstraps the Hermes runtime + user bridge, evaluates the
  * plugin `.hbc` bundles (dependencies first, then plugins), then hosts the plugin
- * content (RdmaComposeHost.Content) inside a Compose UIViewController.
+ * components (RdmaComposeHost.Component) inside a Compose UIViewController.
  */
 fun MainViewController(): UIViewController {
     rdma_userBridgeInstall()
@@ -74,7 +75,14 @@ private fun Content() {
         }
     }
     if (ready) {
-        RdmaComposeHost.Content()
+        Column {
+            RdmaComposeHost.Component("alice:counter/main")
+            RdmaComposeHost.Component("itest:newplug/main")
+            RdmaComposeHost.Component("bob:services/card", "a", 1)
+            RdmaComposeHost.Component("bob:services/card", "b", 2)
+            RdmaComposeHost.Component("bob:services/modifiers")
+            RdmaComposeHost.Component("bob:services/keys")
+        }
         // Block-lifetime probe (docs/design/runtime_rework.md §4): once the plugins have
         // run, collect garbage so the holders of dropped plugin lambdas are cleaned, let the
         // release queue drain, then report how many JS blocks the registry still holds.

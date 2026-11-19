@@ -51,6 +51,11 @@ import com.example.kernel.internal.services.withMethod
 import com.example.kernel.internal.services.SuspendService
 import com.example.kernel.internal.services.Square
 import com.example.kernel.internal.services.Ticker
+import com.example.kernel.internal.services.waitLong
+import com.example.kernel.internal.services.wasLongWaitCancelled
+import com.example.kernel.internal.services.LambdaBox
+import com.example.kernel.internal.services.applyTwice
+import com.example.kernel.internal.services.makeGreeter
 import com.example.kernel.internal.services.describeShape
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -77,6 +82,7 @@ fun runServicesDemo() {
     runCollectionIdiomsDemo()
     runShapeDemo()
     runLambdaMemberDemo()
+    runLambdaValueDemo()
     runBlockLifetimeDemo()
     runMapMutationDemo()
     runMapNestingDemo()
@@ -187,6 +193,13 @@ suspend fun runTimerDemo() {
     job.cancel()
     delay(30)
     println("SUSPEND_CANCEL_OK")
+
+    // Cancelling the plugin coroutine cancels the kernel call it waits for.
+    val waiting = CoroutineScope(Dispatchers.Main).launch { waitLong(10000) }
+    delay(100)
+    waiting.cancel()
+    delay(500)
+    println("SUSPEND_KERNEL_CANCEL: cancelled=${wasLongWaitCancelled()}")
 }
 
 /**
@@ -333,6 +346,24 @@ fun runLambdaMemberDemo() {
     }
     ticker.tick(3)
     ticker.each(listOf("a", "b")) { s -> println("LAMBDA_METHOD: $s") }
+}
+
+/**
+ * Lambdas as values: plugin lambdas with a result called by the kernel (from the plugin's
+ * thread and from a background thread), kernel lambdas handed to the plugin, lambda-typed
+ * properties and the identity round trip.
+ */
+fun runLambdaValueDemo() {
+    val box = LambdaBox { "#$it" }
+    println("LAMBDA_RESULT: ${box.render(7)} twice=${applyTwice({ it * 3 }, 2)}")
+    val add5 = box.adder(5)
+    println("KERNEL_LAMBDA: ${add5(10)} ${makeGreeter("Hi")("Ann")}")
+    val mine: (Int) -> String = { "x$it" }
+    box.format = mine
+    println("LAMBDA_PROP: ${box.render(1)} same=${box.format === mine} call=${box.format(2)}")
+    box.onEvent = { msg -> println("LAMBDA_EVENT: $msg") }
+    box.fire("ping")
+    box.renderInBackground(9) { text -> println("LAMBDA_BG: $text") }
 }
 
 fun runMapMutationDemo() {

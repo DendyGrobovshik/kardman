@@ -24,6 +24,7 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -122,8 +123,20 @@ class MainActivity : ComponentActivity() {
                 }
             }
             if (ready) {
+                // Every stand component; a component not registered (plugin not loaded)
+                // composes nothing. Keyed on the content version so a new plugin version
+                // renders at once (the default is at the next appearance).
                 key(contentVersion) {
-                    RdmaComposeHost.Content()
+                    Column {
+                        RdmaComposeHost.Component("alice:counter/main")
+                        RdmaComposeHost.Component("itest:newplug/main")
+                        RdmaComposeHost.Component("itest:exceptions/main")
+                        RdmaComposeHost.Component("itest:exceptions2/main")
+                        RdmaComposeHost.Component("bob:services/card", "a", 1)
+                        RdmaComposeHost.Component("bob:services/card", "b", 2)
+                        RdmaComposeHost.Component("bob:services/modifiers")
+                        RdmaComposeHost.Component("bob:services/keys")
+                    }
                 }
             }
         }

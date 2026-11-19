@@ -86,7 +86,7 @@ Native code calls plugin JS through a few entry points, routed to the Hermes thr
 
 | Entry point | Used for | Routing |
 |---|---|---|
-| `nativeInvokeContent`, `nativeInvokeScopeBlock` | composing plugin content | rendezvous (synchronous) |
+| `nativeInvokeComponent`, `nativeInvokeScopeBlock` | composing plugin content | rendezvous (synchronous) |
 | `nativeInvokeCallback` / `nativeInvokeLambda` | callbacks, service lambdas | posted to the low-priority queue |
 | `nativeInvokeContinuation(Error)` | `suspend` completion | posted to the low-priority queue |
 | slot / vtable invoke | hotfixed functions, overrides | synchronous from any thread ([hotfix_slots.md](hotfix_slots.md)) |

@@ -45,6 +45,11 @@ skipped); a replaced one is released at once — so a kernel that keeps a lambda
 composition must read it through `rememberUpdatedState`. A call to a released block does
 nothing (a diagnostic is in the backlog).
 
+`RdmaFunctionN` wrappers of one block are equal (`equals`/`hashCode` by block id). A plugin
+lambda passed to a method creates a new wrapper on every call; with a memoized lambda the
+wrappers still compare equal, so a value holding it (an element of a kernel `Modifier`)
+is equal across recompositions and Compose can skip.
+
 ## Release
 
 A release never touches the JS runtime: it enqueues the id on the same FIFO low-priority
@@ -55,8 +60,28 @@ by a daemon thread (`minSdk` 24 has no `Cleaner`); iOS uses `createCleaner`.
 
 ## Calling a block
 
-Callbacks are fire-and-forget: `nativeInvokeCallback`/`nativeInvokeLambda` post the call to
-the low-priority queue and return; arguments are converted by the block's descriptors on the
-Hermes thread; a JS exception goes to the global uncaught handler
-([exceptions.md](exceptions.md)). Content and scope blocks are called synchronously through
+A block registers its parameter descriptors and, for a lambda with a result, its result
+descriptor. The kernel holds it as an `RdmaFunctionN` (Android: created by the bridge; iOS:
+generated glue), whose `invoke` depends on the result:
+
+- **no result (`Unit`)** — fire-and-forget: the call is posted to the low-priority queue and
+  returns; arguments are converted on the Hermes thread; a JS exception goes to the global
+  uncaught handler ([exceptions.md](exceptions.md));
+- **a result** — the caller waits: `rdmaCallJsBlocking`, routed like a hotfix slot (inline on
+  the Hermes thread, rendezvous from UI, low queue with a 5 s timeout from other threads); the
+  result is converted by the result descriptor and a JS exception is rethrown as
+  `RdmaException`.
+
+## Kernel lambdas in JS
+
+A lambda-typed property getter, method result or function result crosses through
+`rdmaWrapNativeFunction` (Android) / `rdmaWrapNativeFunctionCAbi` (iOS):
+
+- an `RdmaFunctionN` (a plugin lambda that went through the kernel) returns the plugin's own
+  function from the block registry, so identity holds;
+- any other lambda becomes a JS host function owning a global ref / `StableRef` to it,
+  released when Hermes collects the function. A call converts the arguments by the parameter
+  descriptors, invokes the lambda on the Hermes thread (Android: `FunctionN.invoke` through
+  JNI; iOS: `rdma_invokeFunction`), converts the result by the result descriptor and turns a
+  kernel exception into a JS error. Content and scope blocks are called synchronously through
 the rendezvous ([threading.md](threading.md)).

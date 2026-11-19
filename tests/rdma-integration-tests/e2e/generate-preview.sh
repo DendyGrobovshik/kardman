@@ -76,10 +76,16 @@ server_stop() {
 
 cleanup() {
     server_stop
-    # Restore the scratch plugin source the server rewrites.
-    git -C "$ROOT_DIR" checkout -- "$GENERATED_SRC" 2>/dev/null || true
+    # Restore the scratch plugin source the server rewrites (its working-tree content, so
+    # uncommitted edits survive the test).
+    if [ -n "$GENERATED_BACKUP" ] && [ -f "$GENERATED_BACKUP" ]; then
+        cp "$GENERATED_BACKUP" "$GENERATED_SRC"
+        rm -f "$GENERATED_BACKUP"
+    fi
     rm -rf "$VERSIONS_DIR"
 }
+GENERATED_BACKUP=$(mktemp)
+cp "$GENERATED_SRC" "$GENERATED_BACKUP"
 trap cleanup EXIT
 
 main() {

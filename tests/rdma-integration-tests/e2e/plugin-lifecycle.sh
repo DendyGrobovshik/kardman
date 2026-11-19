@@ -62,14 +62,26 @@ broadcast_resync() { # broadcast_resync <pluginId> <version> [builtAgainst]
 }
 
 # Steps 4/8 rewrite fixture kernel sources in-place (Itest/Tagline/NewPlug) to stage
-# store deliveries; un-restore they poison every later build in the repo. Restore the
-# pristine repo copies so this script keeps its "the repo is never mutated" promise.
+# store deliveries; un-restore they poison every later build in the repo. Save their
+# working-tree content first and put it back on exit, so this script keeps its "the repo is
+# never mutated" promise without discarding uncommitted edits.
+FIXTURE_SOURCES=(
+    tests/stand/kernel/user/alice/src/commonMain/kotlin/com/example/kernel/user/alice/Tagline.kt
+    tests/stand/kernel/user/itest/src/commonMain/kotlin/com/example/kernel/user/itest/Itest.kt
+    tests/stand/plugin/itest/newplug/src/kotlin/com/example/plugin/itest/NewPlug.kt
+)
+save_fixture_sources() {
+    local i
+    for i in "${!FIXTURE_SOURCES[@]}"; do
+        cp "$ROOT_DIR/${FIXTURE_SOURCES[$i]}" "$IT_DIR/fixture-$i.orig"
+    done
+}
 restore_fixture_sources() {
     [ -f "$IT_DIR/Hotfix.kt.orig" ] && cp "$IT_DIR/Hotfix.kt.orig" "$HOTFIX_SRC"
-    git -C "$ROOT_DIR" checkout -- \
-        tests/stand/kernel/user/alice/src/commonMain/kotlin/com/example/kernel/user/alice/Tagline.kt \
-        tests/stand/kernel/user/itest/src/commonMain/kotlin/com/example/kernel/user/itest/Itest.kt \
-        tests/stand/plugin/itest/newplug/src/kotlin/com/example/plugin/itest/NewPlug.kt
+    local i
+    for i in "${!FIXTURE_SOURCES[@]}"; do
+        [ -f "$IT_DIR/fixture-$i.orig" ] && cp "$IT_DIR/fixture-$i.orig" "$ROOT_DIR/${FIXTURE_SOURCES[$i]}"
+    done
 }
 
 store_start() {
@@ -181,7 +193,7 @@ package com.example.plugin.itest
 import androidx.compose.runtime.Composable
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 
 @Composable
 fun NewPlugContent() {
@@ -191,7 +203,7 @@ fun NewPlugContent() {
 }
 
 fun main() {
-    runRdmaApp { NewPlugContent() }
+    registerComponent("main") { NewPlugContent() }
 }
 EOF
     local hbc="$IT_DIR/newplug.hbc"
@@ -242,7 +254,7 @@ package com.example.plugin.itest
 import androidx.compose.runtime.Composable
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 import com.example.kernel.user.itest.itestGreeting
 
 @Composable
@@ -253,7 +265,7 @@ fun NewPlugContent() {
 }
 
 fun main() {
-    runRdmaApp { NewPlugContent() }
+    registerComponent("main") { NewPlugContent() }
 }
 EOF
     local hbc="$IT_DIR/newplug-v2.hbc"
@@ -366,7 +378,7 @@ package com.example.plugin.itest
 import androidx.compose.runtime.Composable
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -400,7 +412,7 @@ fun NewPlugContent() {
 }
 
 fun main() {
-    runRdmaApp { NewPlugContent() }
+    registerComponent("main") { NewPlugContent() }
 }
 EOF
     local hbc="$IT_DIR/newplug-v3.hbc"
@@ -469,6 +481,7 @@ cleanup() {
     restore_fixture_sources
     rm -rf "$IT_DIR"
 }
+save_fixture_sources
 trap cleanup EXIT
 
 main() {

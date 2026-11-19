@@ -34,7 +34,7 @@ import androidx.compose.runtime.setValue
 import com.example.kernel.internal.ButtonList
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 
 @Composable
 fun GeneratedContent() {
@@ -54,7 +54,7 @@ fun GeneratedContent() {
 }
 
 fun main() {
-    runRdmaApp { GeneratedContent() }
+    registerComponent("main") { GeneratedContent() }
 }
 """),
     Example("Greeting", """package com.example.plugin.generated
@@ -62,7 +62,7 @@ fun main() {
 import androidx.compose.runtime.Composable
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 
 @Composable
 fun GeneratedContent() {
@@ -73,7 +73,7 @@ fun GeneratedContent() {
 }
 
 fun main() {
-    runRdmaApp { GeneratedContent() }
+    registerComponent("main") { GeneratedContent() }
 }
 """),
     Example("Platform info", """package com.example.plugin.generated
@@ -82,7 +82,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 import com.example.kernel.internal.services.platformInfo
 
 @Composable
@@ -96,7 +96,7 @@ fun GeneratedContent() {
 }
 
 fun main() {
-    runRdmaApp { GeneratedContent() }
+    registerComponent("main") { GeneratedContent() }
 }
 """),
     Example("HTTP service", """package com.example.plugin.generated
@@ -109,7 +109,7 @@ import androidx.compose.runtime.setValue
 import com.example.kernel.internal.Button
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 import com.example.kernel.internal.services.httpGet
 
 @Composable
@@ -129,7 +129,7 @@ fun GeneratedContent() {
 }
 
 fun main() {
-    runRdmaApp { GeneratedContent() }
+    registerComponent("main") { GeneratedContent() }
 }
 """),
     Example("Layout", """package com.example.plugin.generated
@@ -139,7 +139,7 @@ import com.example.kernel.internal.Column
 import com.example.kernel.internal.Row
 import com.example.kernel.internal.Spacer
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 
 @Composable
 fun GeneratedContent() {
@@ -156,7 +156,46 @@ fun GeneratedContent() {
 }
 
 fun main() {
-    runRdmaApp { GeneratedContent() }
+    registerComponent("main") { GeneratedContent() }
+}
+"""),
+    Example("Modifiers", """package com.example.plugin.generated
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.example.kernel.internal.Box
+import com.example.kernel.internal.BoxAlignment
+import com.example.kernel.internal.Column
+import com.example.kernel.internal.Modifier
+import com.example.kernel.internal.Row
+import com.example.kernel.internal.Text
+import com.example.kernel.internal.registerComponent
+
+@Composable
+fun GeneratedContent() {
+    var taps by remember { mutableStateOf(0) }
+    Column(modifier = Modifier().fillMaxWidth().padding(16.0)) {
+        Row(modifier = Modifier().fillMaxWidth()) {
+            Text("Left", modifier = Modifier().weight(1.0).background(0xFFE3F2FD).padding(8.0))
+            Text("Right", modifier = Modifier().weight(2.0).background(0xFFFFF3E0).padding(8.0))
+        }
+        Box(modifier = Modifier().fillMaxWidth().height(80.0).paddingEach(top = 12.0)
+            .border(1.0, 0xFF9E9E9E, cornerRadius = 12.0)) {
+            Text("Centered", modifier = Modifier().align(BoxAlignment.Center))
+        }
+        Text(
+            "Tapped " + taps + " times",
+            modifier = Modifier().paddingEach(top = 12.0).clip(8.0).background(0xFFC8E6C9)
+                .clickable { taps++ }.padding(12.0),
+        )
+    }
+}
+
+fun main() {
+    registerComponent("main") { GeneratedContent() }
 }
 """),
 )

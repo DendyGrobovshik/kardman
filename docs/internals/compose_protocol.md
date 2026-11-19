@@ -50,10 +50,10 @@ its host functions call the native `Composer`.
 ## Flow
 
 ```
-plugin main(): runRdmaApp { App() }
-  → rdmaRunApp → RDMA.registerContent(fn)          (Hermes)
-  → host: setContent { RdmaComposeHost.Content() } (UI)
-  → nativeInvokeContent → rdmaCallJs → content(composerProxy)
+plugin main(): registerComponent("main") { App() }
+  → rdmaRegisterComponent → RDMA.registerComponent("alice:counter/main", descs, fn)  (Hermes)
+  → host: RdmaComposeHost.Component("alice:counter/main")                         (UI)
+  → nativeInvokeComponent → rdmaCallJs → fn(args…, composerProxy, 0)
   → App() runs in JS, composer ops forwarded to the native Composer
   → Text("x") → RDMA.composeText("x") → rdmaCallUi → compose<Text> entry → kernel Text()
   → Column { … } → the content lambda becomes a remembered block;
@@ -63,6 +63,28 @@ plugin main(): runRdmaApp { App() }
 
 A recompose scope's `updateScope` block is held by a `ComposerScopeBlock`; Compose calls it
 to recompose just that part of the plugin tree.
+
+## Components
+
+A component is a plugin composable registered under `"<pluginId>/<name>"`:
+
+- **Plugin**: `registerComponent(name) { a: A, b: B -> … }` (0–3 parameters). The JVM pass
+  inserts the parameters' [descriptors](type_descriptors.md) after the name; the stub
+  forwards to the guest bridge's `rdmaRegisterComponent`, which calls
+  `RDMA.registerComponent(fullName, descs, fn, pluginId)`. The placeholders the JVM pass
+  resolves against are declared in the kernel `internal` module.
+- **Runtime**: the component is a block with its parameter descriptors; a registry maps the
+  name to the latest block and holds it. Registering a name again releases the previous
+  block from the registry, bumps `nativeContentVersion()` and notifies the host
+  (`RdmaComposeHost.onComponentsChanged`).
+- **Host**: `RdmaComposeHost.Component(name, args…)` remembers, per call site, an
+  `RdmaBlockRef` of the block it first found — so each place keeps its version until it
+  leaves the composition, and a place waiting for an unregistered component recomposes when
+  the registry changes (a version state). The call converts `args` by the block's
+  descriptors and runs `fn(args…, composerProxy, 0)` through the rendezvous, exactly like a
+  scope block.
+- Each call site is its own group in the native composition, so plugin `remember`s are
+  per place.
 
 ## Widget entries
 
@@ -89,6 +111,26 @@ proxy carrying the value's [descriptor](type_descriptors.md).
   and return a state-backed collection proxy ([collections.md](collections.md)); its
   mutations recompose. A plain collection in `mutableStateOf` mutated in place does not.
 
+## Object keys
+
+Compose decides what to skip by comparing values with the previous composition:
+`$composer.changed(x)` for every parameter of a skippable function, every `remember` key
+and the wrappers the compiler caches (a content lambda passed to a kernel widget is cached
+by `changed(lambda)`). The slot table is native, so the proxy converts `x` into a native key
+(`rdmaBoxComposeKey`; effect keys go through the same function):
+
+| JS value | Native key | Compared by |
+|---|---|---|
+| primitive (number, string, boolean) | boxed value | value |
+| kernel object proxy | the kernel object | its `equals` |
+| state proxy | the native `MutableState` | reference |
+| any other JS object or function | `JsIdentityKey(id)` | the id: identity |
+
+The identity id comes from a per-runtime JS `WeakMap` (`common/RdmaIdentity.cpp`): the same
+object always gets the same id, ids are never reused, and an entry lives as long as its
+object. The slot holds only the small key, not the JS object. A plugin object is therefore
+compared by identity, not by its Kotlin `equals`.
+
 ## Effects
 
 Effects are kernel-hosted for the same reason widgets are: the Compose runtime must drive
@@ -101,8 +143,7 @@ is opaque to it. The plugin JVM pass rewrites each effect; the body stays in JS.
   result is a plain JS object `{ dispose: fn }`; `RDMA.disposableEffect(keys, fn)` registers
   the block, converts the keys and composes `remember(keys) { RdmaDisposableEffectObserver(blockId) }`.
   `onRemembered` runs the body once, `onForgotten` calls `dispose`, `onAbandoned` releases the
-  never-run block. Primitive keys compare faithfully; `Unit` is a stable sentinel; object and
-  proxy keys always count as changed.
+  never-run block. Keys compare as described in [Object keys](#object-keys).
 - `LaunchedEffect(keys) { … }` → `rdmaLaunchedEffect`: the same machinery; the body launches
   the `suspend` block on `Dispatchers.Main` and `dispose` cancels the job.
 - `rememberCoroutineScope()` → `rdmaRememberCoroutineScope`: a remembered
@@ -112,6 +153,6 @@ is opaque to it. The plugin JVM pass rewrites each effect; the body stays in JS.
 ## Exceptions in composition
 
 A plugin `@Composable` that throws leaves its restart group open; Compose then fails with
-`Start/end imbalance`, which a `try/catch` around `nativeInvokeContent` cannot repair. The
+`Start/end imbalance`, which a `try/catch` around `nativeInvokeComponent` cannot repair. The
 `RdmaException` reaches the host and the app crashes with the plugin error in its `cause`
 chain ([exceptions.md](exceptions.md)).

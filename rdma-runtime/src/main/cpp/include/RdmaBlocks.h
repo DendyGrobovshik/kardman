@@ -71,6 +71,12 @@ void rdmaBlockSetParamDescs(int64_t id, std::vector<std::string> descs);
 void rdmaBlockSetParamDescs(int64_t id, const std::string& joined);
 std::vector<std::string> rdmaBlockParamDescs(int64_t id);
 
+// Result type descriptor of a lambda block. A block with a result (anything but Unit) is
+// invoked synchronously — the native caller waits for the value (rdmaCallJsBlocking) —
+// while a block without one is fire-and-forget. "" or "kotlin.Unit" = no result.
+void rdmaBlockSetResultDesc(int64_t id, const std::string& desc);
+std::string rdmaBlockResultDesc(int64_t id);
+
 // End of a top-level JS task (JS thread): frees the blocks registered during the task
 // that no holder retained.
 void rdmaBlockSweepUnretained();

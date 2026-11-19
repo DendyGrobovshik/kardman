@@ -129,7 +129,8 @@ class CAbiCppGenerator(
                 out.write(cWrapper("void*", cFn(info.className + "_new"), withMask) + "\n")
             }
             for (method in info.methods.filter { !it.isSuspend }) {
-                val ret = memberCppType(method.returnType)
+                // A lambda result crosses as a handle (the parameter form is a block id).
+                val ret = if (method.returnFunctionType != null) "void*" else memberCppType(method.returnType)
                 val params = buildList {
                     add("void*" to "handle")
                     method.parameters.forEach { add(memberCppType(it.type) to it.name) }
@@ -138,7 +139,7 @@ class CAbiCppGenerator(
                 out.write(cWrapper(ret, cFn(info.className + "_" + method.name), withMask) + "\n")
             }
             for (prop in info.properties) {
-                val ret = memberCppType(prop.type)
+                val ret = if (prop.functionType != null) "void*" else memberCppType(prop.type)
                 out.write(cWrapper(ret, cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() }), listOf("void*" to "handle")) + "\n")
                 if (prop.isMutable) {
                     out.write(cWrapper("void", cFn(info.className + "_set" + prop.name.replaceFirstChar { it.uppercase() }), listOf("void*" to "handle", memberCppType(prop.type) to "value")) + "\n")
@@ -243,6 +244,12 @@ ${info.className}NativeState::~${info.className}NativeState() {
             val getterName = "get${prop.name.replaceFirstChar { it.uppercase() }}"
             val ret = CAbi.forMemberType(prop.type).cppType
             val body = when {
+                prop.functionType != null -> {
+                    val ft = prop.functionType!!.type as RdmaType.FunctionType
+                    "    void* h = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n" +
+                        "    checkKotlinError(r);\n" +
+                        "    return rdmaWrapNativeFunctionCAbi(r, h, \"${RdmaCallbackDescs.joined(ft.parameters)}\", \"${RdmaCallbackDescs.of(ft.returnType)}\");\n"
+                }
                 prop.isList -> {
                     val elem = prop.listElementType ?: "kotlin.Any"
                     "    void* h = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n" +
@@ -273,6 +280,11 @@ $body}
                 val argBlock: String
                 val argExpr: String
                 when {
+                    prop.functionType != null -> {
+                        // The plugin's lambda crosses as its block id; the Kotlin glue wraps it.
+                        argBlock = "    int64_t v = (count > 0 && args[0].isNumber()) ? (int64_t)args[0].getNumber() : 0;\n"
+                        argExpr = "v"
+                    }
                     prop.isList -> {
                         argBlock = "    void* v = nullptr;\n" +
                             "    if (!args[0].isNull() && args[0].isObject()) {\n" +
@@ -407,6 +419,10 @@ $argBlock    $setFn(state->handle(), $argExpr);
             } else {
                 out.write("    auto jret = $call;\n    checkKotlinError(r);\n")
                 val returnExpr = when {
+                    method.returnFunctionType != null -> {
+                        val ft = method.returnFunctionType!!.type as RdmaType.FunctionType
+                        "    return rdmaWrapNativeFunctionCAbi(r, jret, \"${RdmaCallbackDescs.joined(ft.parameters)}\", \"${RdmaCallbackDescs.of(ft.returnType)}\");\n"
+                    }
                     method.isList -> "    return createListHandle(r, jret, \"${method.listElementType ?: ""}\");\n"
                     method.isMap -> "    return createMapHandle(r, jret, \"${method.mapKeyType ?: ""}\", \"${method.mapValueType ?: ""}\");\n"
                     method.returnType == "kotlin.String" -> "    return jsi::String::createFromUtf8(r, jret);\n"
@@ -877,7 +893,10 @@ $nsClose} // namespace rdma
                 sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
                 sb.append("    return createMapHandle(r, jret, \"${typeName(ty.key)}\", \"${typeName(ty.value)}\");\n")
             }
-            is RdmaType.FunctionType -> sb.append("    return wrapUserObject(r, $call);\n")
+            is RdmaType.FunctionType -> {
+                sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
+                sb.append("    return rdmaWrapNativeFunctionCAbi(r, jret, \"${RdmaCallbackDescs.joined(ty.parameters)}\", \"${RdmaCallbackDescs.of(ty.returnType)}\");\n")
+            }
         }
         sb.append("}\n\n")
         return sb.toString()

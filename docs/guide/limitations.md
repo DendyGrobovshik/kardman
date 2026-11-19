@@ -23,8 +23,8 @@ What does not work yet, in one place. Each item names the workaround where there
   extension functions cannot be `@RDMA`. Use distinct names.
 - **No generics** other than `List` and `Map`; no `Array`, no data classes without
   `@RDMA`. Make the type `@RDMA` or pass its fields.
-- **Function types** work as parameters (of functions, methods and constructors). A lambda
-  as a *result*, or a property of a function type, is not supported.
+- **Lambdas** have at most 3 parameters; `suspend` lambdas and lambdas inside collections or
+  state are not supported. Widget callbacks must return `Unit`.
 - **Enums** cannot be elements of a `List`/`Map`; `values()`/`entries` are not available
   in plugins.
 - **Nullable primitive widget parameters** (`Double?`, `Int?` in a `@Composable @RDMA`
@@ -40,10 +40,10 @@ What does not work yet, in one place. Each item names the workaround where there
 - **Compose** is limited to `remember`, state, the three effects,
   `rememberCoroutineScope` and kernel widgets (see
   [how_to_write_plugin.md](how_to_write_plugin.md#ui)).
-- **Effect keys** that are objects or kernel proxies count as changed on every
-  composition; primitive keys compare normally.
-- **Cancelling** a plugin coroutine does not cancel a kernel `suspend` call already in
-  flight.
+- **Plugin objects as keys compare by identity**, not by `equals`: a new instance of a
+  plugin `data class` equal to the previous one counts as changed (in `remember` keys,
+  effect keys, composable parameters). Kernel objects compare by their `equals`, as in
+  Compose. Keep the instance (`remember`) when skipping matters.
 
 ## Objects and memory
 

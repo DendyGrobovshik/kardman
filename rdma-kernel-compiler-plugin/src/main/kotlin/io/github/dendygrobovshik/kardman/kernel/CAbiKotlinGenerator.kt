@@ -139,7 +139,8 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
     private fun kotlinReturnType(m: MemberType): String = when {
         m.isList -> "COpaquePointer?"
         m.isMap -> "COpaquePointer?"
-        m.type.startsWith("kotlin.Function") -> "Long"
+        // A kernel lambda handed to the plugin crosses as a handle; C++ wraps it as a JS function.
+        m.type.startsWith("kotlin.Function") -> "COpaquePointer?"
         m.type == "kotlin.String" || isEnumType(m.type) -> "CPointer<ByteVar>?"
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> CAbi.forMemberType(m.type).kotlinType
         else -> "COpaquePointer?"
@@ -203,7 +204,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
         // Enum returns cross as their name string.
         isEnumType(m.type) -> "rdmaStringToCStr(($expr).name)"
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> expr
-        m.type.startsWith("kotlin.Function") -> expr
+        m.type.startsWith("kotlin.Function") -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
         else -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
     }
 
@@ -257,18 +258,12 @@ $resolutions    return ${info.qualifiedName}($args).handle()
      * Kotlin function type, holding the block (runtime_rework §4) with its parameter
      * descriptors (§4.5). Id 0 (null/absent) → null.
      */
-    private fun memberLambdaDecl(p: ParameterInfo, raw: String): String? {
-        val ty = p.functionType?.type as? RdmaType.FunctionType ?: return null
-        val n = ty.parameters.size
-        val argNames = (0 until n).joinToString(", ") { "p$it" }
-        val argsArray = if (n == 0) "emptyArray<Any?>()" else (0 until n).joinToString(", ", "arrayOf<Any?>(", ")") { "p$it" }
-        val descs = RdmaCallbackDescs.joined(ty.parameters)
+    private fun memberLambdaDecl(p: ParameterInfo, raw: String): String? = lambdaDecl(p.functionType, raw)
+
+    private fun lambdaDecl(functionType: RdmaTypeRef?, raw: String): String? {
+        val ty = functionType?.type as? RdmaType.FunctionType ?: return null
         val fnType = functionParamKotlinFnType(ty)
-        return "    val ${raw}_fn: ($fnType)? = if ($raw == 0L) null else run {\n" +
-            "        val ${raw}_ref = io.github.dendygrobovshik.kardman.runtime.RdmaBlockRef($raw).withParamDescs(\"$descs\")\n" +
-            "        val ${raw}_lambda: $fnType = { $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda(${raw}_ref.id, $argsArray); ${raw}_ref.touch(); Unit }\n" +
-            "        ${raw}_lambda\n" +
-            "    }\n"
+        return "    val ${raw}_fn: ($fnType)? = if ($raw == 0L) null else ${blockLambda(ty, raw)}\n"
     }
 
     private fun memberParamFromC(p: ParameterInfo, raw: String): String =
@@ -322,9 +317,12 @@ fun $getterName(handle: COpaquePointer): ${kotlinReturnType(m)} {
         registered += getterName
         if (prop.isMutable) {
             val setterName = cName(info.className + "_set" + prop.name.replaceFirstChar { it.uppercase() })
+            // A lambda-typed property receives the plugin's block id and holds it as a Kotlin lambda.
+            val lambda = lambdaDecl(prop.functionType, "value")
+            val assigned = if (lambda == null) fromC("value", m) else if (prop.nullable) "value_fn" else "value_fn!!"
             out.write("""
 fun $setterName(handle: COpaquePointer, value: ${kotlinType(m)}) {
-    rdmaCaptureError(Unit) { handle.obj<${info.qualifiedName}>().${prop.name} = ${fromC("value", m)} }
+${lambda ?: ""}    rdmaCaptureError(Unit) { handle.obj<${info.qualifiedName}>().${prop.name} = $assigned }
 }
 """)
             registered += setterName
@@ -423,8 +421,28 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
 
     private fun functionParamKotlinFnType(t: RdmaType.FunctionType): String = buildString {
         append("(")
-        append(t.parameters.joinToString(", ") { p -> rdmaTypeKotlin(p.type) })
-        append(") -> Unit")
+        append(t.parameters.joinToString(", ") { p -> refKotlin(p) })
+        append(") -> ")
+        append(refKotlin(t.returnType))
+    }
+
+    private fun refKotlin(t: RdmaTypeRef): String = when (val ty = t.type) {
+        is RdmaType.FunctionType -> "(" + functionParamKotlinFnType(ty) + ")" + (if (t.nullable) "?" else "")
+        else -> rdmaTypeKotlin(ty) + (if (t.nullable && ty !is RdmaType.UnitType) "?" else "")
+    }
+
+    /**
+     * The Kotlin lambda that calls plugin block [rawId]: an `RdmaFunctionN` holding the block.
+     * Without a result it posts the call (fire-and-forget); with one it waits for the value
+     * on the Hermes thread (routed like a hotfix slot).
+     */
+    private fun blockLambda(ty: RdmaType.FunctionType, rawId: String): String {
+        val n = ty.parameters.size
+        require(n <= 3) { "lambda with $n parameters cannot cross (at most 3)" }
+        val typeArgs = (ty.parameters.map { refKotlin(it) } + refKotlin(ty.returnType)).joinToString(", ")
+        val pd = RdmaCallbackDescs.joined(ty.parameters)
+        val rd = RdmaCallbackDescs.of(ty.returnType).let { if (it == "kotlin.Unit") "" else it }
+        return "io.github.dendygrobovshik.kardman.runtime.RdmaFunction$n<$typeArgs>($rawId, \"$pd\", \"$rd\")"
     }
 
     private fun writeFunction(out: BufferedWriter, fn: RdmaFunctionInfo, registered: MutableList<String>) {
@@ -449,9 +467,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
             // The lambda holds the plugin block (runtime_rework §4) and carries its
             // parameter descriptors (§4.5).
             val descs = RdmaCallbackDescs.joined(ty.parameters)
-            lambdaDecls.append("    val ${raw}_ref = io.github.dendygrobovshik.kardman.runtime.RdmaBlockRef($raw).withParamDescs(\"$descs\")\n")
-            lambdaDecls.append("    val ${raw}_fn: ${functionParamKotlinFnType(ty)} = " +
-                "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda(${raw}_ref.id, $argsArray); ${raw}_ref.touch(); Unit }\n")
+            lambdaDecls.append("    val ${raw}_fn: ${functionParamKotlinFnType(ty)} = ${blockLambda(ty, raw)}\n")
         }
 
         val resolutions = StringBuilder()
@@ -501,9 +517,7 @@ $body}
             // The lambda holds the plugin block (runtime_rework §4) and carries its
             // parameter descriptors (§4.5).
             val descs = RdmaCallbackDescs.joined(ty.parameters)
-            lambdaDecls.append("        val ${raw}_ref = io.github.dendygrobovshik.kardman.runtime.RdmaBlockRef($raw).withParamDescs(\"$descs\")\n")
-            lambdaDecls.append("        val ${raw}_fn: ${functionParamKotlinFnType(ty)} = " +
-                "{ $argNames -> io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost.nativeInvokeLambda(${raw}_ref.id, $argsArray); ${raw}_ref.touch(); Unit }\n")
+            lambdaDecls.append("        val ${raw}_fn: ${functionParamKotlinFnType(ty)} = ${blockLambda(ty, raw)}\n")
         }
         val resolutions = StringBuilder()
         fn.parameters.forEachIndexed { i, p ->
@@ -522,7 +536,7 @@ $body}
         val result = if ((fn.returnType.type as? RdmaType.Ref)?.let { isEnumType(it.fqn) } == true) "($call).name" else call
         out.write("""
 fun $name(${declParams.joinToString(", ")}) {
-    RdmaSuspend.launch {
+    RdmaSuspend.launch(completionId) {
 $lambdaDecls$resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
         catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
     }
@@ -557,7 +571,7 @@ $lambdaDecls$resolutions        try { RdmaSuspend.completeResult(completionId, $
         val result = if (method.returnType in enumFqns) "($call).name" else call
         out.write("""
 fun $name(${declParams.joinToString(", ")}) {
-    RdmaSuspend.launch {
+    RdmaSuspend.launch(completionId) {
 $resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
         catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
     }

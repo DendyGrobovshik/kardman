@@ -25,5 +25,5 @@ actual fun contentVersion(): Int = RdmaBridge.nativeContentVersion()
 
 @Composable
 actual fun PreviewContent() {
-    RdmaComposeHost.Content()
+    RdmaComposeHost.Component("generated/main")
 }

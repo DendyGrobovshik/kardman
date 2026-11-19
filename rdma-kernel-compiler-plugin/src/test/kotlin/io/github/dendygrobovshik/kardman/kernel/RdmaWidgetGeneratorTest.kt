@@ -181,4 +181,27 @@ class RdmaWidgetGeneratorTest {
         // The JNI cache signature includes the mask `I` after the params, before the composer.
         assertContains(bridge, "Ljava/lang/String;JI")
     }
+
+    @Test
+    fun `defaulted modifier ref and callback params resolve via mask`() {
+        // The Compose shape: `Button(text, modifier: Modifier = Modifier(), onClick: () -> Unit = {})`.
+        val widget = RdmaFunctionInfo(
+            name = "Button",
+            qualifiedName = "com.example.kernel.Button",
+            facadeClass = "com.example.kernel.WidgetsKt",
+            composable = true,
+            parameters = listOf(
+                RdmaParameterInfo("text", RdmaTypeRef(RdmaType.Primitive("kotlin.String"))),
+                RdmaParameterInfo("modifier", RdmaTypeRef(RdmaType.Ref("com.example.kernel.Modifier")), hasDefault = true, defaultValue = "Modifier()"),
+                RdmaParameterInfo("onClick", RdmaTypeRef(RdmaType.FunctionType(emptyList(), RdmaTypeRef(RdmaType.UnitType))), hasDefault = true, defaultValue = "{}"),
+            ),
+            returnType = RdmaTypeRef(RdmaType.UnitType),
+        )
+        val (_, kt) = generate(listOf(widget))
+        val entries = kt["RdmaWidgetEntries.kt"] ?: error("not generated")
+        assertContains(entries, "fun composeButton(_p0: String?, _p1: Modifier?, _p2: Long, mask: Int) {")
+        // An omitted modifier is built on the kernel side: no crossing for the default.
+        assertContains(entries, "val modifier: Modifier = if (mask and 2 != 0) (Modifier()) else _p1!!")
+        assertContains(entries, "val onClick: () -> Unit = if (mask and 4 != 0) ({}) else rdmaRememberCallback0(_p2)")
+    }
 }

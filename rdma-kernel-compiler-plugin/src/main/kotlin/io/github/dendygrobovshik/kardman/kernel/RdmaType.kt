@@ -195,6 +195,8 @@ object RdmaTypeValidator {
 
         fun checkProperty(p: PropertyInfo, path: String) {
             when {
+                // A lambda-typed property: its parameter and result types must cross.
+                p.functionType != null -> errors += validate(p.functionType!!, isRdmaClass).map { "$path: $it" }
                 p.isList -> {
                     val elem = p.listElementType
                     if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)
@@ -211,6 +213,7 @@ object RdmaTypeValidator {
 
         fun checkMethodReturn(m: MethodInfo, path: String) {
             when {
+                m.returnFunctionType != null -> errors += validate(m.returnFunctionType!!, isRdmaClass).map { "$path: $it" }
                 m.isList -> {
                     val elem = m.listElementType
                     if (elem == null) errors.add("$path: list element type is missing") else checkDescriptor(elem, path)

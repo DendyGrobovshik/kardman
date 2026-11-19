@@ -20,9 +20,13 @@
 // shim (via cinterop). This is deliberately a separate, pure-C header from
 // RdmaComposeCAbi.h, which also declares the Kotlin-defined shim surface (those
 // are exported via @CName and must not be re-imported here).
-void rdma_nativeInvokeContent(void);
 void rdma_nativeInvokeScopeBlock(int64_t blockId, int32_t changed);
 void rdma_nativeInvokeScopeBlock1(int64_t blockId, int32_t changed, int32_t p1);
+// Components (docs/internals/compose_protocol.md#components): the registered block of the
+// component `name` (0 if none), and a composition of it with kernel arguments converted
+// by its descriptors (CONSUMES `argsHandle`).
+int64_t rdma_componentBlock(const char* name);
+void rdma_nativeInvokeComponent(int64_t blockId, void* argsHandle);
 void rdma_nativeInvokeCallback(int64_t blockId, void* argsHandle);
 // Hotfix slot (docs/design/runtime_rework.md §6): runs the JS implementation and
 // returns a NEW handle to its kernel-typed result. `*status`: 0 = ok, 1 = fall

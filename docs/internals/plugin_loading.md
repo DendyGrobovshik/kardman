@@ -46,8 +46,9 @@ unless the build passes `-PrdmaForceBakePlugins` (the stand's crash-test plugins
 
 ## Content
 
-A plugin's `main()` runs at eval and calls `runRdmaApp { … }`, which registers its content
-(`RDMA.registerContent`). The host renders it with `RdmaComposeHost.Content()`. A plugin
+A plugin's `main()` runs at eval and registers its components (`registerComponent`). The
+host renders them by name with `RdmaComposeHost.Component(...)`
+([compose_protocol.md](compose_protocol.md#components)). A plugin
 loaded later registers new content; the host observes `nativeContentVersion()` and
 recomposes under `key(contentVersion)`.
 

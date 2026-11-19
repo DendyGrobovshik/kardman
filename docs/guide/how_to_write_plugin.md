@@ -22,7 +22,7 @@ kernel's `@RDMA` declarations and uses them as if they were local:
 import com.example.kernel.internal.Person
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 
 @Composable
 fun App() {
@@ -33,13 +33,41 @@ fun App() {
 }
 
 fun main() {
-    runRdmaApp { App() }
+    registerComponent("main") { App() }
 }
 ```
 
 There is no serialization or glue code to write. Behind the scenes a kernel object stays
 in the kernel and the plugin holds a proxy to it; a kernel `List` is a real Kotlin list in
 the plugin, so the whole stdlib works on it.
+
+## Components
+
+A plugin shows UI by registering **components** in `main()`; the app renders them by name
+wherever it wants — a screen, a cell of a native list, a dialog — and as many times as it
+wants. A component may take up to 3 parameters of boundary types:
+
+```kotlin
+fun main() {
+    registerComponent("feed-card") { item: FeedItem, compact: Boolean -> FeedCard(item, compact) }
+}
+```
+
+```kotlin
+// app (native)
+RdmaComposeHost.Component("alice:feed/feed-card", item, true)
+```
+
+- The full name is `"<pluginId>/<name>"`.
+- Each place that renders a component has its own state: two cards of one plugin in a feed
+  do not share their `remember`s.
+- A place that renders a component before the plugin is loaded shows nothing and fills in
+  as soon as the component is registered.
+- A new plugin version is used the next time a component appears; places already on screen
+  keep the version they started with (an app that wants new code at once can key its
+  content on `RdmaBridge.nativeContentVersion()`).
+- Arguments are converted by the declared parameter types; a value of another type throws
+  `RdmaException`.
 
 ## Data
 
@@ -86,6 +114,19 @@ Anything else from `androidx.compose.*` (`derivedStateOf`, `snapshotFlow`,
 kernel doesn't support 'derivedStateOf' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
 ```
 
+Modifiers are a kernel class too (if your kernel defines one — the demo's is the reference).
+Start a chain with `Modifier()` and pass it to a widget:
+
+```kotlin
+Row(modifier = Modifier().fillMaxWidth()) {
+    Text("Name", modifier = Modifier().weight(1.0))
+    Button("Go", modifier = Modifier().padding(4.0)) { count++ }
+}
+```
+
+Sizes are `Double` dp, colors ARGB `Long` (`0xFFE3F2FD`). Scope modifiers (`weight`,
+`align`) work inside the container they belong to and are ignored elsewhere.
+
 State rules:
 
 - The state's type must be concrete: `mutableStateOf<Any?>(…)` does not compile. The type
@@ -104,7 +145,8 @@ a resumable function on that thread, not a background task.
   is a compile error.
 - `delay` and `withTimeout` work on real timers.
 - For real parallelism call a kernel `suspend` function or a function with a callback; the
-  kernel does the work on its own threads. See
+  kernel does the work on its own threads. Cancelling the coroutine that waits for a kernel
+  `suspend` call cancels the kernel call too. See
   [threads_and_performance.md](threads_and_performance.md).
 
 ## Errors

@@ -44,7 +44,7 @@ const val STUB_FILE_PREFIX = "RdmaKernelStubs_"
 object RdmaPluginTransformState {
     var outputDir: String = ""
     var pluginPackage: String = "com.example.plugin"
-    var runRdmaAppFqn: String = "com.example.kernel.runRdmaApp"
+    var registerComponentFqn: String = "com.example.kernel.registerComponent"
     var kernelRootPackage: String = ""
     var pluginId: String = ""
     var pluginVersion: Int = 1
@@ -92,7 +92,7 @@ object RdmaPluginTransformState {
     fun configure(
         manifestPaths: List<String>,
         pluginPackage: String?,
-        runRdmaAppFqn: String?,
+        registerComponentFqn: String?,
         kernelRootPackage: String?,
         outputDir: String?,
         pluginId: String?,
@@ -104,7 +104,7 @@ object RdmaPluginTransformState {
     ) {
         outputDir?.let { this.outputDir = it }
         pluginPackage?.let { this.pluginPackage = it }
-        runRdmaAppFqn?.let { this.runRdmaAppFqn = it }
+        registerComponentFqn?.let { this.registerComponentFqn = it }
         kernelRootPackage?.let { this.kernelRootPackage = it }
         pluginId?.let { this.pluginId = it }
         pluginVersion?.let { this.pluginVersion = it }
@@ -147,7 +147,7 @@ object RdmaPluginTransformState {
     fun isEnumQualifiedName(fqn: String): Boolean = enums.any { it.qualifiedName == fqn }
 
     fun isFunctionQualifiedName(fqn: String): Boolean =
-        functions.any { it.qualifiedName == fqn } || fqn == runRdmaAppFqn || fqn in composeBridgeable
+        functions.any { it.qualifiedName == fqn } || fqn == registerComponentFqn || fqn in composeBridgeable
 
     /** Compose entry points the JVM pass still rewrites into typed runtime-bridge calls. */
     fun isComposeEntryPoint(fqn: String): Boolean = fqn in composeBridgeable
@@ -282,7 +282,7 @@ object RdmaPluginTransformState {
      * unchanged while emitting exactly call form v1.
      */
     private fun writeKernelStubs(outDir: File) {
-        val files = RdmaKernelStubGenerator(rawManifests, pluginId, pluginPackage, runRdmaAppFqn).generate()
+        val files = RdmaKernelStubGenerator(rawManifests, pluginId, pluginPackage, registerComponentFqn).generate()
         if (files.isEmpty()) return
         outDir.mkdirs()
         for ((name, content) in files) File(outDir, name).writeText(content)

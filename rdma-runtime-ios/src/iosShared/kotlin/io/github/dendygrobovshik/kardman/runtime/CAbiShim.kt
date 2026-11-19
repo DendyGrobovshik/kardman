@@ -142,6 +142,8 @@ fun rdma_boxObject(): COpaquePointer = StableRef.create(Any()).asCPointer()
 
 fun rdma_boxJsValueHolder(id: Long): COpaquePointer = StableRef.create(JsValueHolder(id)).asCPointer()
 
+fun rdma_boxIdentityKey(id: Long): COpaquePointer = StableRef.create(JsIdentityKey(id) as Any).asCPointer()
+
 // ------------------------------------------------- classification + unboxing
 
 fun rdma_classifyValue(handle: COpaquePointer?): Int {
@@ -581,8 +583,12 @@ fun rdma_scopeUpdateScope(scopeHandle: COpaquePointer, blockId: Long) {
 
 fun rdma_sideEffect(blockId: Long) {
     rdmaCaptureError(Unit) {
+        // Hold the block until the effect has run (the registry frees a block nobody holds
+        // at the end of the JS task); an abandoned composition releases it on finalization.
+        val ref = RdmaBlockRef(blockId)
         rdmaGetCurrentComposer()?.recordSideEffect {
-            RdmaComposeHost.nativeInvokeCallback(blockId, emptyArray<Any?>())
+            RdmaComposeHost.nativeInvokeCallback(ref.id, emptyArray<Any?>())
+            ref.release()
         }
     }
 }
@@ -611,6 +617,7 @@ private val _register = run {
     rdmaRegisterFunction("rdma_boxString", staticCFunction(::rdma_boxString))
     rdmaRegisterFunction("rdma_boxObject", staticCFunction(::rdma_boxObject))
     rdmaRegisterFunction("rdma_boxJsValueHolder", staticCFunction(::rdma_boxJsValueHolder))
+    rdmaRegisterFunction("rdma_boxIdentityKey", staticCFunction(::rdma_boxIdentityKey))
     rdmaRegisterFunction("rdma_classifyValue", staticCFunction(::rdma_classifyValue))
     rdmaRegisterFunction("rdma_valueAsInt", staticCFunction(::rdma_valueAsInt))
     rdmaRegisterFunction("rdma_valueAsLong", staticCFunction(::rdma_valueAsLong))
@@ -623,6 +630,10 @@ private val _register = run {
     rdmaRegisterFunction("rdma_cloneHandle", staticCFunction(::rdma_cloneHandle))
     rdmaRegisterFunction("rdma_arraySize", staticCFunction(::rdma_arraySize))
     rdmaRegisterFunction("rdma_arrayGet", staticCFunction(::rdma_arrayGet))
+    rdmaRegisterFunction("rdma_functionBlockId", staticCFunction(::rdma_functionBlockId))
+    rdmaRegisterFunction("rdma_onComponentsChanged", staticCFunction(::rdma_onComponentsChanged))
+    rdmaRegisterFunction("rdma_cancelSuspend", staticCFunction(::rdma_cancelSuspend))
+    rdmaRegisterFunction("rdma_invokeFunction", staticCFunction(::rdma_invokeFunction))
     rdmaRegisterFunction("rdma_listSize", staticCFunction(::rdma_listSize))
     rdmaRegisterFunction("rdma_listGet", staticCFunction(::rdma_listGet))
     rdmaRegisterFunction("rdma_listSet", staticCFunction(::rdma_listSet))

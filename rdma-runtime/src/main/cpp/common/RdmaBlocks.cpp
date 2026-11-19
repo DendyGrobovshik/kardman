@@ -28,6 +28,7 @@ struct Entry {
     std::shared_ptr<jsi::Function> fn; // touched on the JS thread only
     std::string pluginId;
     std::vector<std::string> paramDescs;
+    std::string resultDesc; // "" = no result (Unit): invocations are fire-and-forget
     int holders = 0;
     bool explicitOwned = false;
 };
@@ -156,6 +157,18 @@ std::vector<std::string> rdmaBlockParamDescs(int64_t id) {
     std::lock_guard<std::mutex> lk(g_mutex);
     auto it = g_blocks.find(id);
     return it == g_blocks.end() ? std::vector<std::string>{} : it->second.paramDescs;
+}
+
+void rdmaBlockSetResultDesc(int64_t id, const std::string& desc) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    auto it = g_blocks.find(id);
+    if (it != g_blocks.end()) it->second.resultDesc = desc == "kotlin.Unit" ? std::string() : desc;
+}
+
+std::string rdmaBlockResultDesc(int64_t id) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    auto it = g_blocks.find(id);
+    return it == g_blocks.end() ? std::string() : it->second.resultDesc;
 }
 
 void rdmaBlockSweepUnretained() {

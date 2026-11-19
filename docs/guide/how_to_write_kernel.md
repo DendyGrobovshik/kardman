@@ -62,8 +62,10 @@ signature is a release error. Details: [types.md](types.md#default-parameter-val
 
 ## Callbacks and `suspend`
 
-A parameter of a function type receives a plugin lambda. Calling it from the kernel
-**posts** the call to the plugin's thread and returns at once; the lambda runs
+A parameter (or property) of a function type receives a plugin lambda. Calling a lambda
+that returns a value waits for the result, like a hotfixed function
+([threads_and_performance.md](threads_and_performance.md#hotfixes-and-locks)). Calling a
+`Unit` lambda **posts** the call to the plugin's thread and returns at once; the lambda runs
 asynchronously and its errors go to the global uncaught-exception handler
 ([exceptions.md](exceptions.md)). You may call it from any thread.
 
@@ -112,6 +114,46 @@ fun Column(content: @Composable () -> Unit) { M3Column { content() } }
   val delegate = remember { Delegate { i -> currentActions[i]() } }
   ```
 
+## Modifiers
+
+The framework has no modifier type of its own: a kernel defines one as an ordinary
+`@RDMA` class, and its widgets take it as a parameter. A complete implementation to copy and
+extend is in the demo:
+[`demo/kernel/internal/…/Modifier.kt`](../../demo/kernel/internal/src/commonMain/kotlin/com/example/kernel/internal/Modifier.kt).
+The plugin writes:
+
+```kotlin
+Text("Hi", modifier = Modifier().padding(8.0).background(0xFFE3F2FD).clickable { count++ })
+```
+
+The shape that works well:
+
+- **An immutable chain of elements.** Each method returns a new `Modifier` with one more
+  element; elements are `data class`es, and `equals`/`hashCode` compare the element lists.
+  Mark the class `@Immutable`: a widget that receives an equal chain is skipped. A plugin
+  lambda in an element (`clickable`) compares equal while the plugin passes the same
+  (memoized) lambda.
+- **Applied inside the widget.** The widget turns the chain into a Compose `Modifier` in its
+  own composition (`modifier.toComposeUi()`), so elements with state
+  (`rememberScrollState()`, the click interaction) keep it across recompositions. Key each
+  element by value (`key(element)`), not by index.
+- **Scope elements through a `CompositionLocal`.** `weight` and `align` need `RowScope`,
+  `ColumnScope` or `BoxScope`. The container widget provides its scope to its content; an
+  element outside its container is ignored. Keep the provided value stable (a `data class`
+  around the scope), or every reader recomposes with the container.
+- **Primitive and enum arguments.** `Double` for dp, ARGB `Long` for colors, `@RDMA` enums
+  for alignments. An `@RDMA` value class (`Dp`, `Color`) costs one more crossing per value.
+- **Unique method names** — members cannot be overloaded (`padding`, `paddingSymmetric`,
+  `paddingEach`); defaults are allowed.
+
+Widgets take `modifier: Modifier = Modifier()` as the first optional parameter, as in
+Compose. Defaulted parameters must be trailing, so give the trailing lambda a default too —
+`content: @Composable () -> Unit = {}`, `onClick: () -> Unit = {}` — the trailing-lambda
+call syntax still binds it.
+
+Each chain call is one synchronous call into the kernel on the plugin's thread, and the
+chain is rebuilt on every recomposition of the code that builds it.
+
 ## `open` classes
 
 The plugin may subclass an `open` `@RDMA` class and override its `open` methods. The
@@ -126,7 +168,7 @@ A kernel module's non-`@RDMA` **concrete classes** must be `internal` or `privat
 public non-`@RDMA` class could otherwise leak into an `@RDMA` signature. Interfaces,
 objects and top-level `val`s may stay public (for example a `KernelServiceProvider`
 interface and a `KernelServices` registry the app implements), as may the entry point
-`runRdmaApp`.
+`registerComponent` placeholders of the `internal` module.
 
 ## Referencing another kernel module
 

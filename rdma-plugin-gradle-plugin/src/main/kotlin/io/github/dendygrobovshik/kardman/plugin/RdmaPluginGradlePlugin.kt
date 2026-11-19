@@ -136,7 +136,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 external object RDMA {
-    fun registerContent(content: dynamic, pluginId: String)
+    fun registerComponent(name: String, paramDescs: String, content: dynamic, pluginId: String)
     fun setComposerEmpty(empty: Any)
     fun mutableStateOf(value: dynamic, typeDesc: String): dynamic
     fun mutableStateListOf(elements: dynamic, typeDesc: String): dynamic
@@ -233,7 +233,7 @@ fun rdmaCollectionPrototypes(): dynamic {
 // Installs the collection classifiers on the RDMA bridge. Top-level `val`
 // initializers run in the module init block (before `main`), but Kotlin/JS DCE
 // removes an unreferenced private val; keep it public and reference it from
-// `rdmaRunApp` so the classifiers are always installed at bundle load.
+// `rdmaRegisterComponent` so the classifiers are always installed at bundle load.
 val rdmaListKindInstalled = run {
     RDMA.listKind = { value: dynamic -> rdmaListKind(value) }
     RDMA.mapKind = { value: dynamic -> rdmaMapKind(value) }
@@ -324,10 +324,12 @@ fun rdmaRememberCoroutineScope(): CoroutineScope {
     return scope
 }
 
-fun rdmaRunApp(content: @Composable () -> Unit) {
+// A component: a composable the host renders by name (`<pluginId>/<name>`) with typed
+// arguments (`paramDescs`, baked by the JVM pass), any number of times.
+fun rdmaRegisterComponent(name: String, paramDescs: String, content: Any) {
     rdmaListKindInstalled
     RDMA.setComposerEmpty(Composer.Companion.Empty)
-    RDMA.registerContent(content, "$pluginId")
+    RDMA.registerComponent("$pluginId/" + name, paramDescs, content, "$pluginId")
 }
 """
 
@@ -375,8 +377,8 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
                 }
             }
 
-            val runRdmaAppFqn = internals.firstOrNull()?.let { internalPath ->
-                "${kernelPackageOf(project.rootProject, kernelContainer, internalPath, kernelRootPackage)}.runRdmaApp"
+            val registerComponentFqn = internals.firstOrNull()?.let { internalPath ->
+                "${kernelPackageOf(project.rootProject, kernelContainer, internalPath, kernelRootPackage)}.registerComponent"
             }
 
             val moduleDeps = visiblePaths.map { kernelModuleIdOf(kernelContainer, it) }
@@ -399,7 +401,7 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
             listOf(
                 SubpluginOption("rdmaManifest", manifestPaths.joinToString(File.pathSeparator)),
                 SubpluginOption("pluginPackage", pluginPackage),
-                SubpluginOption("runRdmaAppFqn", runRdmaAppFqn ?: ""),
+                SubpluginOption("registerComponentFqn", registerComponentFqn ?: ""),
                 SubpluginOption("kernelRootPackage", kernelRootPackage),
                 SubpluginOption("rdmaOutputDir", outputDir),
                 SubpluginOption("pluginId", pluginId),

@@ -121,6 +121,8 @@ step_2_run_and_assert() {
     wait_marker "$log" "SUSPEND_TIMEOUT_OK: result=null"
     wait_marker "$log" "SUSPEND_TIMEOUT_DONE: result=done"
     wait_marker "$log" "SUSPEND_CANCEL_OK"
+    # Cancelling the plugin coroutine cancels the kernel suspend call.
+    wait_marker "$log" "SUSPEND_KERNEL_CANCEL: cancelled=true"
     wait_marker "$log" "ENUM_WHEN: get"
     wait_marker "$log" "ENUM_SUSPEND_WHEN: post"
     wait_marker "$log" "ENUM_CONFIG: label=method=POST isGet=false"

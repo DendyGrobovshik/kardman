@@ -16,6 +16,8 @@
 package io.github.dendygrobovshik.kardman.runtime
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -32,6 +34,31 @@ object RdmaSuspend {
         scope.launch(block = block)
     }
 
+    // In-flight calls by completion id, so the plugin can cancel one (its coroutine was
+    // cancelled): the kernel call is cancelled too (docs/internals/suspend.md).
+    private val jobs = kotlin.concurrent.AtomicReference<Map<Long, Job>>(emptyMap())
+
+    private fun update(change: (Map<Long, Job>) -> Map<Long, Job>) {
+        while (true) {
+            val current = jobs.value
+            if (jobs.compareAndSet(current, change(current))) return
+        }
+    }
+
+    fun launch(completionId: Long, block: suspend CoroutineScope.() -> Unit) {
+        val job = scope.launch(start = CoroutineStart.LAZY, block = block)
+        update { it + (completionId to job) }
+        job.invokeOnCompletion { update { m -> m - completionId } }
+        job.start()
+    }
+
+    /** Called by the runtime when the plugin cancels the coroutine waiting for [completionId]. */
+    fun cancel(completionId: Long) {
+        val job = jobs.value[completionId]
+        update { it - completionId }
+        job?.cancel()
+    }
+
     fun completeResult(completionId: Long, value: Any?) {
         RdmaComposeHost.nativeInvokeContinuation(completionId, value)
     }
@@ -40,3 +67,6 @@ object RdmaSuspend {
         RdmaComposeHost.nativeInvokeContinuationError(completionId, throwable)
     }
 }
+
+/** `rdma_cancelSuspend` (registered in the C ABI function registry). */
+fun rdma_cancelSuspend(completionId: Long) = RdmaSuspend.cancel(completionId)

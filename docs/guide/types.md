@@ -52,10 +52,15 @@ violation is a compile error in the kernel.
   `emptyMap()` cross, with the same sharing as lists. Keys must be primitives, `String`
   or `@RDMA` types; values may be any boundary type. `keys`/`values`/`entries` are live
   views.
-- **Function types** — the plugin's lambda is registered and the kernel gets a reference
-  to it; calling it from the kernel runs the lambda in the plugin asynchronously. Its
-  parameter types must be boundary types. Lambda *results* and properties of a function
-  type are not supported yet.
+- **Function types** — parameters, properties and results may be lambdas; their parameter
+  and result types must be boundary types.
+  - A plugin lambda handed to the kernel is registered, and the kernel holds a reference to
+    it. If the lambda returns `Unit`, a call from the kernel is posted and returns at once;
+    if it returns a value, the kernel waits for it (on the plugin's thread, with a 5 s
+    timeout from background threads) and exceptions reach the kernel caller.
+  - A kernel lambda handed to the plugin becomes a plugin function; calling it runs the
+    kernel code synchronously, like a method. A plugin lambda that went through the kernel
+    comes back as the same function (`===` holds).
 
 How collections work inside: [collections.md](../internals/collections.md).
 

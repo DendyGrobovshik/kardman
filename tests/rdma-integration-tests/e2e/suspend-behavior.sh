@@ -136,6 +136,8 @@ step_14_timer_timeout() {
 step_15_timer_cancel() {
     step "15: cancelling a pending delay"
     wait_logcat "RdmaRuntime" "SUSPEND_CANCEL_OK"
+    # Cancelling the plugin coroutine cancels the kernel suspend call.
+    wait_logcat "RdmaRuntime" "SUSPEND_KERNEL_CANCEL: cancelled=true"
 }
 
 step_16_enum_boundary() {

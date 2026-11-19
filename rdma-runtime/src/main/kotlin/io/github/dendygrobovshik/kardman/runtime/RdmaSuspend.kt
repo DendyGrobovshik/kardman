@@ -16,6 +16,8 @@
 package io.github.dendygrobovshik.kardman.runtime
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -33,6 +35,23 @@ object RdmaSuspend {
 
     fun launch(block: suspend CoroutineScope.() -> Unit) {
         scope.launch(block = block)
+    }
+
+    // In-flight calls by completion id, so the plugin can cancel one (its coroutine was
+    // cancelled): the kernel call is cancelled too (docs/internals/suspend.md).
+    private val jobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
+
+    fun launch(completionId: Long, block: suspend CoroutineScope.() -> Unit) {
+        val job = scope.launch(start = CoroutineStart.LAZY, block = block)
+        jobs[completionId] = job
+        job.invokeOnCompletion { jobs.remove(completionId) }
+        job.start()
+    }
+
+    /** Called by the runtime when the plugin cancels the coroutine waiting for [completionId]. */
+    @JvmStatic
+    fun cancel(completionId: Long) {
+        jobs.remove(completionId)?.cancel()
     }
 
     fun completeResult(completionId: Long, value: Any?) {

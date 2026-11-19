@@ -870,7 +870,7 @@ each item names what it would add.
 
 | Item | What it adds |
 |---|---|
-| ~~Lambda parameters on `@RDMA` class members~~ | **done (2026-11-18):** `ParameterInfo.functionType` carries the full type; methods and constructors take callbacks on both backends (JNI `createRdmaFunction`, C ABI block id → Kotlin lambda), stubs register blocks. Not yet: lambda results and function-typed properties. Also fixed: default wrappers rendered function types as raw `kotlin.FunctionN` |
+| ~~Lambda parameters on `@RDMA` class members~~ | **done (2026-11-18):** `ParameterInfo.functionType` carries the full type; methods and constructors take callbacks on both backends (JNI `createRdmaFunction`, C ABI block id → Kotlin lambda), stubs register blocks. Lambda results and lambda-typed properties added the same day (sync calls for plugin lambdas with a result; kernel lambdas wrapped as JS functions). Also fixed: default wrappers rendered function types as raw `kotlin.FunctionN` |
 | ~~Supertypes of `@RDMA` classes in the stubs~~ | **done (2026-11-18):** the API description records `superClass`/`isOpen`; a superclass stub is `open` with a `protected` constructor, a subclass stub extends it and does not repeat inherited members |
 | ~~Per-platform analysis + file renames~~ | **done (2026-11-18):** `rdma_manifest.json` → `rdma_api.json` (API description, read by the plugin compiler); `rdma_analysis.json` → `kernel_manifest_<platform>.json` (`android`/`ios`, input of kernel releases). Revisit later: "manifest" also names the changelog fold in `compatibility.md` |
 | ~~Vtable dispatch on the caller's thread~~ | **done (2026-11-18), §6.7 step 3:** routed like slots, typed results, exceptions propagate. Also fixed: a plugin subclass constructed in a file checked before its declaration was not rewritten (constructor rewrites now happen at flush) |
@@ -881,12 +881,17 @@ each item names what it would add.
 | ~~e2e scripts that bake the crash-test plugin~~ | **done (2026-11-18):** the crash-test plugins carry `rdmaBakeInApp=false`; `exception-propagation.sh` bakes them with `-PrdmaForceBakePlugins` |
 | ~~Block-lifetime probe on iOS~~ | **done (2026-11-18):** the iOS stand host probes after a GC; `ios-suspend-behavior.sh` asserts it (4 live blocks after 200 dropped lambdas) |
 | ~~Background-thread calls of hotfixed callables (D5 = B)~~ | **done (2026-11-18), §6.7;** `compatibility.md` §6.4 updated (approved) |
+| ~~Components (several compositions in one runtime)~~ | **done (2026-11-19):** `registerComponent("name") { a: A, b: B -> … }` (0–3 parameters) replaces `runRdmaApp`; the host renders `RdmaComposeHost.Component("<pluginId>/<name>", args…)` anywhere and any number of times, each place with its own state; a new plugin version is used the next time a component appears ([compose_protocol.md](../internals/compose_protocol.md#components)). The single-content path (`registerContent` / `Content()`) was removed. Also fixed: iOS `SideEffect` lost its block before running it |
+| ~~Cancellation of kernel `suspend` calls~~ | **done (2026-11-19):** stubs wait in `suspendCancellableCoroutine`; cancelling calls `RDMA.cancelContinuation`, which cancels the kernel `Job` ([suspend.md](../internals/suspend.md#cancellation)). Prerequisite for `Flow`. Also fixed: Android returned `Boolean` results as numbers |
+| ~~Modifiers~~ | **done (2026-11-19):** an ordinary `@RDMA` class in the kernel, no framework type and no transfer optimisation; the full implementation is in `demo/kernel/internal` ([how_to_write_kernel.md](../guide/how_to_write_kernel.md#modifiers)). Framework change: `RdmaFunctionN` wrappers of one block are equal, so a chain holding a memoized plugin lambda is equal and the widget skips. Widgets keep defaulted parameters trailing (lambdas default to `{}`) |
 
 **Later:**
 
 | Item | Why later |
 |---|---|
-| Plugin subclassing redesign | Overrides compiled as real Kotlin functions with parameters (today: expression-body text without parameters), so native callers can pass arguments to an override (§6.7 step 3) |
+| ~~Identity keys for `changed(object)`~~ | **done (2026-11-19):** the composer proxy passes kernel objects and states as themselves and other JS objects as `JsIdentityKey(id)` (a per-runtime `WeakMap`), for `changed` and effect keys, on both platforms ([compose_protocol.md](../internals/compose_protocol.md#object-keys)). Containers, plugin composables with object parameters, `remember(obj)` and object effect keys now skip as in Compose. Plugin objects compare by identity, not `equals` |
+| `StateFlow` / `Flow` from the kernel | Agreed to take after components and cancellation; `StateFlow` maps onto existing state, `Flow` on top of cancellation; needs a short design |
+| Plugin subclassing redesign (paused, 2026-11-19) | Overrides compiled as real Kotlin functions with parameters (today: expression-body text without parameters), so native callers can pass arguments to an override (§6.7 step 3) |
 | Full hotfix coverage (§2.7): polyfills compiled against the stubs, then `suspend`, lambdas, widgets, properties/statics | Every kind of symbol runs its new version everywhere; each item gets a short design first. Today a `suspend`/lambda hotfix does not even reach JS callers (wrong call form) |
 | Class-member hotfix (stage 4b, §6.5) | Needs its own design: shells, identity, vtables |
 | Slots for `suspend` callables | Needs the reverse async path (JS result → suspended native caller); first in line after the above |

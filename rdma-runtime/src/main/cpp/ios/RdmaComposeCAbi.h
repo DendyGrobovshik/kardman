@@ -38,7 +38,6 @@
 
 // --- C++-defined entry points (imported by Kotlin via cinterop). ---
 extern "C" {
-void rdma_nativeInvokeContent(void);
 void rdma_nativeInvokeScopeBlock(int64_t blockId, int32_t changed);
 void rdma_nativeInvokeScopeBlock1(int64_t blockId, int32_t changed, int32_t p1);
 void rdma_nativeInvokeCallback(int64_t blockId, void* argsHandle);
@@ -85,6 +84,7 @@ inline void* rdma_boxFloat(float v) { static auto fn = (void* (*)(float))rdma_lo
 inline void* rdma_boxBoolean(bool v) { static auto fn = (void* (*)(bool))rdma_lookupFunction("rdma_boxBoolean"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(bool))rdma_lookupFunction("rdma_boxBoolean"); return fn(v); }
 inline void* rdma_boxString(const char* v) { static auto fn = (void* (*)(const char*))rdma_lookupFunction("rdma_boxString"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(const char*))rdma_lookupFunction("rdma_boxString"); return fn(v); }
 inline void* rdma_boxObject() { static auto fn = (void* (*)())rdma_lookupFunction("rdma_boxObject"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)())rdma_lookupFunction("rdma_boxObject"); return fn(); }
+inline void* rdma_boxIdentityKey(int64_t id) { static auto fn = (void* (*)(int64_t))rdma_lookupFunction("rdma_boxIdentityKey"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(int64_t))rdma_lookupFunction("rdma_boxIdentityKey"); return fn(id); }
 inline void* rdma_boxJsValueHolder(int64_t id) { static auto fn = (void* (*)(int64_t))rdma_lookupFunction("rdma_boxJsValueHolder"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(int64_t))rdma_lookupFunction("rdma_boxJsValueHolder"); return fn(id); }
 
 // Returns a NEW owned handle to the same underlying value — for values whose
@@ -209,6 +209,10 @@ jsi::Value rdmaResultToJsiCAbi(jsi::Runtime& rt, RdmaResult& result);
 // Returns the state handle backing a state proxy (or null if `v` is not one).
 void* stateProxyHandle(jsi::Runtime& rt, const jsi::Value& v);
 
+// A Compose key for `changed`/effects: primitives boxed, kernel objects and states as
+// themselves, other JS objects as their identity (RdmaIdentity.h). Owned handle.
+void* rdmaBoxComposeKeyCAbi(jsi::Runtime& rt, const jsi::Value& v);
+
 // Captures a Kotlin exception (recorded by the shim's thread-local buffer via
 // rdma_takeError) into an Error result; returns false if none (Native -> JS, §5).
 bool captureCAbiError(RdmaResult& out);
@@ -216,6 +220,13 @@ bool captureCAbiError(RdmaResult& out);
 // Rethrows a Kotlin exception as a JS Error. Call on the Hermes thread after any
 // Kotlin shim call (used by generated proxies/widgets).
 void checkKotlinError(jsi::Runtime& rt);
+
+// A kernel lambda handed to the plugin as a JS function (CONSUMES `handle`): a lambda that
+// came from the plugin returns the plugin's own function; any other becomes a host function
+// that converts arguments by `paramDescs` and the result by `resultDesc` (C ABI twin of
+// `rdmaWrapNativeFunction`).
+jsi::Value rdmaWrapNativeFunctionCAbi(jsi::Runtime& rt, void* handle, const std::string& paramDescs,
+                                      const std::string& resultDesc);
 
 // Backing block/JS-value registries (shared with the generated composer proxy).
 extern std::shared_ptr<jsi::Object> g_empty;

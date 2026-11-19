@@ -15,6 +15,26 @@
  */
 package com.example.plugin.bob
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import com.example.kernel.internal.Text
+import com.example.kernel.internal.registerComponent
+
 fun main() {
+    // A component with parameters: the host renders "bob:services/card" twice with
+    // different arguments, each with its own state (docs/internals/compose_protocol.md).
+    registerComponent("card") { title: String, count: Int -> Card(title, count) }
+    registerComponent("modifiers") { ModifiersDemo() }
+    registerComponent("keys") { KeysDemo() }
     runServicesDemo()
+}
+
+@Composable
+fun Card(title: String, count: Int) {
+    val created by remember { mutableStateOf("$title#$count") }
+    Text("$title: $count")
+    SideEffect { println("CARD: $title $count state=$created") }
 }

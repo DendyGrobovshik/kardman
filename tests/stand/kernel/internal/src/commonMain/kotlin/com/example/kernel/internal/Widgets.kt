@@ -16,34 +16,51 @@
 package com.example.kernel.internal
 
 import androidx.compose.foundation.layout.Column as M3Column
+import androidx.compose.foundation.layout.Row as M3Row
 import androidx.compose.material3.Button as M3Button
 import androidx.compose.material3.Text as M3Text
 import androidx.compose.runtime.Composable
 import io.github.dendygrobovshik.kardman.RDMA
 
+// Compose-style widgets: `modifier` first among the optional parameters. The framework needs
+// defaulted parameters to be trailing (docs/guide/types.md), so the trailing lambdas default
+// to `{}`; the trailing-lambda call syntax still binds them.
+
 @Composable
 @RDMA
-fun Text(text: String) {
-    M3Text(text)
+fun Text(text: String, modifier: Modifier = Modifier()) {
+    M3Text(text, modifier = modifier.toComposeUi())
 }
 
 @Composable
 @RDMA
-fun Column(content: @Composable () -> Unit) {
-    M3Column {
-        content()
+fun Column(modifier: Modifier = Modifier(), content: @Composable () -> Unit = {}) {
+    M3Column(modifier = modifier.toComposeUi()) {
+        ProvideLayoutScope(LayoutScope.InColumn(this), content)
     }
 }
 
 @Composable
 @RDMA
-fun Button(text: String, onClick: () -> Unit) {
-    M3Button(onClick = onClick) {
+fun Row(modifier: Modifier = Modifier(), content: @Composable () -> Unit = {}) {
+    M3Row(modifier = modifier.toComposeUi()) {
+        ProvideLayoutScope(LayoutScope.InRow(this), content)
+    }
+}
+
+@Composable
+@RDMA
+fun Button(text: String, modifier: Modifier = Modifier(), onClick: () -> Unit = {}) {
+    M3Button(onClick = onClick, modifier = modifier.toComposeUi()) {
         M3Text(text)
     }
 }
 
-fun runRdmaApp(content: @Composable () -> Unit) {
-    // Host-side entry point. In the plugin this call is rewritten by the
-    // plugin compiler plugin into RDMA.registerContent(...).
-}
+// Plugin entry points: a plugin registers composables under a name, and the host renders
+// them with `RdmaComposeHost.Component("<pluginId>/<name>", args…)` — any number of times,
+// each place with its own state. These are host-side placeholders for the plugin's JVM
+// pass; in the plugin they resolve to the runtime bridge (docs/internals/compose_protocol.md).
+fun registerComponent(name: String, content: @Composable () -> Unit) {}
+fun <A> registerComponent(name: String, content: @Composable (A) -> Unit) {}
+fun <A, B> registerComponent(name: String, content: @Composable (A, B) -> Unit) {}
+fun <A, B, C> registerComponent(name: String, content: @Composable (A, B, C) -> Unit) {}

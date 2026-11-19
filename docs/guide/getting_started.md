@@ -159,12 +159,14 @@ The framework modules are published as `io.github.dendygrobovshik.kardman:*:1.0`
    for (module in readModuleManifest()) {
        RdmaBridge.nativeEvalAsset("kotlin/$module.hbc")
    }
-   setContent { RdmaComposeHost.Content() }
+   setContent { RdmaComposeHost.Component("alice:counter/main") }
    ```
 
    `readModuleManifest()` reads the build-generated `kotlin/rdma-modules.json` (bundles
-   in load order: shared dependencies first, then plugins). **Never hardcode the module
-   list**: it changes with compiler and Compose versions, and a wrong order leaves a
+   in load order: shared dependencies first, then plugins). A plugin registers its
+   composables as components; the host renders them by `"<pluginId>/<name>"` anywhere and
+   any number of times ([how_to_write_plugin.md](how_to_write_plugin.md#components)).
+   **Never hardcode the module list**: it changes with compiler and Compose versions, and a wrong order leaves a
    blank screen. Plugins delivered by the store are loaded the same way after a re-sync —
    see [plugin_loading.md](../internals/plugin_loading.md).
 

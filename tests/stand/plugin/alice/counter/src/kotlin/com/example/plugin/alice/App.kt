@@ -25,7 +25,7 @@ import com.example.kernel.internal.Column
 import com.example.kernel.internal.ColumnWithDefault
 import com.example.kernel.internal.Text
 import com.example.kernel.internal.TextWithDefault
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 import com.example.kernel.user.alice.PersonProbe
 
 @Composable
@@ -45,5 +45,5 @@ fun Counter() {
 
 fun main() {
     runPersonDemo()
-    runRdmaApp { Counter() }
+    registerComponent("main") { Counter() }
 }

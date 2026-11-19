@@ -124,7 +124,7 @@ package com.example.plugin.itest
 import androidx.compose.runtime.Composable
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Text
-import com.example.kernel.internal.runRdmaApp
+import com.example.kernel.internal.registerComponent
 
 @Composable
 fun NewPlugContent() {
@@ -134,7 +134,7 @@ fun NewPlugContent() {
 }
 
 fun main() {
-    runRdmaApp { NewPlugContent() }
+    registerComponent("main") { NewPlugContent() }
 }
 EOF
     run_gradle -PrdmaBuiltAgainstToolchain="$generation" "$PLUG:jsProductionExecutableCompileSync"

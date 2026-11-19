@@ -24,6 +24,7 @@ add_library(rdma_runtime SHARED
         common/RdmaRendezvous.cpp
         common/RdmaProxyCore.cpp
         common/RdmaBlocks.cpp
+        common/RdmaIdentity.cpp
         ListHandle.cpp
         MapHandle.cpp
         generated/RdmaComposerProxy.cpp

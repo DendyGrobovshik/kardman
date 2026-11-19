@@ -96,6 +96,18 @@ object RdmaSlots {
     private const val SLOT_ERROR = 2
 }
 
+private val NOT_RUN = Any()
+
+/**
+ * Calls plugin block [blockId] and waits for its result (a lambda with a result): on the
+ * Hermes thread directly, through the rendezvous from the UI thread, through the low queue
+ * with a timeout from any other thread. Null when the runtime is not running yet.
+ */
+fun rdmaCallBlock(blockId: Long, args: Array<Any?>, paramDescs: String, resultDesc: String): Any? {
+    val r = RdmaSlots.invokeNative(blockId, args, paramDescs, resultDesc, NOT_RUN)
+    return if (r === NOT_RUN) null else r
+}
+
 /** `RDMA.installSlot` → Kotlin (registered in the C ABI function registry). */
 fun rdma_installSlot(fqn: CPointer<ByteVar>?, blockId: Long): Long =
     if (fqn == null) 0L else RdmaSlots.install(fqn.toKString(), blockId)

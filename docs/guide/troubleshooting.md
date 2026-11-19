@@ -280,10 +280,11 @@ would otherwise repeat.
 
 ### Host renders a white/blank screen after loading
 
-The plugin's `registerContent` never ran because its dependencies were not loaded, or were
+The plugin's `registerComponent` never ran because its dependencies were not loaded, or were
 loaded in the wrong order. The build generates `rdma-modules.json` (bundles in load
 order); the host must read it — **never hardcode the module list**, since the dependency
-set and order change with the compiler and Compose version. See the demo's
+set and order change with the compiler and Compose version. Also check the component name:
+`RdmaComposeHost.Component` needs the full `"<pluginId>/<name>"`. See the demo's
 `MainActivity` / `MainViewController`.
 
 ### `Property 'RDMA' doesn't exist` / `ReferenceError`

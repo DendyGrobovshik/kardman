@@ -81,12 +81,20 @@ struct ComposeJniCache {
 
     jclass function2Class = nullptr;
     jclass scopeBlockClass = nullptr;
+    // RdmaComposeHost.onComponentsChanged (static): a component was (re)registered.
+    jclass composeHostClass = nullptr;
+    jmethodID onComponentsChanged = nullptr;
+    // RdmaSuspend.cancel (static): the plugin cancelled a coroutine waiting for a kernel call.
+    jclass suspendClass = nullptr;
+    jmethodID suspendCancel = nullptr;
     jmethodID scopeBlockCtor = nullptr;
 
     jclass objectClass = nullptr;
     jmethodID objectCtor = nullptr;
 
     jclass jsValueHolderClass = nullptr;
+    jclass jsIdentityKeyClass = nullptr;
+    jmethodID jsIdentityKeyCtor = nullptr;
     jmethodID jsValueHolderCtor = nullptr;
     jmethodID jsValueHolderGetId = nullptr;
 
@@ -105,6 +113,10 @@ struct ComposeJniCache {
     // (app classes are not visible on a native thread's system classloader).
     jclass rdmaFunctionClass[4] = {nullptr, nullptr, nullptr, nullptr};
     jmethodID rdmaFunctionCtor[4] = {nullptr, nullptr, nullptr, nullptr};
+    jmethodID rdmaFunctionBlockId[4] = {nullptr, nullptr, nullptr, nullptr};
+    // kotlin.jvm.functions.Function{0..3}.invoke — calling a native lambda from JS.
+    jclass functionClass[4] = {nullptr, nullptr, nullptr, nullptr};
+    jmethodID functionInvoke[4] = {nullptr, nullptr, nullptr, nullptr};
 };
 
 extern ComposeJniCache g_composeCache;
@@ -123,7 +135,7 @@ extern thread_local bool g_inComposition;
 // the app classloader). Called from RdmaBridge.nativeInit before rdmaStart().
 void initRdmaComposeJniCache(JNIEnv* env);
 
-// Installs the RDMA JSI namespace (registerContent / setComposerEmpty /
+// Installs the RDMA JSI namespace (registerComponent / setComposerEmpty /
 // mutableStateOf / registerBlock) and invokes the user-bridge hook. JSI-only;
 // runs on the Hermes thread. JNI caches must already be initialized.
 void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx);
@@ -157,11 +169,7 @@ jsi::Value wrapAny(jsi::Runtime& rt, HostContext ctx, jobject obj);
 // The descriptor is a leaf FQN, `list:<elem>`, or `map:<key>:<value>`.
 void rdmaRegisterSuspendResultType(int64_t completionId, const std::string& typeDesc);
 
-// Runs the registered content on the Hermes thread. The passed composer is a
-// global ref owned by the caller (the content task); it is deleted by the caller.
-void invokeRegisteredContent(jsi::Runtime& rt, jobject composerGlobal);
-
-// Returns the current content registration version. Bumped by registerContent on
+// Returns the current content registration version. Bumped by registerComponent on
 // the Hermes thread; read by the host on the UI thread to detect content changes.
 int getContentVersion();
 
@@ -172,6 +180,13 @@ void invokeScopeBlock(jsi::Runtime& rt, long blockId, jobject composerGlobal, ji
 // Like `invokeScopeBlock`, but the guest block is invoked with a single leading
 // user argument (`p1`, e.g. a lazy-list item index) before the composer proxy.
 void invokeScopeBlock1(jsi::Runtime& rt, long blockId, jobject composerGlobal, jint changed, jint p1);
+
+// Components (docs/internals/compose_protocol.md#components): composables a plugin
+// registers by name. The registry holds the latest block per name; a host call site keeps
+// the block it first rendered until it leaves the composition.
+int64_t rdmaComponentBlock(const std::string& name);
+// Runs component block `blockId` with kernel arguments converted by the block's descriptors.
+void invokeComponent(jsi::Runtime& rt, int64_t blockId, jobject composerGlobal, jobjectArray args);
 
 // Converts a UI-thread RdmaResult into a jsi::Value on the Hermes thread.
 jsi::Value rdmaResultToJsi(jsi::Runtime& rt, RdmaResult& result);
@@ -229,6 +244,14 @@ bool captureJniError(JNIEnv* e, RdmaResult& out);
 // the given JS block id. Callable from any attached thread (uses cached jclass).
 jobject createRdmaFunction(JNIEnv* env, int arity, jlong id);
 
+// A kernel lambda handed to the plugin (a lambda-typed property, method or function
+// result) as a JS function. A lambda that came from the plugin (`RdmaFunctionN`) returns
+// the plugin's own JS function; any other lambda becomes a host function that converts
+// its arguments by `paramDescs` (comma-separated) and its result by `resultDesc`, calls
+// the lambda on the Hermes thread and owns a global ref released with the JS function.
+jsi::Value rdmaWrapNativeFunction(jsi::Runtime& rt, JavaVM* jvm, jobject fn,
+                                  const std::string& paramDescs, const std::string& resultDesc);
+
 // State proxy over a kernel `SnapshotMutableState`, typed by the channel's type
 // descriptor (docs/design/type_descriptors.md). Pre-descriptor plugin bundles call
 // `RDMA.mutableStateOf` without a descriptor and keep their old Int/Boolean/String
@@ -236,6 +259,10 @@ jobject createRdmaFunction(JNIEnv* env, int arity, jlong id);
 jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal, const std::string& typeDesc = "kotlin.Any");
 
 jobject stateProxyJObject(jsi::Runtime& rt, const jsi::Value& v);
+
+// A Compose key for `changed`/effects: primitives boxed, kernel objects and states as
+// themselves, other JS objects as their identity (RdmaIdentity.h). Local ref.
+jobject rdmaBoxComposeKey(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v);
 
 // Takes ownership of a global ref to a ScopeUpdateScope.
 jsi::Object makeScopeUpdateScopeProxy(jsi::Runtime& rt, jobject scopeGlobal);
@@ -246,10 +273,6 @@ extern int64_t g_nextJsValueId;
 
 // JNI entry points (declared for clarity; defined in RdmaCompose.cpp).
 extern "C" {
-JNIEXPORT void JNICALL
-Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeContent(
-    JNIEnv* env, jclass, jobject composer);
-
 JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeScopeBlock(
     JNIEnv* env, jclass, jlong blockId, jobject composer, jint changed);

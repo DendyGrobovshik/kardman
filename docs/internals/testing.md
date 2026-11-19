@@ -50,7 +50,7 @@ Each is self-contained and idempotent.
 
 | Script | Covers |
 |---|---|
-| `list-behavior.sh`, `ios-list-behavior.sh` | `List` bridge: mutation, nesting, both directions, stdlib, collections in returns and callbacks |
+| `list-behavior.sh`, `ios-list-behavior.sh` | `List` bridge: mutation, nesting, both directions, stdlib, collections in returns and callbacks; lambdas as values, components, modifiers (applied, scope, skip, click), object keys (skipping with the same plugin object, an equal kernel object, a content lambda) |
 | `map-behavior.sh`, `ios-map-behavior.sh` | `Map` bridge, views, entries |
 | `state-behavior.sh`, `ios-state-behavior.sh` | typed state channels, snapshot collections |
 | `suspend-behavior.sh`, `ios-suspend-behavior.sh` | `suspend`, timers, block lifetime after GC, hotfix from a background thread and its timeout, vtable from native |

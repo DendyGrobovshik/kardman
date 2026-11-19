@@ -175,6 +175,7 @@ class RdmaDefaultWrapperGenerator(
     }
 
     private fun memberKotlinType(m: io.github.dendygrobovshik.kardman.types.MethodInfo): String {
+        m.returnFunctionType?.let { return kotlinType(it) }
         val base = when {
             m.isList -> "List<${descriptorKotlin(m.listElementType ?: "kotlin.Any")}>"
             m.isMap -> "Map<${descriptorKotlin(m.mapKeyType ?: "kotlin.Any")}, ${descriptorKotlin(m.mapValueType ?: "kotlin.Any")}>"

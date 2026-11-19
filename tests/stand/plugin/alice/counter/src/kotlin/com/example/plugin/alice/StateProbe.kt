@@ -44,7 +44,7 @@ import com.example.kernel.user.alice.Person
 // wrongly succeed).
 //
 // Stand invariant: the demo host renders the LAST content registered via
-// `runRdmaApp`, and the load manifest (`assets/kotlin/rdma-modules.json`) evaluates
+// `registerComponent`, and the load manifest (`assets/kotlin/rdma-modules.json`) evaluates
 // plugin bundles in dependency order (bob-services -> alice-counter ->
 // itest-exceptions -> itest-exceptions2). The crash-test plugins are not baked by
 // default (only exception-propagation.sh bakes them), so this module's Counter is the

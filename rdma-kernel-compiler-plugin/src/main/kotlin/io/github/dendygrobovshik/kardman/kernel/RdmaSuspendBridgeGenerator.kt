@@ -82,7 +82,7 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaSuspend
         }
         val callArgs = fn.parameters.joinToString(", ") { it.name }
         val body = tryCatchBlock("${fn.qualifiedName}($callArgs)")
-        return "fun $wrapper(${declParams.joinToString(", ")}) {\n    RdmaSuspend.launch {\n$resolutions$body    }\n}\n"
+        return "fun $wrapper(${declParams.joinToString(", ")}) {\n    RdmaSuspend.launch(completionId) {\n$resolutions$body    }\n}\n"
     }
 
     private fun wrapperForMethod(cls: RdmaClassInfo, m: MethodInfo): String {
@@ -106,7 +106,7 @@ import io.github.dendygrobovshik.kardman.runtime.RdmaSuspend
         }
         val callArgs = m.parameters.joinToString(", ") { it.name }
         val body = tryCatchBlock("self.${m.name}($callArgs)")
-        return "fun $wrapper(${declParams.joinToString(", ")}) {\n    RdmaSuspend.launch {\n$resolutions$body    }\n}\n"
+        return "fun $wrapper(${declParams.joinToString(", ")}) {\n    RdmaSuspend.launch(completionId) {\n$resolutions$body    }\n}\n"
     }
 
     private fun tryCatchBlock(call: String): String =

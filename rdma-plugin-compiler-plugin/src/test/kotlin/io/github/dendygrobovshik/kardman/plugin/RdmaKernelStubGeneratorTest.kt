@@ -46,8 +46,8 @@ class RdmaKernelStubGeneratorTest {
     private fun list(e: RdmaTypeRef) = RdmaTypeRef(RdmaType.ListType(e))
     private fun ref(fqn: String, nullable: Boolean = false) = RdmaTypeRef(RdmaType.Ref(fqn), nullable)
 
-    private fun generate(manifest: RdmaManifest, runRdmaApp: String = "com.k.runRdmaApp"): Map<String, String> =
-        RdmaKernelStubGenerator(listOf(manifest), "alice:counter", "com.p", runRdmaApp).generate()
+    private fun generate(manifest: RdmaManifest, registerComponent: String = "com.k.registerComponent"): Map<String, String> =
+        RdmaKernelStubGenerator(listOf(manifest), "alice:counter", "com.p", registerComponent).generate()
 
     private fun single(manifest: RdmaManifest): String = generate(manifest).getValue("RdmaKernelStubs_com_k.kt")
 
@@ -135,7 +135,7 @@ class RdmaKernelStubGeneratorTest {
                 ),
             ),
         )
-        assertContains(src, "suspend inline fun computeSum(a: kotlin.Int): kotlin.Int = suspendCoroutine { rdmaCont ->")
+        assertContains(src, "suspend inline fun computeSum(a: kotlin.Int): kotlin.Int = suspendCancellableCoroutine { rdmaCont ->")
         assertContains(src, "{ rdmaValue: dynamic -> rdmaCont.resume(rdmaValue.unsafeCast<kotlin.Int>()) },")
         assertContains(src, "RdmaAbi._computeSumAsync(rdmaId, a)")
     }
@@ -227,6 +227,27 @@ class RdmaKernelStubGeneratorTest {
     }
 
     @Test
+    fun `lambda-typed properties and lambda results are typed function values`() {
+        val toText = RdmaTypeRef(RdmaType.FunctionType(listOf(int), string))
+        val src = single(
+            RdmaManifest(
+                classes = listOf(
+                    RdmaClassInfo(
+                        "com.k", "Box", "com.k.Box",
+                        emptyList(),
+                        listOf(MethodInfo("adder", "kotlin.Function1", emptyList(), returnFunctionType = RdmaTypeRef(RdmaType.FunctionType(listOf(int), int)))),
+                        listOf(PropertyInfo("format", "kotlin.Function1", isMutable = true, functionType = toText)),
+                    ),
+                ),
+            ),
+        )
+        assertContains(src, "var format: ((kotlin.Int) -> kotlin.String)")
+        assertContains(src, "inline get() = asDynamic().getFormat().unsafeCast<((kotlin.Int) -> kotlin.String)>()")
+        assertContains(src, "asDynamic().setFormat(RdmaAbi.registerBlock(value, \"alice:counter\"))")
+        assertContains(src, "inline fun adder(): ((kotlin.Int) -> kotlin.Int) = asDynamic().adder().unsafeCast<((kotlin.Int) -> kotlin.Int)>()")
+    }
+
+    @Test
     fun `enum value is the entry name string`() {
         val src = single(
             RdmaManifest(enums = listOf(RdmaEnumInfo("com.k", "HttpMethod", "com.k.HttpMethod", listOf("GET", "POST")))),
@@ -253,8 +274,9 @@ class RdmaKernelStubGeneratorTest {
     }
 
     @Test
-    fun `runRdmaApp forwards to the runtime bridge`() {
+    fun `registerComponent forwards to the runtime bridge with parameter descriptors`() {
         val src = single(RdmaManifest())
-        assertContains(src, "fun runRdmaApp(content: @androidx.compose.runtime.Composable () -> kotlin.Unit) {\n    com.p.rdmaRunApp(content)")
+        assertContains(src, "fun registerComponent(name: kotlin.String, content: @androidx.compose.runtime.Composable () -> kotlin.Unit) {\n    com.p.rdmaRegisterComponent(name, \"\", content)")
+        assertContains(src, "fun <P1, P2> registerComponent(name: kotlin.String, rdmaParamDescs: kotlin.String, content: @androidx.compose.runtime.Composable (P1, P2) -> kotlin.Unit) {\n    com.p.rdmaRegisterComponent(name, rdmaParamDescs, content)")
     }
 }
