@@ -49,8 +49,15 @@ unless the build passes `-PrdmaForceBakePlugins` (the stand's crash-test plugins
 A plugin's `main()` runs at eval and registers its components (`registerComponent`). The
 host renders them by name with `RdmaComposeHost.Component(...)`
 ([compose_protocol.md](compose_protocol.md#components)). A plugin
-loaded later registers new content; the host observes `nativeContentVersion()` and
-recomposes under `key(contentVersion)`.
+loaded later registers new content, and every `Component` place switches to it at once.
+
+## Update points
+
+A re-sync must not change running code. The client stages downloaded bundles with
+`RdmaBridge.stageUpdate(path)`; `RdmaBridge.applyUpdates()` evaluates all staged files, in
+order, as **one** task on the Hermes thread (`rdmaEvalFiles`), so no composition or callback
+runs between them. The host calls it at a point of its choosing; a cold start evaluates the
+newest bundles before the first frame. Polyfills are staged before the plugins that need them.
 
 ## Store and re-sync
 
@@ -63,12 +70,17 @@ bundles in the versions directory and answers:
   `UNAVAILABLE`, `REFUSED`), the target version, the plugin bundle hash and the polyfill
   bundle keys the host needs;
 - `GET /bundle/<key>` — a bundle by content hash or polyfill key
-  (`F:<module>:<H>`, `R:…`);
+  (`F:<module>:<H>`, `R:…`). With `Accept-Encoding: gzip` it is sent as the gzip copy made
+  at release time (`<key>.gz` next to `<key>`, level 9 — on the stand's shared runtime about a
+  third of the size) with `Content-Encoding: gzip`; the store never compresses on the fly. `HttpURLConnection` on Android and `NSURLSession` on
+  iOS ask for it and decompress transparently; the client caches the decompressed bytecode,
+  which Hermes maps directly. Content keys are hashes of the uncompressed bytes;
 - `GET /health`.
 
 The client side is app code, not a framework module yet: the demo kernel's `StoreClient`
 (`installStore`, `resync`) posts to `/resync`, downloads missing bundles into a
-hash-addressed cache directory and evals the plugin and the polyfills it needs. The demo
+hash-addressed cache directory, stages the polyfills and the plugin and applies them (in the
+demo the user's Generate is the update point; the test stand applies right after a re-sync). The demo
 dev server (`demo/server`) adds `/generate`, which compiles submitted code into a plugin
 release.
 

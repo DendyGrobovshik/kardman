@@ -36,6 +36,29 @@ class RdmaDefaultSupportTest {
     }
 
     @Test
+    fun `splitParams ignores commas in lambdas, strings, templates and comments`() {
+        val params = RdmaDefaultSupport.splitParams(
+            "a: (Int, Int) -> Int = { x, y -> x + y }, " +
+                "b: String = \"p, q\", " +
+                "c: String = \"${'$'}{listOf(1, 2).joinToString(\", \")}\", " +
+                "// first, second\n d: Int = 1, " +
+                "/* e, f */ e: Boolean = 1 < 2, " +
+                "f: Map<String, List<Int>> = emptyMap()",
+        )
+        assertEquals(6, params.size, params.toString())
+        assertEquals("a: (Int, Int) -> Int = { x, y -> x + y }", params[0])
+        assertEquals("b: String = \"p, q\"", params[1])
+        assertEquals("e: Boolean = 1 < 2", params[4].substringAfter("*/").trim())
+        assertEquals("f: Map<String, List<Int>> = emptyMap()", params[5])
+    }
+
+    @Test
+    fun `topLevelIndex skips lambdas and strings`() {
+        assertEquals(14, RdmaDefaultSupport.topLevelIndex("x: () -> Unit = { a = 1 }", '='))
+        assertEquals(10, RdmaDefaultSupport.topLevelIndex("s: String = \"=\"", '='))
+    }
+
+    @Test
     fun `splitParams handles arrow types`() {
         val params = RdmaDefaultSupport.splitParams("a: Int, b: (Int, String) -> Unit = {}, c: List<Int>")
         assertEquals(3, params.size)

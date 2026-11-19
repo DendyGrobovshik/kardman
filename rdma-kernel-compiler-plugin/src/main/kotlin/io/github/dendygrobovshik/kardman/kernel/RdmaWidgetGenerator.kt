@@ -417,7 +417,7 @@ $nsClose} // namespace rdma
         val cleanups = params.mapIndexedNotNull { i, p ->
             when {
                 p is Param.Value && p.jvmType == "kotlin.String" -> "        if (j_p${i}g) e->DeleteGlobalRef(j_p${i}g);\n"
-                p is Param.ListVal || p is Param.ListHandle -> "        if (cpp_p$i) e->DeleteGlobalRef(cpp_p$i);\n"
+                p is Param.ListVal || p is Param.ListHandle || p is Param.Ref -> "        if (cpp_p$i) e->DeleteGlobalRef(cpp_p$i);\n"
                 else -> null
             }
         }.joinToString("")
@@ -471,7 +471,7 @@ $cleanups
                 "kotlin.String" ->
                     "                jstring j_p$i = nullptr;\n" +
                         "                if (${notUndef()}count > $i && args[$i].isString()) {\n" +
-                        "                    j_p$i = e->NewStringUTF(args[$i].getString(r).utf8(r).c_str());\n" +
+                        "                    j_p$i = rdmaNewJString(e, r, args[$i].getString(r));\n" +
                         "                }\n" +
                         "                jstring j_p${i}g = j_p$i ? (jstring)e->NewGlobalRef(j_p$i) : nullptr;\n" +
                         "                if (j_p$i) e->DeleteLocalRef(j_p$i);\n" +
@@ -493,11 +493,17 @@ $cleanups
                     "                jobject cpp_p$i = nullptr;\n"
             }
             is Param.Ref ->
+                // The op runs on the UI thread after this returns, so the argument is held by a
+                // global reference of its own (released after the op). An `@RDMA` enum crosses
+                // as its entry name and is rebuilt here.
                 "                jobject cpp_p$i = nullptr;\n" +
                     "                if (${notUndef()}count > $i && args[$i].isObject() && args[$i].asObject(r).hasNativeState(r)) {\n" +
                     "                    auto argObj_$i = args[$i].asObject(r);\n" +
                     "                    auto argState_$i = std::static_pointer_cast<RdmaObjectNativeState>(argObj_$i.getNativeState(r));\n" +
-                    "                    if (argState_$i) cpp_p$i = argState_$i->getObject();\n" +
+                    "                    if (argState_$i && argState_$i->getObject()) cpp_p$i = e->NewGlobalRef(argState_$i->getObject());\n" +
+                    "                } else if (${notUndef()}count > $i && args[$i].isString()) {\n" +
+                    "                    jobject enum_$i = rdmaBoxEnumValue(e, r, args[$i], \"${p.fqn}\");\n" +
+                    "                    if (enum_$i) { cpp_p$i = e->NewGlobalRef(enum_$i); e->DeleteLocalRef(enum_$i); }\n" +
                     "                }\n" +
                     maskLine()
             is Param.Content, is Param.Callback ->

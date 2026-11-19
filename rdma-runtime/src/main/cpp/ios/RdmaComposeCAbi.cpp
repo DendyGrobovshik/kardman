@@ -1597,6 +1597,20 @@ void rdma_eval_file(const char* path) {
     facebook::rdma::rdmaEvalFile(std::string(path));
 }
 
+void rdma_eval_files(const char* newlineSeparatedPaths) {
+    if (!newlineSeparatedPaths) return;
+    std::vector<std::string> paths;
+    std::string all(newlineSeparatedPaths);
+    size_t start = 0;
+    while (start <= all.size()) {
+        size_t end = all.find('\n', start);
+        if (end == std::string::npos) end = all.size();
+        if (end > start) paths.emplace_back(all.substr(start, end - start));
+        start = end + 1;
+    }
+    facebook::rdma::rdmaEvalFiles(paths);
+}
+
 int32_t rdma_content_version(void) {
     return facebook::rdma::g_contentVersion.load(std::memory_order_acquire);
 }

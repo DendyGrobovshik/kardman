@@ -188,6 +188,15 @@ private object CStringArena {
 /** Converts a Kotlin String to a NUL-terminated UTF-8 C string (valid until the thread's arena is cleared). */
 fun rdmaStringToCStr(s: String): CPointer<ByteVar>? = s.cstr.getPointer(CStringArena.arena)
 
+/**
+ * [rdmaStringToCStr] for a value crossing to JS. A C string ends at the first U+0000, so such a
+ * String fails loudly (captured and rethrown in JS) instead of arriving cut short.
+ */
+fun rdmaBoundaryCStr(s: String): CPointer<ByteVar>? {
+    if ('\u0000' in s) throw IllegalArgumentException("a String containing U+0000 cannot cross to JS on iOS yet")
+    return rdmaStringToCStr(s)
+}
+
 fun rdma_clearStringArena() {
     CStringArena.arena.clear()
     CStringArena.arena = Arena()

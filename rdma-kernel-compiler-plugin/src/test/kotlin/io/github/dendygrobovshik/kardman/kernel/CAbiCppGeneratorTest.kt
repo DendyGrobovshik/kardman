@@ -39,6 +39,24 @@ class CAbiCppGeneratorTest {
     }
 
     @Test
+    fun `C ABI header does not use Kotlin parameter names that are C keywords`() {
+        val fn = RdmaFunctionInfo(
+            name = "pick",
+            qualifiedName = "com.example.kernel.pick",
+            facadeClass = "com.example.kernel.PickKt",
+            composable = false,
+            parameters = listOf(
+                RdmaParameterInfo("default", RdmaTypeRef(RdmaType.Primitive("kotlin.Int"))),
+                RdmaParameterInfo("fn", RdmaTypeRef(RdmaType.Primitive("kotlin.Int"))),
+            ),
+            returnType = RdmaTypeRef(RdmaType.Primitive("kotlin.Int")),
+        )
+        val header = generate(emptyList(), listOf(fn)).entries.first { it.key.startsWith("RdmaCAbi") && it.key.endsWith(".h") }.value
+        assertContains(header, "inline int32_t rdma_pick(int32_t a0, int32_t a1)")
+        assertContains(header, "return fn(a0, a1);")
+    }
+
+    @Test
     fun `suspend function generates async host function and registration`() {
         val fn = RdmaFunctionInfo(
             name = "computeSum",

@@ -26,9 +26,41 @@ object RdmaBridge {
     external fun nativeEvalAsset(assetPath: String)
     external fun nativeEvalFile(filePath: String)
     external fun nativeEvalBytes(bytes: ByteArray)
+    private external fun nativeEvalFiles(filePaths: Array<String>)
     external fun nativeIsReady(): Boolean
     external fun nativeContentVersion(): Int
     external fun nativeSetUncaughtExceptionHandler(handler: (String, RdmaException) -> Unit)
+
+    private val staged = mutableListOf<String>()
+
+    /**
+     * Stages a downloaded bundle file (a plugin or a polyfill) for the next update point
+     * (compatibility.md §8.5). Nothing changes until [applyUpdates]: plugins on screen keep
+     * running the code they started with. Stage polyfills before the plugins that need them.
+     * Any thread.
+     */
+    fun stageUpdate(filePath: String) {
+        synchronized(staged) { if (filePath !in staged) staged += filePath }
+    }
+
+    /** True when bundles are waiting for [applyUpdates]. */
+    fun hasStagedUpdates(): Boolean = synchronized(staged) { staged.isNotEmpty() }
+
+    /**
+     * An update point (compatibility.md §8.5): evaluates every staged bundle, in staging order,
+     * as one step on the plugin thread, so nothing runs against a half-applied update. Every
+     * place showing a component of an updated plugin is recreated with the new version (its
+     * `remember` state starts over), and updated kernel functions switch for every caller. Call
+     * it where the user does not watch plugin content: between screens, on returning from the
+     * background. A cold start is the other update point: evaluate the newest bundles before
+     * the first frame. Returns false when nothing was staged. Any thread.
+     */
+    fun applyUpdates(): Boolean {
+        val paths = synchronized(staged) { staged.toTypedArray().also { staged.clear() } }
+        if (paths.isEmpty()) return false
+        nativeEvalFiles(paths)
+        return true
+    }
 
     /** Installs the host-side global uncaught-exception handler (see design §6). */
     fun setUncaughtExceptionHandler(handler: (String, RdmaException) -> Unit) {

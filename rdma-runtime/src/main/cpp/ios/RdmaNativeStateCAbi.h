@@ -22,6 +22,24 @@
 #include "RdmaRendezvous.h"
 #include <functional>
 
+// Strings cross the C ABI as NUL-terminated UTF-8, so a String containing U+0000 would arrive
+// cut short; it fails loudly instead (the Android bridge crosses UTF-16 and has no such limit).
+// `null` gives "" here; the caller passes nullptr for a nullable parameter.
+inline std::string rdmaUtf8Arg(facebook::jsi::Runtime& r, const facebook::jsi::Value& v) {
+    if (v.isNull()) return std::string();
+    std::string s = v.getString(r).utf8(r);
+    if (s.find('\0') != std::string::npos) {
+        throw facebook::jsi::JSError(r, "a String containing U+0000 cannot cross to the kernel on iOS yet");
+    }
+    return s;
+}
+
+// A C string result as a JS value: null for nullptr (a nullable String).
+inline facebook::jsi::Value rdmaCStrToJs(facebook::jsi::Runtime& r, const char* s) {
+    if (!s) return facebook::jsi::Value::null();
+    return facebook::jsi::String::createFromUtf8(r, s);
+}
+
 // Runtime-provided C ABI (implemented in the Kotlin/Native runtime shim and
 // registered via rdma_registerFunction). These inline wrappers call through the
 // registry so call sites stay unchanged.

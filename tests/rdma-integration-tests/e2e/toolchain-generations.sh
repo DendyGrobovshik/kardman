@@ -96,7 +96,10 @@ store_stop() {
 
 store_reload() { curl -fsS "http://localhost:$STORE_PORT/reload" >/dev/null; }
 
-seed_bundle() { cp "$2" "$BUNDLES_DIR/$1"; }
+# Publishes a bundle into the store the way a release does: the bundle plus its gzip copy.
+seed_bundle() {
+    run_gradle :rdma-kernel-compiler-plugin:publishBundle -PversionsDir="$VERSIONS_DIR" -PbundleKey="$1" -PbundleFile="$2"
+}
 
 release() { # release <command> <analysisJson> <polyfillOutDir>
     "$ROOT_DIR/scripts/release.sh" "$1" "$2" "$VERSIONS_DIR" "$3" "internal" ""

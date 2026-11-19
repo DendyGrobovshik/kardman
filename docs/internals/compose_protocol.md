@@ -77,10 +77,13 @@ A component is a plugin composable registered under `"<pluginId>/<name>"`:
   name to the latest block and holds it. Registering a name again releases the previous
   block from the registry, bumps `nativeContentVersion()` and notifies the host
   (`RdmaComposeHost.onComponentsChanged`).
-- **Host**: `RdmaComposeHost.Component(name, args…)` remembers, per call site, an
-  `RdmaBlockRef` of the block it first found — so each place keeps its version until it
-  leaves the composition, and a place waiting for an unregistered component recomposes when
-  the registry changes (a version state). The call converts `args` by the block's
+- **Host**: `RdmaComposeHost.Component(name, args…)` reads the registry on every
+  composition (a version state makes it recompose on any registration) and keys its group on
+  the current block id, holding an `RdmaBlockRef` per place. A replaced block therefore
+  recreates every place at once — registrations only happen at update points
+  (`RdmaBridge.applyUpdates`, a cold start), so two versions of a plugin never run side by
+  side ([compatibility.md §8.5](../design/compatibility.md)). A place waiting for an
+  unregistered component composes as soon as it is registered. The call converts `args` by the block's
   descriptors and runs `fn(args…, composerProxy, 0)` through the rendezvous, exactly like a
   scope block.
 - Each call site is its own group in the native composition, so plugin `remember`s are

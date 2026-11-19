@@ -433,6 +433,9 @@ $nsClose} // namespace rdma
             addAll(params.mapIndexed { i, p -> callArgExpr(i, p) })
             if (hasDefaults) add("mask")
         }.joinToString(", ")
+        val ownedCleanups = params.mapIndexedNotNull { i, p ->
+            if (p is Param.Ref) "                if (owned_p$i && cpp_p$i) rdma_disposeStableRef(cpp_p$i);\n" else null
+        }.joinToString("")
         return """
     {
         auto fn = jsi::Function::createFromHostFunction(
@@ -445,7 +448,7 @@ ${if (hasDefaults) "                int32_t mask = 0;\n" else ""}$extractions
                     if (captureCAbiError(err)) return err;
                     return RdmaResult::undefined();
                 });
-                if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
+$ownedCleanups                if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
                 return jsi::Value::undefined();
             });
         rdma.setProperty(rt, "$jsName", std::move(fn));
@@ -492,11 +495,19 @@ ${if (hasDefaults) "                int32_t mask = 0;\n" else ""}$extractions
                     "                void* cpp_p$i = nullptr;\n"
             }
             is Param.Ref ->
+                // An `@RDMA` enum crosses as its entry name: rebuilt into an owned handle,
+                // disposed after the call.
                 "                void* cpp_p$i = nullptr;\n" +
+                    "                bool owned_p$i = false;\n" +
                     "                if (${notUndef()}count > $i && args[$i].isObject() && args[$i].asObject(r).hasNativeState(r)) {\n" +
                     "                    auto argObj_$i = args[$i].asObject(r);\n" +
                     "                    auto argState_$i = std::static_pointer_cast<RdmaObjectNativeStateCAbi>(argObj_$i.getNativeState(r));\n" +
                     "                    if (argState_$i) cpp_p$i = argState_$i->handle();\n" +
+                    "                } else if (${notUndef()}count > $i && args[$i].isString()) {\n" +
+                    "                    std::string name_$i = args[$i].getString(r).utf8(r);\n" +
+                    "                    cpp_p$i = rdma_enumValueOfHandle(\"${p.fqn}\", name_$i.c_str());\n" +
+                    "                    if (!cpp_p$i) throw jsi::JSError(r, \"no entry '\" + name_$i + \"' in ${p.fqn}\");\n" +
+                    "                    owned_p$i = true;\n" +
                     "                }\n" +
                     maskLine()
             is Param.Content, is Param.Callback ->

@@ -95,10 +95,16 @@ class CAbiCppGenerator(
 
     // ------------------------------------------------------------ C ABI header
 
+    /** A String argument for the C call: nullptr when a nullable parameter received `null`. */
+    private fun cStrArg(cpp: String, index: Int, nullable: Boolean): String =
+        if (nullable) "((count > $index && args[$index].isNull()) ? nullptr : $cpp.c_str())" else "$cpp.c_str()"
+
     private fun cWrapper(ret: String, name: String, params: List<Pair<String, String>>): String {
-        val decl = params.joinToString(", ") { "${it.first} ${it.second}" }
+        // Positional names: a Kotlin parameter may be a C/C++ keyword (`default`, `register`)
+        // or clash with the wrapper's own `fn`; callers pass arguments by position anyway.
+        val decl = params.withIndex().joinToString(", ") { (i, p) -> "${p.first} a$i" }
         val types = params.joinToString(", ") { it.first }
-        val args = params.joinToString(", ") { it.second }
+        val args = params.indices.joinToString(", ") { "a$it" }
         // The registry lookup happens once per function (cached pointer), not per call
         // (docs/design/runtime_rework.md §3.9).
         val cast = "($ret (*)($types))"
@@ -261,7 +267,7 @@ ${info.className}NativeState::~${info.className}NativeState() {
                     "    void* h = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n" +
                         "    return createMapHandle(r, h, \"$key\", \"$value\");\n"
                 }
-                prop.type == "kotlin.String" -> "    const char* s = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n    return jsi::String::createFromUtf8(r, s);\n"
+                prop.type == "kotlin.String" -> "    const char* s = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n    return rdmaCStrToJs(r, s);\n"
                 isEnumType(prop.type) -> "    const char* s = ${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle());\n    return jsi::String::createFromUtf8(r, s);\n"
                 prop.type == "kotlin.Int" -> "    return jsi::Value((double)${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
                 prop.type == "kotlin.Boolean" -> "    return jsi::Value(${cFn(info.className + "_get" + prop.name.replaceFirstChar { it.uppercase() })}(state->handle()));\n"
@@ -301,7 +307,10 @@ $body}
                             "    }\n"
                         argExpr = "v"
                     }
-                    prop.type == "kotlin.String" -> { argBlock = ""; argExpr = "args[0].getString(r).utf8(r).c_str()" }
+                    prop.type == "kotlin.String" -> {
+                        argBlock = "    std::string v = rdmaUtf8Arg(r, args[0]);\n"
+                        argExpr = if (prop.nullable) "(args[0].isNull() ? nullptr : v.c_str())" else "v.c_str()"
+                    }
                     isEnumType(prop.type) -> { argBlock = ""; argExpr = "args[0].getString(r).utf8(r).c_str()" }
                     prop.type == "kotlin.Int" -> { argBlock = ""; argExpr = "(int32_t)args[0].getNumber()" }
                     prop.type == "kotlin.Boolean" -> { argBlock = ""; argExpr = "args[0].getBool()" }
@@ -350,9 +359,9 @@ $argBlock    $setFn(state->handle(), $argExpr);
                 val expr: String
                 if (param.type == "kotlin.String") {
                     out.write("    std::string cpp_${param.name};\n")
-                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(r).utf8(r); }\n")
+                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = rdmaUtf8Arg(r, args[$idx]); }\n")
                     if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
-                    expr = "cpp_${param.name}.c_str()"
+                    expr = cStrArg("cpp_${param.name}", idx, param.nullable)
                 } else if (param.functionType != null) {
                     // A lambda crosses as its block id (wrapped into a Kotlin lambda on the C side).
                     out.write("    int64_t cpp_${param.name} = 0;\n")
@@ -425,7 +434,7 @@ $argBlock    $setFn(state->handle(), $argExpr);
                     }
                     method.isList -> "    return createListHandle(r, jret, \"${method.listElementType ?: ""}\");\n"
                     method.isMap -> "    return createMapHandle(r, jret, \"${method.mapKeyType ?: ""}\", \"${method.mapValueType ?: ""}\");\n"
-                    method.returnType == "kotlin.String" -> "    return jsi::String::createFromUtf8(r, jret);\n"
+                    method.returnType == "kotlin.String" -> "    return rdmaCStrToJs(r, jret);\n"
                     isEnumType(method.returnType) -> "    return jsi::String::createFromUtf8(r, jret);\n"
                     method.returnType == "kotlin.Int" -> "    return jsi::Value((double)jret);\n"
                     method.returnType == "kotlin.Boolean" -> "    return jsi::Value(jret);\n"
@@ -503,9 +512,9 @@ void register${info.className}Bridge(jsi::Runtime& rt) {
                 val expr: String
                 if (param.type == "kotlin.String") {
                     out.write("    std::string cpp_${param.name};\n")
-                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = args[$idx].getString(rt).utf8(rt); }\n")
+                    out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = rdmaUtf8Arg(rt, args[$idx]); }\n")
                     if (guarded) out.write("    if (count <= $idx || args[$idx].isUndefined()) mask |= (1 << $idx);\n")
-                    expr = "cpp_${param.name}.c_str()"
+                    expr = cStrArg("cpp_${param.name}", idx, param.nullable)
                 } else if (param.functionType != null) {
                     // A lambda crosses as its block id (wrapped into a Kotlin lambda on the C side).
                     out.write("    int64_t cpp_${param.name} = 0;\n")
@@ -797,9 +806,9 @@ $nsClose} // namespace rdma
                 is RdmaType.Primitive -> {
                     if (ty.fqn == "kotlin.String") {
                         val decl = "std::string cpp_${p.name}"
-                        val extract = "cpp_${p.name} = args[$idx].getString(r).utf8(r);"
+                        val extract = "cpp_${p.name} = rdmaUtf8Arg(r, args[$idx]);"
                         emitParam(sb, idx, "$decl;", extract, guarded, "std::string cpp_${p.name};")
-                        argNames.add("cpp_${p.name}.c_str()")
+                        argNames.add(cStrArg("cpp_${p.name}", idx, p.type.nullable))
                     } else {
                         val cType = CAbi.forMemberType(ty.fqn).cppType
                         val zero = when (ty.fqn) {
@@ -877,7 +886,7 @@ $nsClose} // namespace rdma
             is RdmaType.Ref -> {
                 if (isEnumType(ty.fqn)) {
                     sb.append("    const char* jret = $call;\n    checkKotlinError(r);\n")
-                    sb.append("    return jsi::String::createFromUtf8(r, jret);\n")
+                    sb.append("    return rdmaCStrToJs(r, jret);\n")
                 } else {
                     val rdma = rdmaClassByName(ty.fqn, allClasses)
                     sb.append("    void* jret = $call;\n    checkKotlinError(r);\n")
@@ -924,7 +933,7 @@ $nsClose} // namespace rdma
     }
 
     private fun primitiveReturn(fqn: String, expr: String): String = when (fqn) {
-        "kotlin.String" -> "jsi::String::createFromUtf8(r, $expr);"
+        "kotlin.String" -> "rdmaCStrToJs(r, $expr);"
         "kotlin.Int" -> "jsi::Value((double)$expr);"
         "kotlin.Boolean" -> "jsi::Value($expr);"
         "kotlin.Long" -> "rdmaLongToJs(r, (long long)$expr);"
@@ -1012,9 +1021,9 @@ $nsClose} // namespace rdma
             is RdmaType.Primitive -> {
                 if (ty.fqn == "kotlin.String") {
                     sb.append("    std::string cpp_${p.name};\n")
-                    sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = args[$argIdx].getString(r).utf8(r);\n")
+                    sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = rdmaUtf8Arg(r, args[$argIdx]);\n")
                     guard()
-                    argNames.add("cpp_${p.name}.c_str()")
+                    argNames.add(cStrArg("cpp_${p.name}", argIdx, p.type.nullable))
                 } else {
                     val cType = CAbi.forMemberType(ty.fqn).cppType
                     val zero = when (ty.fqn) {
@@ -1084,9 +1093,9 @@ $nsClose} // namespace rdma
         fun guard() { if (guarded) sb.append("    if (args[$argIdx].isUndefined()) mask |= (1 << $maskBit);\n") }
         if (p.type == "kotlin.String") {
             sb.append("    std::string cpp_${p.name};\n")
-            sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = args[$argIdx].getString(r).utf8(r);\n")
+            sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = rdmaUtf8Arg(r, args[$argIdx]);\n")
             guard()
-            argNames.add("cpp_${p.name}.c_str()")
+            argNames.add(cStrArg("cpp_${p.name}", argIdx, p.nullable))
         } else if (isEnumType(p.type)) {
             sb.append("    std::string cpp_${p.name};\n")
             sb.append("    if (!args[$argIdx].isUndefined()) cpp_${p.name} = args[$argIdx].isNull() ? \"\" : args[$argIdx].getString(r).utf8(r);\n")
@@ -1171,7 +1180,7 @@ $nsClose} // namespace rdma
     private fun staticImpl(info: RdmaClassInfo, static: StaticInfo, allClasses: List<RdmaClassInfo>): String {
         val call = "${cFn(info.className + "_get" + static.name.replaceFirstChar { it.uppercase() })}()"
         val body = when {
-            static.type == "kotlin.String" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::String::createFromUtf8(r, jret);\n"
+            static.type == "kotlin.String" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return rdmaCStrToJs(r, jret);\n"
             isEnumType(static.type) -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::String::createFromUtf8(r, jret);\n"
             static.type == "kotlin.Int" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value((double)jret);\n"
             static.type == "kotlin.Boolean" -> "    auto jret = $call;\n    checkKotlinError(r);\n    return jsi::Value(jret);\n"

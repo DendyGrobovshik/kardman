@@ -26,6 +26,9 @@ import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.TaskProvider
 import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
 import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSetContainer
+import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+import org.jetbrains.kotlin.gradle.plugin.mpp.Framework
+import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -119,10 +122,19 @@ class RdmaAppGradlePlugin : Plugin<Project> {
         val sharedRuntimePath = target.findProperty("rdmaSharedRuntimeProject")?.toString()
             ?: target.rootProject.findProperty("rdmaSharedRuntimeProject")?.toString()
             ?: ":shared-runtime"
+        // Required, even with one plugin: every plugin (baked in or delivered by the store) runs
+        // on the same full libraries, while a plugin's own copies are trimmed to what that plugin
+        // uses — taking one plugin's copy for everyone breaks the others.
         val sharedRuntimeProject = target.rootProject.findProject(sharedRuntimePath)
-        val sharedRuntimeProdSyncDir = sharedRuntimeProject?.let {
-            File(it.buildDir, "compileSync/js/main/productionExecutable/kotlin")
-        }
+            ?: throw org.gradle.api.GradleException(
+                "Kardman needs a shared runtime module ($sharedRuntimePath): the Kotlin/JS libraries every plugin " +
+                    "runs on (stdlib, Compose runtime, coroutines), compiled whole with -Xir-export-all and " +
+                    "-Xir-dce=false. Add it like the repository's shared-runtime/ module, or point " +
+                    "rdmaSharedRuntimeProject at yours.",
+            )
+        val sharedRuntimeProdSyncDir = File(sharedRuntimeProject.buildDir, "compileSync/js/main/productionExecutable/kotlin")
+        // A plugin's own JS module, by the Kotlin/JS module naming (`<root>-<path with dashes>`).
+        val pluginModuleNames = pluginProjects.map { "${target.rootProject.name}${it.path.replace(':', '-')}.js" }
         val sharedRuntimeModuleName = "${target.rootProject.name}-shared-runtime"
 
         // 1) Generate the user bridge + CMake (no kernel dependency).
@@ -210,6 +222,22 @@ class RdmaAppGradlePlugin : Plugin<Project> {
             }.joinToString(";")
             target.extensions.extraProperties.set(RdmaCAbiGlueSubplugin.GLUE_MODULES_PROPERTY, glueModules)
             target.pluginManager.apply(RdmaCAbiGlueSubplugin::class.java)
+
+            // Kernel types in the framework's ObjC header, so Swift code of the host can use them
+            // (implement a kernel interface, call a kernel service). Kotlin/Native puts only the
+            // framework's own API there unless a dependency is `api` and `export`ed; whole kernel
+            // modules are exported for now. Opt out with `rdmaExportKernelToObjC=false`.
+            val exportKernel = (target.findProperty("rdmaExportKernelToObjC")?.toString() ?: "true") != "false"
+            if (exportKernel) {
+                kotlinExt.sourceSets.matching { it.name == "iosMain" }.configureEach { ss: KotlinSourceSet ->
+                    ss.dependencies { kernelProjects.forEach { kp -> api(kp) } }
+                }
+                (kotlinExt as KotlinMultiplatformExtension).targets.withType(KotlinNativeTarget::class.java).configureEach { t ->
+                    t.binaries.withType(Framework::class.java).configureEach { fw ->
+                        kernelProjects.forEach { kp -> fw.export(kp) }
+                    }
+                }
+            }
         }
 
         val copyGeneratedCppCAbi = target.tasks.register("copyGeneratedCppCAbi") { task ->
@@ -242,18 +270,16 @@ class RdmaAppGradlePlugin : Plugin<Project> {
         // the `hermesc` maven artifact (see `resolveHermesc`), so the AOT path is always used.
         // The shared-runtime bundles are emitted even with no baked-in plugins, because
         // store-delivered (dynamic) plugins depend on them at load time.
-        if (sharedRuntimeProject != null || pluginProjects.isNotEmpty()) {
+        run {
             val (hermescResolve, hermescBinary) = resolveHermesc(target, hermesc ?: "")
             val aotCompileJs = target.tasks.register("aotCompileJs") { task ->
                 pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
-                if (sharedRuntimeProject != null) {
-                    task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
-                }
+                task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
                 if (hermescResolve != null) {
                     task.dependsOn(hermescResolve)
                 }
                 task.doLast {
-                    compileSharedBundles(hermescBinary.get(), assetsKotlin, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
+                    compileSharedBundles(hermescBinary.get(), assetsKotlin, sharedRuntimeProdSyncDir, pluginProdSyncDirs, pluginModuleNames, sharedRuntimeModuleName)
                 }
             }
             target.pluginManager.withPlugin("com.android.application") {
@@ -271,14 +297,12 @@ class RdmaAppGradlePlugin : Plugin<Project> {
                 val hbcDir = File(genDir, "hbc")
                 target.tasks.register("aotCompileJsCAbi") { task ->
                     pluginProjects.forEach { pp -> task.dependsOn("${pp.path}:jsProductionExecutableCompileSync") }
-                    if (sharedRuntimeProject != null) {
-                        task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
-                    }
+                    task.dependsOn("${sharedRuntimeProject.path}:jsProductionExecutableCompileSync")
                     if (hermescResolve != null) {
                         task.dependsOn(hermescResolve)
                     }
                     task.doLast {
-                        compileSharedBundles(hermescBinary.get(), hbcDir, sharedRuntimeProdSyncDir, pluginProdSyncDirs, sharedRuntimeModuleName)
+                        compileSharedBundles(hermescBinary.get(), hbcDir, sharedRuntimeProdSyncDir, pluginProdSyncDirs, pluginModuleNames, sharedRuntimeModuleName)
                     }
                 }
             }
@@ -424,24 +448,35 @@ class RdmaAppGradlePlugin : Plugin<Project> {
     private fun compileSharedBundles(
         hermesc: String,
         outDir: File,
-        sharedRuntimeProdSyncDir: File?,
+        sharedRuntimeProdSyncDir: File,
         pluginProdSyncDirs: List<File>,
+        pluginModuleNames: List<String>,
         sharedRuntimeModuleName: String,
     ) {
         val jsByName = linkedMapOf<String, File>()
         val sharedNames = mutableSetOf<String>()
-        sharedRuntimeProdSyncDir?.listFiles { f -> f.extension == "js" }?.forEach { js ->
+        sharedRuntimeProdSyncDir.listFiles { f -> f.extension == "js" }?.forEach { js ->
             if (js.name != "$sharedRuntimeModuleName.js") {
                 sharedNames.add(js.name)
                 jsByName[js.name] = js
             }
         }
+        // Every library comes from the shared runtime; a plugin contributes only its own module.
+        val missing = sortedSetOf<String>()
         for (srcDir in pluginProdSyncDirs) {
             srcDir.listFiles { f -> f.extension == "js" }?.forEach { js ->
-                if (js.name !in sharedNames) {
-                    jsByName[js.name] = js
+                when {
+                    js.name in sharedNames -> {}
+                    js.name in pluginModuleNames -> jsByName[js.name] = js
+                    else -> missing += js.name.removeSuffix(".js")
                 }
             }
+        }
+        if (missing.isNotEmpty()) {
+            throw org.gradle.api.GradleException(
+                "Plugins use libraries the shared runtime does not contain: ${missing.joinToString()}. " +
+                    "Add them to the shared runtime module's dependencies.",
+            )
         }
 
         val order = topologicalOrder(jsByName)

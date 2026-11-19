@@ -27,6 +27,8 @@ VERSIONS_DIR="${3:?}"
 POLYFILL_OUT="${4:-}"
 INTERNAL_MODULES="${5:-internal}"
 TELEMETRY="${6:-}"
+# DRY_RUN=1: a dynamic/hotfix release runs every check, prints what would ship and writes nothing.
+DRY_RUN="${DRY_RUN:-0}"
 HERMESC="${HERMESC:-$ROOT_DIR/third_party/bin/hermesc}"
 
 case "$COMMAND" in
@@ -92,8 +94,9 @@ cd "$ROOT_DIR"
   -PversionsDir="$VERSIONS_DIR" \
   -PpolyfillOutDir="$POLYFILL_OUT" \
   -PinternalModules="$INTERNAL_MODULES" \
-  -PtelemetryFile="$TELEMETRY"
+  -PtelemetryFile="$TELEMETRY" \
+  -PdryRun="$([ "$DRY_RUN" = 1 ] && echo true || echo false)"
 
-if [ -n "$POLYFILL_OUT" ]; then
+if [ -n "$POLYFILL_OUT" ] && [ "$DRY_RUN" != 1 ]; then
     compile_polyfills "$POLYFILL_OUT"
 fi

@@ -107,7 +107,10 @@ store_reload() { # re-read changelog + releases + bundles after a release/step
     curl -fsS "http://localhost:$STORE_PORT/reload" >/dev/null
 }
 
-seed_bundle() { cp "$2" "$BUNDLES_DIR/$1"; }
+# Publishes a bundle into the store the way a release does: the bundle plus its gzip copy.
+seed_bundle() {
+    run_gradle :rdma-kernel-compiler-plugin:publishBundle -PversionsDir="$VERSIONS_DIR" -PbundleKey="$1" -PbundleFile="$2"
+}
 
 # Runs a kernel release via scripts/release.sh (changelog write + polyfill bundle compilation).
 release() { # release <command> <analysisJson> <polyfillOutDir>
@@ -223,6 +226,8 @@ step_3_load_plugin_in_running_app() {
     sleep 2
     adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
     adb shell cat /sdcard/ui.xml | grep -q "NEWPLUG v1" || fail "NEWPLUG v1 not rendered"
+    # The bundle travelled gzip-compressed (the platform HTTP client asks for it and unpacks it).
+    grep -q "served bundle .*, gzip)" "$IT_DIR/store.log" || fail "the store did not serve the bundle gzip-compressed"
 }
 
 # 4) Add a user kernel module + update the plugin to use it (dynamic release → F polyfill).

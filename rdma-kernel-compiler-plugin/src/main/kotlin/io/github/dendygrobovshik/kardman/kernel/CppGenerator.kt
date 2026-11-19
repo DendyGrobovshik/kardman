@@ -278,17 +278,17 @@ void initJniCache(JNIEnv* env) {
             }
             for (prop in info.properties) {
                 val retSig = JniTypeMapper.jniSignature(prop.type)
-                val getterName = if (prop.type == "kotlin.Boolean") "is${prop.name.replaceFirstChar { it.uppercase() }}" else "get${prop.name.replaceFirstChar { it.uppercase() }}"
+                val getterName = JniTypeMapper.jvmGetterName(prop.name)
                 out.write("        g_rdmaCache.$cacheVar.getter_${prop.name} = env->GetMethodID(g_rdmaCache.$cacheVar.clazz, \"$getterName\", \"()$retSig\");\n")
                 if (prop.isMutable) {
-                    val setterName = "set${prop.name.replaceFirstChar { it.uppercase() }}"
+                    val setterName = JniTypeMapper.jvmSetterName(prop.name)
                     val setSig = JniTypeMapper.jniSignature(prop.type)
                     out.write("        g_rdmaCache.$cacheVar.setter_${prop.name} = env->GetMethodID(g_rdmaCache.$cacheVar.clazz, \"$setterName\", \"($setSig)V\");\n")
                 }
             }
             for (static in info.statics) {
                 val retSig = JniTypeMapper.jniSignature(static.type)
-                val getterName = if (static.type == "kotlin.Boolean") "is${static.name.replaceFirstChar { it.uppercase() }}" else "get${static.name.replaceFirstChar { it.uppercase() }}"
+                val getterName = JniTypeMapper.jvmGetterName(static.name)
                 out.write("        g_rdmaCache.$cacheVar.static_get_${static.name} = env->GetMethodID(g_rdmaCache.$cacheVar.companionClazz, \"$getterName\", \"()$retSig\");\n")
             }
             out.write("    }\n")
@@ -482,7 +482,7 @@ ${info.className}NativeState::~${info.className}NativeState() {
                         "return createMapHandle(r, jvm, globalRet, \"$keyType\", \"$valueType\");"
                 }
                 prop.type == "kotlin.String" -> {
-                    "auto jstr = (jstring)env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}); auto cstr = env->GetStringUTFChars(jstr, nullptr); auto result = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jstr, cstr); env->DeleteLocalRef(jstr); return result;"
+                    "auto jstr = (jstring)env->CallObjectMethod(state->getObject(), g_rdmaCache.${cacheVar}.getter_${prop.name}); checkAndThrowJs(env, r); auto result = rdmaJStringToJs(env, r, jstr); if (jstr) env->DeleteLocalRef(jstr); return result;"
                 }
                 isEnumType(prop.type) -> {
                     val nullCheck = if (prop.nullable) "if (jret == nullptr) return jsi::Value::null(); " else ""
@@ -532,7 +532,7 @@ static jsi::Value ${info.className}_${getterName}(jsi::Runtime& r, JavaVM* jvm, 
                     prop.type == "kotlin.Boolean" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getBool());"
                     prop.type == "kotlin.Double" || prop.type == "kotlin.Float" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, args[0].getNumber());"
                     prop.type == "kotlin.Long" -> "env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, (jlong)rdmaCheckedJLong(r, args[0])); // guarded crossing"
-                    prop.type == "kotlin.String" -> "auto jstr = env->NewStringUTF(args[0].getString(r).utf8(r).c_str()); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, jstr); env->DeleteLocalRef(jstr);"
+                    prop.type == "kotlin.String" -> "auto jstr = ${if (prop.nullable) "rdmaJsToJString" else "rdmaJsToJStringNonNull"}(env, r, args[0]); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, jstr); if (jstr) env->DeleteLocalRef(jstr);"
                     isEnumType(prop.type) -> {
                         val enumName = prop.type.substringAfterLast('.')
                         "std::string cpp_val = args[0].isNull() ? \"\" : args[0].getString(r).utf8(r); jstring jstr = env->NewStringUTF(cpp_val.c_str()); jobject entry = env->CallStaticObjectMethod(g_rdmaCache.enum_${enumName}_clazz, g_rdmaCache.enum_${enumName}_valueOf, jstr); env->DeleteLocalRef(jstr); checkAndThrowJs(env, r); env->CallVoidMethod(state->getObject(), g_rdmaCache.${cacheVar}.setter_${prop.name}, entry);"
@@ -661,9 +661,9 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
             for (param in method.parameters) {
                 if (param.type == "kotlin.String") {
                     if (param.nullable) {
-                        out.write("    jstring j_${param.name} = args[${method.parameters.indexOf(param)}].isNull() ? nullptr : env->NewStringUTF(cpp_${param.name}.c_str());\n")
+                        out.write(jstringFromArg("j_${param.name}", method.parameters.indexOf(param), "r", param.nullable))
                     } else {
-                        out.write("    jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
+                        out.write(jstringFromArg("j_${param.name}", method.parameters.indexOf(param), "r", param.nullable))
                     }
                 }
             }
@@ -728,7 +728,7 @@ static jsi::Value ${info.className}_${method.name}(jsi::Runtime& r, JavaVM* jvm,
                     }
                 }
                 when (method.returnType) {
-                    "kotlin.String" -> out.write("    auto cstr = env->GetStringUTFChars(jret, nullptr); auto ret = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jret, cstr); env->DeleteLocalRef(jret); return ret;\n")
+                    "kotlin.String" -> out.write("    auto ret = rdmaJStringToJs(env, r, jret); if (jret) env->DeleteLocalRef(jret); return ret;\n")
                     "kotlin.Int" -> out.write("    return jsi::Value((double)result);\n")
                     "kotlin.Boolean" -> out.write("    return jsi::Value(result == JNI_TRUE); // jboolean would pick Value(int)\n")
                     "kotlin.Double", "kotlin.Float" -> out.write("    return jsi::Value(result);\n")
@@ -851,11 +851,11 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
                             "kotlin.Boolean" -> "false"
                             else -> "0.0"
                         }
-                        val extract = type.jsExtract(idx, "rt")
+                        val extract = ctorExtract(type, param, idx)
                         out.write("    ${type.cppType} cpp_${param.name} = $zero;\n")
                         out.write("    if (count > $idx && !args[$idx].isUndefined()) { cpp_${param.name} = $extract; } else { mask |= (1 << $idx); }\n")
                     } else {
-                        val extract = type.jsExtract(idx, "rt")
+                        val extract = ctorExtract(type, param, idx)
                         out.write("    ${type.cppType} cpp_${param.name} = $extract;\n")
                     }
                 } else if (param.isList) {
@@ -911,7 +911,7 @@ void register${info.className}Bridge(jsi::Runtime& rt, JavaVM* jvm) {
             }
             for (param in ctor.parameters) {
                 if (param.type == "kotlin.String") {
-                    out.write("    jstring j_${param.name} = env->NewStringUTF(cpp_${param.name}.c_str());\n")
+                    out.write(jstringFromArg("j_${param.name}", ctor.parameters.indexOf(param), "rt", param.nullable))
                 }
             }
             val params = ctor.parameters.joinToString(", ") { param ->
@@ -1269,7 +1269,7 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
             sb.append(suspendMethodParamExtraction(p, i + 2, p.hasDefault, i))
         }
         m.parameters.filter { it.type == "kotlin.String" }.forEachIndexed { i, p ->
-            sb.append("    jstring j_${p.name} = args[${i + 2}].isNull() ? nullptr : env->NewStringUTF(cpp_${p.name}.c_str());\n")
+            sb.append(jstringFromArg("j_${p.name}", i + 2, "r", p.nullable))
         }
         val paramsCall = m.parameters.joinToString(", ") { callArgMethodParam(it) }
         val parts = mutableListOf<String>()
@@ -1306,6 +1306,24 @@ static jsi::Value rdma_suspend_${cls.className}_${m.name}(jsi::Runtime& r, JavaV
         rdma.setProperty(rt, "_${cls.className}_${m.name}Async", std::move(fn));
     }
 """
+
+    /**
+     * A `jstring` for String argument [index], built from the JS value through UTF-16 so any text
+     * crosses intact (JNI's modified UTF-8 mangles emoji and stops at U+0000). A missing,
+     * `undefined` or `null` argument gives `nullptr` for a nullable String and `""` for an omitted
+     * defaulted one (the mask replaces it); a non-null parameter was already checked.
+     */
+    /** A constructor argument; a nullable String may be `null` (its jstring is built later). */
+    private fun ctorExtract(type: JniTypeMapper.JniType, param: ParameterInfo, idx: Int): String =
+        if (param.type == "kotlin.String" && param.nullable) "(args[$idx].isString() ? args[$idx].getString(rt).utf8(rt) : std::string())"
+        else type.jsExtract(idx, "rt")
+
+    private fun jstringFromArg(name: String, index: Int, rt: String, nullable: Boolean): String {
+        // An omitted defaulted non-null String still needs a value for the JVM wrapper's
+        // non-null parameter (the mask makes it use the default).
+        val missing = if (nullable) "nullptr" else "env->NewStringUTF(\"\")"
+        return "    jstring $name = (count > $index && args[$index].isString()) ? rdmaNewJString(env, $rt, args[$index].getString($rt)) : $missing;\n"
+    }
 
     private fun suspendMethodParamExtraction(p: ParameterInfo, idx: Int, guarded: Boolean = false, maskBit: Int = idx): String {
         fun maskLine(): String = if (guarded) "    if (args[$idx].isUndefined()) mask |= (1 << $maskBit);\n" else ""
@@ -1507,10 +1525,8 @@ $nullCheck$wrapExpr"""
                 """
     jobject companion = env->GetStaticObjectField(g_rdmaCache.$cacheVar.clazz, g_rdmaCache.$cacheVar.companionField);
     auto jret = (jstring)env->CallObjectMethod(companion, g_rdmaCache.$cacheVar.static_get_${static.name});
-$nullCheck    auto cstr = env->GetStringUTFChars(jret, nullptr);
-    auto ret = jsi::String::createFromUtf8(r, cstr);
-    env->ReleaseStringUTFChars(jret, cstr);
-    env->DeleteLocalRef(jret);
+$nullCheck    auto ret = rdmaJStringToJs(env, r, jret);
+    if (jret) env->DeleteLocalRef(jret);
     env->DeleteLocalRef(companion);
     return ret;
 """
@@ -1567,11 +1583,11 @@ $body}
                     if (guarded) {
                         "    std::string cpp_${p.name};\n" +
                             "    if (!args[$i].isUndefined()) { cpp_${p.name} = args[$i].isNull() ? \"\" : args[$i].getString(r).utf8(r); } else { mask |= (1 << $maskBit); }\n" +
-                            "    jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n"
+                            jstringFromArg("j_${p.name}", i, "r", p.type.nullable)
                     } else if (p.type.nullable) {
-                        "    std::string cpp_${p.name} = args[$i].isNull() ? \"\" : args[$i].getString(r).utf8(r);\n    jstring j_${p.name} = args[$i].isNull() ? nullptr : env->NewStringUTF(cpp_${p.name}.c_str());\n"
+                        jstringFromArg("j_${p.name}", i, "r", p.type.nullable)
                     } else {
-                        "    std::string cpp_${p.name} = args[$i].getString(r).utf8(r);\n    jstring j_${p.name} = env->NewStringUTF(cpp_${p.name}.c_str());\n"
+                        "    if (!args[$i].isString()) throw jsi::JSError(r, \"expected a String at the boundary\");\n" + jstringFromArg("j_${p.name}", i, "r", p.type.nullable)
                     }
                 } else {
                     val jt = JniTypeMapper.forType(t.fqn) ?: return ""
@@ -1689,7 +1705,7 @@ $body}
                     "    auto jret = (jstring)env->CallStaticObjectMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n" +
                         "    checkAndThrowJs(env, r);\n" +
                         (if (ret.nullable) "    if (jret == nullptr) return jsi::Value::null();\n" else "") +
-                        "    auto cstr = env->GetStringUTFChars(jret, nullptr); auto ret = jsi::String::createFromUtf8(r, cstr); env->ReleaseStringUTFChars(jret, cstr); env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
+                        "    auto ret = rdmaJStringToJs(env, r, jret); if (jret) env->DeleteLocalRef(jret);\n$deleteJStrings    return ret;\n"
                 "kotlin.Int" -> "    auto result = env->CallStaticIntMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value((double)result);\n"
                 "kotlin.Boolean" -> "    auto result = env->CallStaticBooleanMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value(result == JNI_TRUE);\n"
                 "kotlin.Double", "kotlin.Float" -> "    auto result = env->CallStaticDoubleMethod(g_rdmaCache.fn_${fn.name}_clazz, g_rdmaCache.fn_${fn.name}_method$callSuffix);\n    checkAndThrowJs(env, r);\n$deleteJStrings    return jsi::Value(result);\n"

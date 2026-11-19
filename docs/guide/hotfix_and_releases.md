@@ -36,15 +36,26 @@ write`; the changelog write is the commit point, so an error before it writes no
 |---|---|
 | `static-release` | records the kernel version baked into the next app build (moves `H`) |
 | `dynamic-release` | records a kernel change for installed apps and builds the `F` polyfills for it |
-| `hotfix-release` | like `dynamic-release`, but rejects anything that would raise the minimum host version (a hotfix fixes a bug, it does not change the API) |
+| `hotfix-release` | like `dynamic-release`, but rejects anything that would make a symbol need a newer host (a hotfix fixes a bug, it does not change the API) |
 
 ```bash
 scripts/release.sh <command> <kernel_manifest_<platform>.json> <versionsDir> [polyfillOutDir] [internalModules] [telemetryFile]
 ```
 
 or the `release` GitHub Actions workflow. With a `telemetryFile` (a JSON array of host
-versions in the field), a release that raises the minimum host prints how many installs it
-still reaches and which symbol is responsible.
+versions in the field), a release that makes symbols need a newer host prints how many installs
+it still reaches and which symbol is responsible.
+
+A dynamic release is **all or nothing**: it runs every check first and reports all problems
+together — what cannot ship and why, which other changes do not ship because of them, and what
+to do instead. Nothing is written when any check fails. Run with `DRY_RUN=1`
+(`scripts/release.sh`) or the workflow's `dryRun` input to see the report — and what would
+ship — without releasing; a static release then only lists the changes it would record.
+
+Bundles go into the store with a gzip copy made at release time (`<key>` and `<key>.gz` in
+`versions/bundles/`), which the store serves to clients as is. `plugin-release` publishes the
+plugin bundles itself; a compiled polyfill is published with
+`./gradlew :rdma-kernel-compiler-plugin:publishBundle -PversionsDir=… -PbundleKey=F:<module>:<H> -PbundleFile=…/polyfill.hbc`.
 
 A plugin is always built against a released kernel: the plugin build reads the
 changelog's `h` and fails if there is none.
@@ -62,7 +73,13 @@ be hotfixed when it is a top-level `@RDMA` function that is
 
 A dynamic release that changes anything else (a class, a widget, a `suspend` function, …)
 is rejected with the symbol and the reason; ship it with an app update. *Adding* new
-symbols is always possible: older apps get them as polyfills.
+symbols is possible when they compile to JS: older apps get them as polyfills. A symbol
+that calls a platform SDK or a JVM/Native-only library cannot run as a polyfill — write a
+manual `@Polyfill` for it or ship it with an app update. New widgets cannot be polyfilled
+yet.
+
+A hotfix must not split kernel state between the native and the polyfill; see
+[how_to_write_kernel.md](how_to_write_kernel.md#state).
 
 Kernel code calling a hotfixed function runs the polyfill on the plugin thread; see
 [threads_and_performance.md](threads_and_performance.md#hotfixes-and-locks) for what that
@@ -78,6 +95,25 @@ may still call it:
   plugins.
 
 A removed name can never be reused.
+
+## Minimum host of a plugin
+
+A plugin declares the oldest app version it supports with `rdmaMinHost` in its
+`gradle.properties`; by default it is the oldest supported kernel (`kernel.oldestActiveKernel`
+in `rdma.toml`, or the first released kernel). It never moves on its own: when the plugin uses a
+kernel symbol that older apps cannot get (a widget or other native code added later), the plugin
+build fails and names the symbols. Raise `rdmaMinHost` to drop those apps — they keep the last
+plugin version that suits them — or stop using the symbols.
+
+## When an update takes effect
+
+The app decides when new code runs. A re-sync only downloads and **stages** bundles
+(`RdmaBridge.stageUpdate`); they take effect at an **update point**: a cold start, or
+`RdmaBridge.applyUpdates()`, which the app calls where the user does not watch plugin content
+(between screens, back from the background). At that moment all staged bundles apply as one
+step: every place showing an updated plugin is recreated with the new version (its `remember`
+state starts over), and hotfixed kernel functions switch for every caller. Stage polyfills
+before the plugins that need them.
 
 ## The store
 

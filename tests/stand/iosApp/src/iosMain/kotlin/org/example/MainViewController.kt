@@ -74,12 +74,21 @@ private fun Content() {
             ready = checkReady()
         }
     }
+    // A component argument that changes after the first composition must reach the plugin.
+    var live by remember { mutableStateOf(0) }
+    LaunchedEffect(ready) {
+        if (ready) {
+            delay(1500)
+            live = 5
+        }
+    }
     if (ready) {
         Column {
             RdmaComposeHost.Component("alice:counter/main")
             RdmaComposeHost.Component("itest:newplug/main")
             RdmaComposeHost.Component("bob:services/card", "a", 1)
             RdmaComposeHost.Component("bob:services/card", "b", 2)
+            RdmaComposeHost.Component("bob:services/card", "c", live)
             RdmaComposeHost.Component("bob:services/modifiers")
             RdmaComposeHost.Component("bob:services/keys")
         }

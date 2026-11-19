@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composer
 import androidx.compose.runtime.RememberObserver
 import androidx.compose.runtime.currentComposer
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_componentBlock
@@ -66,28 +67,29 @@ object RdmaComposeHost {
     /**
      * Renders the plugin component [name] (`"<pluginId>/<component>"`) with [args], typed by
      * the component's declared parameters. Any number of call sites may render the same
-     * component, each with its own state. A call site keeps the version it first rendered
-     * until it leaves the composition; one that is waiting for a component not registered
-     * yet composes as soon as it is.
+     * component, each with its own state. Every place shows the version currently loaded: a
+     * new version arrives only at an update point ([RdmaBridge.applyUpdates], a cold start),
+     * and then every place of the component is recreated with it, so two versions of a plugin
+     * never run side by side (compatibility.md §8.5). A place waiting for a component that is
+     * not registered yet composes as soon as it is.
      */
     @Composable
     fun Component(name: String, vararg args: Any?) {
-        val slot = remember(name) { ComponentSlot() }
-        if (slot.ref == null) {
-            componentsVersion.intValue // recompose when a component is registered
-            val id = rdma_componentBlock(name)
-            if (id != 0L) slot.ref = RdmaBlockRef(id)
+        componentsVersion.intValue // recompose when a component is registered or replaced
+        val id = rdma_componentBlock(name)
+        if (id == 0L) return
+        key(id) {
+            val slot = remember { ComponentSlot(RdmaBlockRef(id)) }
+            val prev = currentComposerHolder
+            currentComposerHolder = currentComposer
+            try {
+                rdma_nativeInvokeComponent(slot.ref.id, StableRef.create(arrayOf(*args)).asCPointer())
+                throwIfNativeError()
+            } finally {
+                currentComposerHolder = prev
+            }
+            slot.ref.touch()
         }
-        val ref = slot.ref ?: return
-        val prev = currentComposerHolder
-        currentComposerHolder = currentComposer
-        try {
-            rdma_nativeInvokeComponent(ref.id, StableRef.create(arrayOf(*args)).asCPointer())
-            throwIfNativeError()
-        } finally {
-            currentComposerHolder = prev
-        }
-        ref.touch()
     }
 
     private val componentsVersion = mutableIntStateOf(0)
@@ -98,11 +100,10 @@ object RdmaComposeHost {
         dispatch_async(dispatch_get_main_queue()) { componentsVersion.intValue++ }
     }
 
-    private class ComponentSlot : RememberObserver {
-        var ref: RdmaBlockRef? = null
+    private class ComponentSlot(val ref: RdmaBlockRef) : RememberObserver {
         override fun onRemembered() {}
-        override fun onForgotten() { ref?.release() }
-        override fun onAbandoned() { ref?.release() }
+        override fun onForgotten() { ref.release() }
+        override fun onAbandoned() { ref.release() }
     }
 
     fun nativeInvokeScopeBlock(blockId: Long, composer: Composer, changed: Int) {

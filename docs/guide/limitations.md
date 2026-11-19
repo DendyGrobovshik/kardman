@@ -27,6 +27,8 @@ What does not work yet, in one place. Each item names the workaround where there
   state are not supported. Widget callbacks must return `Unit`.
 - **Enums** cannot be elements of a `List`/`Map`; `values()`/`entries` are not available
   in plugins.
+- **U+0000 in a `String` on iOS** — the iOS bridge passes strings as C strings, so a string
+  containing U+0000 fails with an error instead of crossing (Android has no such limit).
 - **Nullable primitive widget parameters** (`Double?`, `Int?` in a `@Composable @RDMA`
   function) cannot receive `null`; an omitted argument still takes its default.
 - **`suspend` methods cannot be `open`.**
@@ -63,6 +65,8 @@ What does not work yet, in one place. Each item names the workaround where there
 
 Only top-level `@RDMA` functions that are not `suspend`, not widgets and have no
 function-typed parameters or results can be hotfixed; other changes need an app update.
+New widgets cannot be delivered as polyfills yet, so a plugin using a widget added after an
+app version needs `rdmaMinHost` at least that version.
 See [hotfix_and_releases.md](hotfix_and_releases.md#what-a-hotfix-can-change).
 
 ## Threads

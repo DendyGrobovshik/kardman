@@ -15,6 +15,7 @@
  */
 package io.github.dendygrobovshik.kardman.store
 
+import io.github.dendygrobovshik.kardman.kernel.RdmaBundleFiles
 import io.github.dendygrobovshik.kardman.kernel.RdmaChangelog
 import io.github.dendygrobovshik.kardman.kernel.RdmaPluginReleases
 import io.github.dendygrobovshik.kardman.types.Changelog
@@ -37,6 +38,7 @@ class RdmaStore(
     private val releases = mutableMapOf<String, MutableList<PluginRelease>>()
     private val usageBySymbol = mutableMapOf<String, Int>()
     private val bundles = mutableMapOf<String, ByteArray>()
+    private val gzipped = mutableMapOf<String, ByteArray>()
     private var totalLive = 0
 
     /** Directory holding `changelog.json`, `plugins/` and `bundles/`; used by [reload]. */
@@ -66,12 +68,19 @@ class RdmaStore(
         RdmaPluginReleases.loadAll(versionsDir).values.forEach { list -> list.forEach { registerRelease(it) } }
     }
 
-    /** Stores a downloadable bundle (polyfill or plugin bundle) under a content key (§8.1). */
-    fun putBundle(key: String, bytes: ByteArray) {
+    /**
+     * Stores a downloadable bundle (polyfill or plugin bundle) under a content key (§8.1), with
+     * its release-time gzip copy when there is one ([RdmaBundleFiles]).
+     */
+    fun putBundle(key: String, bytes: ByteArray, gzipped: ByteArray? = null) {
         bundles[key] = bytes
+        if (gzipped != null) this.gzipped[key] = gzipped else this.gzipped.remove(key)
     }
 
     fun bundle(key: String): ByteArray? = bundles[key]
+
+    /** The bundle's gzip copy made at release time, or null when it was published without one. */
+    fun gzippedBundle(key: String): ByteArray? = gzipped[key]
 
     /**
      * Loads bundles from a `bundles/` directory: each file is stored under its file name as the
@@ -79,8 +88,9 @@ class RdmaStore(
      */
     fun loadBundles(dir: File) {
         if (!dir.isDirectory) return
-        dir.listFiles { f -> f.isFile }?.forEach { f ->
-            bundles[f.name] = f.readBytes()
+        dir.listFiles { f -> f.isFile && !f.name.endsWith(RdmaBundleFiles.GZIP_SUFFIX) && !f.name.startsWith(".") }?.forEach { f ->
+            val gz = File(dir, f.name + RdmaBundleFiles.GZIP_SUFFIX).takeIf { it.isFile }?.readBytes()
+            putBundle(f.name, f.readBytes(), gz)
         }
     }
 

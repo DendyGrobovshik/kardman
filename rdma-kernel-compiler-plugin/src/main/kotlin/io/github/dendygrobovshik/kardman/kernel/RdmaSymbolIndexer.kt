@@ -21,6 +21,7 @@ import io.github.dendygrobovshik.kardman.types.RdmaPolyfill
 import io.github.dendygrobovshik.kardman.types.RdmaSourceRange
 import io.github.dendygrobovshik.kardman.types.RdmaSymbolKind
 import io.github.dendygrobovshik.kardman.types.RdmaUse
+import org.jetbrains.kotlin.descriptors.ClassKind
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.PsiIrFileEntry
 import org.jetbrains.kotlin.ir.declarations.IrClass
@@ -36,6 +37,15 @@ import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrClassReference
 import org.jetbrains.kotlin.ir.expressions.IrConstructorCall
 import org.jetbrains.kotlin.ir.expressions.IrGetField
+import org.jetbrains.kotlin.ir.expressions.IrGetObjectValue
+import org.jetbrains.kotlin.ir.expressions.IrSetField
+import org.jetbrains.kotlin.ir.declarations.IrAnonymousInitializer
+import org.jetbrains.kotlin.ir.declarations.IrConstructor
+import org.jetbrains.kotlin.ir.declarations.IrDeclarationWithName
+import org.jetbrains.kotlin.ir.declarations.IrExternalPackageFragment
+import org.jetbrains.kotlin.ir.types.classOrNull
+import org.jetbrains.kotlin.ir.util.getPackageFragment
+import org.jetbrains.kotlin.ir.util.parentClassOrNull
 import org.jetbrains.kotlin.ir.types.IrSimpleType
 import org.jetbrains.kotlin.ir.types.IrType
 import org.jetbrains.kotlin.ir.types.classFqName
@@ -66,6 +76,40 @@ object RdmaSymbolIndexer {
     private val RDMA_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RDMA")
     private val COMPOSABLE_ANNOTATION = FqName("androidx.compose.runtime.Composable")
     private val DEPRECATED_ANNOTATION = FqName("kotlin.Deprecated")
+    private val RUNTIME_LOCAL_ANNOTATION = FqName("io.github.dendygrobovshik.kardman.RuntimeLocal")
+
+    /**
+     * Packages of other modules whose code also exists in the plugin runtime (Kotlin/JS), so a
+     * kernel declaration may call them and still compile to JS. Anything else outside the
+     * module (platform SDKs, JVM/Native-only libraries) makes the caller non-emulatable unless
+     * it has a manual polyfill (compatibility.md §5.2). The materializer's JS compile stays the
+     * final judge: a call that slips through here fails the dynamic release, it never ships.
+     */
+    private val JS_AVAILABLE_PREFIXES = listOf("kotlin.", "kotlinx.coroutines.", "androidx.compose.runtime.")
+    private val JS_UNAVAILABLE_PREFIXES = listOf(
+        "kotlin.native.", "kotlin.concurrent.", "kotlin.system.", "kotlin.reflect.full.", "kotlin.reflect.jvm.",
+    )
+    private val JS_AVAILABLE_JVM_PREFIXES = listOf("kotlin.jvm.functions.", "kotlin.jvm.internal.")
+
+    /**
+     * JVM classes behind the Kotlin stdlib's `typealias`es (`kotlin.IllegalStateException`,
+     * `kotlin.collections.ArrayList`, …): the JVM IR names the Java class, but the code is plain
+     * Kotlin and exists in JS too.
+     */
+    private val JVM_STDLIB_ALIASES = setOf(
+        "java.lang.Error", "java.lang.Exception", "java.lang.RuntimeException", "java.lang.Throwable",
+        "java.lang.IllegalArgumentException", "java.lang.IllegalStateException",
+        "java.lang.IndexOutOfBoundsException", "java.lang.UnsupportedOperationException",
+        "java.lang.ArithmeticException", "java.lang.NumberFormatException", "java.lang.NullPointerException",
+        "java.lang.ClassCastException", "java.lang.AssertionError", "java.lang.StringBuilder",
+        "java.lang.Appendable", "java.lang.Comparable", "java.lang.CharSequence", "java.lang.Number",
+        "java.lang.Object", "java.lang.String", "java.lang.Iterable", "java.lang.Enum",
+        "java.util.NoSuchElementException", "java.util.ConcurrentModificationException", "java.util.Comparator",
+        "java.util.RandomAccess", "java.util.ArrayList", "java.util.HashMap", "java.util.LinkedHashMap",
+        "java.util.HashSet", "java.util.LinkedHashSet", "java.util.AbstractList", "java.util.AbstractMap",
+        "java.util.Collection", "java.util.List", "java.util.Map", "java.util.Set", "java.util.Iterator",
+        "java.util.concurrent.CancellationException", "java.nio.charset.CharacterCodingException",
+    )
     private val POLYFILL_TARGET_REGEX = Regex("@Polyfill\\s*\\(\\s*`?for`?\\s*=\\s*\"([^\"]+)\"")
 
     fun index(moduleFragment: IrModuleFragment): RdmaIndexResult {
@@ -90,7 +134,10 @@ object RdmaSymbolIndexer {
             }
         }
 
-        return RdmaIndexResult(declarations, uses, polyfills)
+        // A symbol with a manual polyfill is emulatable whatever it calls (compatibility.md §6.3).
+        val polyfilled = polyfills.map { it.target }.toSet()
+        val resolved = declarations.map { if (it.fqn in polyfilled && !it.emulatable) it.copy(emulatable = true) else it }
+        return RdmaIndexResult(resolved, uses, polyfills)
     }
 
     private fun readSource(file: IrFile): String? {
@@ -166,6 +213,93 @@ object RdmaSymbolIndexer {
         return fqn ?: "kotlin.Any"
     }
 
+    /**
+     * External declarations [root] references that do not exist in the plugin runtime (see
+     * [JS_AVAILABLE_PREFIXES]); sorted, deduplicated. `@RDMA` symbols of other kernel modules are
+     * reachable from JS through `RDMA.*` and do not count.
+     */
+    private fun nativeRefs(root: IrElement): List<String> {
+        val refs = sortedSetOf<String>()
+        val visitor = object : IrVisitorVoid() {
+            override fun visitElement(element: IrElement) {
+                element.acceptChildrenVoid(this)
+            }
+
+            override fun visitCall(expression: IrCall) {
+                expression.acceptChildrenVoid(this)
+                nativeRefName(expression.symbol.owner)?.let(refs::add)
+            }
+
+            override fun visitConstructorCall(expression: IrConstructorCall) {
+                expression.acceptChildrenVoid(this)
+                nativeRefName(expression.symbol.owner)?.let(refs::add)
+            }
+
+            override fun visitGetObjectValue(expression: IrGetObjectValue) {
+                expression.acceptChildrenVoid(this)
+                nativeRefName(expression.symbol.owner)?.let(refs::add)
+            }
+        }
+        root.acceptChildrenVoid(visitor)
+        return refs.toList()
+    }
+
+    /** A class: its supertypes, `init` blocks and constructors (members are indexed on their own). */
+    private fun classNativeRefs(cls: IrClass): List<String> {
+        val refs = sortedSetOf<String>()
+        for (superType in cls.superTypes) {
+            superType.classOrNull?.owner?.let { nativeRefName(it) }?.let(refs::add)
+        }
+        for (member in cls.declarations) {
+            if (member is IrAnonymousInitializer || member is IrConstructor) refs += nativeRefs(member)
+        }
+        return refs.toList()
+    }
+
+    private fun nativeRefName(decl: IrDeclaration): String? {
+        val fragment = runCatching { decl.getPackageFragment() }.getOrNull() ?: return null
+        if (fragment !is IrExternalPackageFragment) return null
+        if (isRdmaVisible(decl)) return null
+        val owner = (decl as? IrConstructor)?.parentClassOrNull ?: decl
+        val fqn = (owner as? IrDeclarationWithName)?.fqNameWhenAvailable?.asString() ?: return null
+        if (JS_AVAILABLE_JVM_PREFIXES.any(fqn::startsWith)) return null
+        val ownerClass = ((owner as? IrClass) ?: owner.parentClassOrNull)?.fqNameWhenAvailable?.asString()
+        if (ownerClass in JVM_STDLIB_ALIASES) return null
+        if (fqn.startsWith("kotlin.jvm.")) return fqn
+        if (JS_UNAVAILABLE_PREFIXES.any(fqn::startsWith)) return fqn
+        if (JS_AVAILABLE_PREFIXES.any(fqn::startsWith)) return null
+        return fqn
+    }
+
+    private fun isRdmaVisible(decl: IrDeclaration): Boolean {
+        if (decl.hasAnnotation(RDMA_ANNOTATION)) return true
+        val property = (decl as? IrSimpleFunction)?.correspondingPropertySymbol?.owner
+        if (property?.hasAnnotation(RDMA_ANNOTATION) == true) return true
+        var cls = (decl as? IrClass) ?: decl.parentClassOrNull
+        while (cls != null) {
+            if (cls.hasAnnotation(RDMA_ANNOTATION)) return true
+            cls = cls.parentClassOrNull
+        }
+        return false
+    }
+
+    /**
+     * Emulatable unless it calls code that does not exist in the plugin runtime. A `@Composable`
+     * function follows the same rule in principle (compatibility.md §5.2), but the materializer
+     * cannot build widget polyfills yet, so a widget still anchors the floor: a plugin must not
+     * be told it runs on a host that could never receive the widget.
+     */
+    private fun emulatableOf(fn: IrSimpleFunction, nativeRefs: List<String>): Boolean =
+        nativeRefs.isEmpty() && !fn.hasAnnotation(COMPOSABLE_ANNOTATION)
+
+    /** The property's value type FQN (e.g. `kotlin.Int`), for the runtime-local exemption. */
+    private fun propertyValueType(p: IrProperty): String? {
+        val type = p.getter?.returnType ?: p.backingField?.type ?: return null
+        val cls = type.classOrNull?.owner
+        val fqn = type.classFqName?.asString() ?: return null
+        return if (cls?.kind == ClassKind.ENUM_CLASS) "enum:$fqn" else fqn
+    }
+
     private fun indexDeclaration(
         decl: IrDeclaration,
         text: String,
@@ -195,6 +329,10 @@ object RdmaSymbolIndexer {
                     sourceRange = RdmaSourceRange(path, start, end),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
                     signature = signatureOf(constructorParameters(decl), text),
+                    emulatable = classNativeRefs(decl).isEmpty(),
+                    nativeRefs = classNativeRefs(decl),
+                    isObject = decl.kind == ClassKind.OBJECT,
+                    runtimeLocal = decl.hasAnnotation(RUNTIME_LOCAL_ANNOTATION),
                 )
                 irToNode[decl] = fqn
                 for (member in decl.declarations) {
@@ -223,7 +361,8 @@ object RdmaSymbolIndexer {
                     hash = RdmaContentHasher.sha256(text.substring(start, end)),
                     isRdma = isRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
-                    emulatable = !decl.hasAnnotation(COMPOSABLE_ANNOTATION),
+                    emulatable = emulatableOf(decl, nativeRefs(decl)),
+                    nativeRefs = nativeRefs(decl),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
                     signature = signatureOf(functionParameters(decl), text),
                     hotfixBlocker = if (memberOfClass) null else hotfixBlockerOf(decl, isRdma),
@@ -243,6 +382,11 @@ object RdmaSymbolIndexer {
                     isRdma = isRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
                     isMutable = decl.isVar,
+                    emulatable = nativeRefs(decl).isEmpty(),
+                    nativeRefs = nativeRefs(decl),
+                    valueType = propertyValueType(decl),
+                    hasField = decl.backingField != null,
+                    runtimeLocal = decl.hasAnnotation(RUNTIME_LOCAL_ANNOTATION),
                 )
                 irToNode[decl] = fqn
             }
@@ -279,6 +423,10 @@ object RdmaSymbolIndexer {
                     sourceRange = RdmaSourceRange(path, start, end),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
                     signature = signatureOf(constructorParameters(decl), text),
+                    emulatable = classNativeRefs(decl).isEmpty(),
+                    nativeRefs = classNativeRefs(decl),
+                    isObject = decl.kind == ClassKind.OBJECT,
+                    runtimeLocal = decl.hasAnnotation(RUNTIME_LOCAL_ANNOTATION),
                 )
                 irToNode[decl] = fqn
                 for (member in decl.declarations) {
@@ -297,7 +445,8 @@ object RdmaSymbolIndexer {
                     hash = RdmaContentHasher.sha256(text.substring(start, end)),
                     isRdma = enclosingRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
-                    emulatable = !decl.hasAnnotation(COMPOSABLE_ANNOTATION),
+                    emulatable = emulatableOf(decl, nativeRefs(decl)),
+                    nativeRefs = nativeRefs(decl),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
                     signature = signatureOf(functionParameters(decl), text),
                 )
@@ -315,6 +464,11 @@ object RdmaSymbolIndexer {
                     isRdma = enclosingRdma,
                     sourceRange = RdmaSourceRange(path, start, end),
                     isMutable = decl.isVar,
+                    emulatable = nativeRefs(decl).isEmpty(),
+                    nativeRefs = nativeRefs(decl),
+                    valueType = propertyValueType(decl),
+                    hasField = decl.backingField != null,
+                    runtimeLocal = decl.hasAnnotation(RUNTIME_LOCAL_ANNOTATION),
                 )
                 irToNode[decl] = containerFqn
             }
@@ -352,11 +506,25 @@ object RdmaSymbolIndexer {
 
             override fun visitGetField(expression: IrGetField) {
                 expression.acceptChildrenVoid(this)
-                record(expression.symbol.owner.parent as? IrClass)
+                val field = expression.symbol.owner
+                record(field.correspondingPropertySymbol?.owner ?: field.parent as? IrClass)
             }
 
-            private fun record(decl: IrDeclaration?) {
-                if (decl == null) return
+            override fun visitSetField(expression: IrSetField) {
+                expression.acceptChildrenVoid(this)
+                val field = expression.symbol.owner
+                record(field.correspondingPropertySymbol?.owner ?: field.parent as? IrClass)
+            }
+
+            override fun visitGetObjectValue(expression: IrGetObjectValue) {
+                expression.acceptChildrenVoid(this)
+                record(expression.symbol.owner)
+            }
+
+            private fun record(target: IrDeclaration?) {
+                if (target == null) return
+                // A property is reached through its accessors; the index keys the property.
+                val decl = (target as? IrSimpleFunction)?.correspondingPropertySymbol?.owner ?: target
                 val node = irToNode[decl] ?: return
                 if (node != from && seen.add(node)) {
                     out += RdmaUse(from, node)

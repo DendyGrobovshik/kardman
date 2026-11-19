@@ -53,6 +53,9 @@ object RdmaPluginTransformState {
     var moduleDeps: List<String> = emptyList()
         private set
     var floorMap: Map<String, Int> = emptyMap()
+
+    /** The plugin's declared `minHost` (compatibility.md §5.3): moved only by the developer. */
+    var declaredMinHost: Int = 0
         private set
     var types: List<RdmaPluginType> = emptyList()
         private set
@@ -101,7 +104,9 @@ object RdmaPluginTransformState {
         builtAgainstToolchain: String?,
         moduleDeps: List<String>,
         floorMap: Map<String, Int>,
+        declaredMinHost: Int = 0,
     ) {
+        this.declaredMinHost = declaredMinHost
         outputDir?.let { this.outputDir = it }
         pluginPackage?.let { this.pluginPackage = it }
         registerComponentFqn?.let { this.registerComponentFqn = it }
@@ -239,8 +244,12 @@ object RdmaPluginTransformState {
     fun isCovered(path: String, start: Int, end: Int): Boolean =
         edits[path]?.any { it.start <= start && it.end >= end } == true
 
-    fun flush() {
-        if (outputDir.isBlank()) return
+    /**
+     * Writes the generated sources and the contract. Returns the errors to report; a plugin
+     * that needs a newer host than it declares is not built (compatibility.md §5.3).
+     */
+    fun flush(): List<String> {
+        if (outputDir.isBlank()) return emptyList()
         rewriteSubclassConstructorCalls()
         val outDir = File(outputDir)
         // Remove stale rewritten sources so deleting a plugin file does not leave
@@ -273,7 +282,7 @@ object RdmaPluginTransformState {
             File(outDir, outName).writeText(content)
         }
         writeKernelStubs(outDir)
-        writeContract(outDir)
+        return writeContract(outDir)
     }
 
     /**
@@ -288,9 +297,20 @@ object RdmaPluginTransformState {
         for ((name, content) in files) File(outDir, name).writeText(content)
     }
 
-    private fun writeContract(outDir: File) {
-        if (pluginId.isBlank()) return
-        val minHost = usedSymbols.maxOfOrNull { floorMap[it] ?: 0 } ?: 0
+    private fun writeContract(outDir: File): List<String> {
+        if (pluginId.isBlank()) return emptyList()
+        // `minHost` never moves on its own: a symbol that needs a newer host than the plugin
+        // declares fails the build instead of silently narrowing the audience.
+        val tooNew = usedSymbols.filter { (floorMap[it] ?: 0) > declaredMinHost }.sorted()
+        if (tooNew.isNotEmpty()) {
+            val required = tooNew.maxOf { floorMap[it] ?: 0 }
+            return listOf(
+                "plugin $pluginId uses symbols that need host version $required or newer, but declares minHost=$declaredMinHost: " +
+                    tooNew.joinToString { "$it (host ${floorMap[it]})" } +
+                    ". Set rdmaMinHost=$required in the plugin's gradle.properties to drop older hosts, or stop using these symbols.",
+            )
+        }
+        val minHost = declaredMinHost
         val contract = RdmaPluginContract(
             pluginId = pluginId,
             version = pluginVersion,
@@ -303,6 +323,7 @@ object RdmaPluginTransformState {
         val json = Json { prettyPrint = true }
         outDir.mkdirs()
         File(outDir, "plugin.json").writeText(json.encodeToString(RdmaPluginContract.serializer(), contract))
+        return emptyList()
     }
 
     fun reset() {

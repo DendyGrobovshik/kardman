@@ -75,6 +75,8 @@ fun releaseTask(name: String, command: String) = tasks.register<JavaExec>(name) 
         "--rdmaConfig",
         rdmaPolicyFile(),
     )
+    // `-PdryRun=true`: a dynamic/hotfix release runs every check and writes nothing.
+    if (project.findProperty("dryRun")?.toString() == "true") args("--dry-run")
 }
 
 releaseTask("staticRelease", "static-release")
@@ -133,6 +135,21 @@ tasks.register<JavaExec>("generationRelease") {
         project.findProperty("alias")?.toString() ?: "",
         "--rdmaConfig",
         rdmaPolicyFile(),
+    )
+}
+
+tasks.register<JavaExec>("publishBundle") {
+    group = "rdma"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.github.dendygrobovshik.kardman.kernel.RdmaReleaseCli")
+    args(
+        "publish-bundle",
+        project.findProperty("versionsDir")?.toString()
+            ?: error("pass -PversionsDir=/path/to/versions"),
+        project.findProperty("bundleKey")?.toString()
+            ?: error("pass -PbundleKey=<F:module:H[:G] | R:module[:G] | hash>"),
+        project.findProperty("bundleFile")?.toString()
+            ?: error("pass -PbundleFile=/path/to/bundle.hbc"),
     )
 }
 

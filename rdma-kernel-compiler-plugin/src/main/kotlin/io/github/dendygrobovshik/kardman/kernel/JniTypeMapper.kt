@@ -16,6 +16,21 @@
 package io.github.dendygrobovshik.kardman.kernel
 
 object JniTypeMapper {
+    /**
+     * The JVM getter of a Kotlin property (`JvmAbi.getterName`): a name that starts with `is`
+     * followed by a non-lowercase letter is the getter itself (`isAuthorized()`), whatever the
+     * type; every other property gets `get` + the capitalized name (`enabled` → `getEnabled()`).
+     */
+    fun jvmGetterName(property: String): String =
+        if (startsWithIsPrefix(property)) property else "get" + property.replaceFirstChar { it.uppercase() }
+
+    /** The JVM setter (`JvmAbi.setterName`): `isOpen` → `setOpen`, `title` → `setTitle`. */
+    fun jvmSetterName(property: String): String =
+        "set" + (if (startsWithIsPrefix(property)) property.removePrefix("is") else property.replaceFirstChar { it.uppercase() })
+
+    private fun startsWithIsPrefix(name: String): Boolean =
+        name.length > 2 && name.startsWith("is") && !name[2].isLowerCase()
+
     data class JniType(
         val jniSignature: String,
         val cppType: String,

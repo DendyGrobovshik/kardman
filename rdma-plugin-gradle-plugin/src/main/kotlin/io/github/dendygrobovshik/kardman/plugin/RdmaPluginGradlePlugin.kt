@@ -101,6 +101,26 @@ private fun Project.builtAgainstVersion(): Int {
         ?: throw GradleException("Malformed changelog at ${changelog.absolutePath}: no versioned entries")
 }
 
+/**
+ * The plugin's declared `minHost` (compatibility.md §5.3). It moves only when the developer sets
+ * `rdmaMinHost`; otherwise it is the oldest host the plugin can meet: the oldest supported kernel
+ * (`kernel.oldestActiveKernel`) or, without a support floor, the first released kernel. A plugin
+ * that needs a newer host fails to build instead of silently dropping older hosts.
+ */
+private fun Project.declaredMinHost(): Int {
+    (findProperty("rdmaMinHost") ?: rootProject.findProperty("rdmaMinHost"))?.toString()?.toIntOrNull()?.let { return it }
+    val changelog = File(rdmaVersionsDir(), "changelog.json")
+    val first = if (changelog.isFile) {
+        val parsed = JsonSlurper().parseText(changelog.readText()) as Map<*, *>
+        (parsed["entries"] as? List<*>).orEmpty()
+            .mapNotNull { (it as? Map<*, *>)?.get("version") as? Number }
+            .minOfOrNull { it.toInt() } ?: 0
+    } else {
+        0
+    }
+    return maxOf(first, rdmaConfig().kernel.oldestActiveKernel ?: 0)
+}
+
 /** Merged floor map (node FQN → floor) over the visible kernel modules. */
 private fun Project.floorMap(kernelContainer: String, visiblePaths: List<String>): Map<String, Int> {
     val merged = mutableMapOf<String, Int>()
@@ -410,6 +430,7 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
                 SubpluginOption("builtAgainstToolchain", builtAgainstToolchain),
                 SubpluginOption("rdmaModuleDeps", moduleDeps.joinToString(File.pathSeparator)),
                 SubpluginOption("rdmaFloorMap", floorMapJson),
+                SubpluginOption("minHost", project.declaredMinHost().toString()),
             )
         }
     }

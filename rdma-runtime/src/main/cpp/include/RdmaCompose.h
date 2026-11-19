@@ -219,6 +219,17 @@ void androidUncaughtHandler(const RdmaExceptionInfo& info, const std::string& pl
 // Serializes a host Throwable into the boundary description (Native -> JS, §5).
 RdmaExceptionInfo fromJniThrowable(JNIEnv* env, jthrowable t);
 
+// Strings cross JNI as UTF-16 (NewString / GetStringChars), not through JNI's modified UTF-8:
+// supplementary characters (emoji) and U+0000 arrive intact.
+// A JS string as a new local jstring.
+jstring rdmaNewJString(JNIEnv* env, jsi::Runtime& rt, const jsi::String& s);
+// A JS value as a jstring: nullptr for null/undefined (a nullable String).
+jstring rdmaJsToJString(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v);
+// A JS value that must be a string (throws a JS TypeError otherwise).
+jstring rdmaJsToJStringNonNull(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v);
+// A jstring as a JS value: null for nullptr.
+jsi::Value rdmaJStringToJs(JNIEnv* env, jsi::Runtime& rt, jstring s);
+
 // Throws a JS Error if the JNI env has a pending exception. Call on the Hermes
 // thread immediately after a Call*Method into host code.
 void checkAndThrowJs(JNIEnv* env, jsi::Runtime& rt);

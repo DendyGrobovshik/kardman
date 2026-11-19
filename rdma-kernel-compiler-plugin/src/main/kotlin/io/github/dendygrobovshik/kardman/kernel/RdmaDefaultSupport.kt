@@ -94,60 +94,34 @@ object RdmaDefaultSupport {
     fun declaredNullableFromFunctionSource(source: String, startOffset: Int, endOffset: Int): Map<Int, Boolean> =
         declaredNullableFromDecl(source, startOffset, endOffset, "fun ")
 
-    /** Splits a parameter list on top-level commas (nested `()`, `<>`, `[]`, and `->` arrows do not split). */
+    /** Splits a parameter list on top-level commas (see [scanTopLevel]: brackets, lambdas, literals and comments do not split). */
     fun splitParams(s: String): List<String> {
         val params = mutableListOf<String>()
-        val current = StringBuilder()
-        var depth = 0
-        var angle = 0
-        var bracket = 0
-        var i = 0
-        while (i < s.length) {
-            val c = s[i]
-            when {
-                c == '-' && i + 1 < s.length && s[i + 1] == '>' -> { current.append(c).append('>'); i++ }
-                c == '(' -> { depth++; current.append(c) }
-                c == ')' -> { if (depth > 0) depth--; current.append(c) }
-                c == '<' -> { angle++; current.append(c) }
-                c == '>' -> { if (angle > 0) angle--; current.append(c) }
-                c == '[' -> { bracket++; current.append(c) }
-                c == ']' -> { if (bracket > 0) bracket--; current.append(c) }
-                c == ',' && depth == 0 && angle == 0 && bracket == 0 -> { params.add(current.toString().trim()); current.clear() }
-                else -> current.append(c)
+        var from = 0
+        scanTopLevel(s) { i, c ->
+            if (c == ',') {
+                params.add(s.substring(from, i).trim())
+                from = i + 1
             }
-            i++
+            false
         }
-        if (current.isNotBlank()) params.add(current.toString().trim())
+        if (s.substring(from).isNotBlank()) params.add(s.substring(from).trim())
         return params
     }
 
-    /** The index of the first top-level occurrence of [ch] (tracking `()`, `<>`, `[]`, `->`), or -1. */
+    /** The index of the first top-level occurrence of [ch], or -1. See [scanTopLevel]. */
     fun topLevelIndex(s: String, ch: Char): Int {
-        var depth = 0
-        var angle = 0
-        var bracket = 0
-        var i = 0
-        while (i < s.length) {
-            val c = s[i]
-            when {
-                c == '-' && i + 1 < s.length && s[i + 1] == '>' -> i++
-                c == '(' -> depth++
-                c == ')' -> if (depth > 0) depth--
-                c == '<' -> angle++
-                c == '>' -> if (angle > 0) angle--
-                c == '[' -> bracket++
-                c == ']' -> if (bracket > 0) bracket--
-                c == ch -> if (depth == 0 && angle == 0 && bracket == 0) return i
-            }
-            i++
-        }
-        return -1
+        var found = -1
+        scanTopLevel(s) { i, c -> (c == ch).also { if (it) found = i } }
+        return found
     }
 
     private fun matchingParen(source: String, open: Int): Int? {
         var depth = 0
         var i = open
         while (i < source.length) {
+            val skipped = skipLiteralOrComment(source, i)
+            if (skipped != i) { i = skipped; continue }
             when (source[i]) {
                 '(' -> depth++
                 ')' -> {
@@ -158,6 +132,82 @@ object RdmaDefaultSupport {
             i++
         }
         return null
+    }
+
+    /**
+     * Calls [onTopLevel] for every character outside brackets — `()`, `[]`, `{}` (lambdas) and
+     * generic `<>` — and outside string/char literals and comments; stops when it returns true.
+     * A `<` opens a generic only right after an identifier (`List<Int>`), so a comparison in a
+     * default value (`a < b`) does not swallow the rest of the list; `->` is not a bracket.
+     */
+    private fun scanTopLevel(s: String, onTopLevel: (Int, Char) -> Boolean) {
+        var depth = 0
+        var angle = 0
+        var i = 0
+        while (i < s.length) {
+            val skipped = skipLiteralOrComment(s, i)
+            if (skipped != i) { i = skipped; continue }
+            val c = s[i]
+            when {
+                c == '-' && i + 1 < s.length && s[i + 1] == '>' -> i++
+                c == '(' || c == '[' || c == '{' -> depth++
+                c == ')' || c == ']' || c == '}' -> if (depth > 0) depth--
+                c == '<' && i > 0 && (s[i - 1].isLetterOrDigit() || s[i - 1] == '_' || s[i - 1] == '?') -> angle++
+                c == '>' && angle > 0 -> angle--
+                depth == 0 && angle == 0 -> if (onTopLevel(i, c)) return
+            }
+            i++
+        }
+    }
+
+    /**
+     * When a string literal (plain or raw, with `${…}` templates), a char literal or a comment
+     * starts at [i], the index just after it; otherwise [i].
+     */
+    private fun skipLiteralOrComment(s: String, i: Int): Int {
+        if (i >= s.length) return i
+        val c = s[i]
+        return when {
+            c == '/' && i + 1 < s.length && s[i + 1] == '/' -> s.indexOf('\n', i).let { if (it < 0) s.length else it }
+            c == '/' && i + 1 < s.length && s[i + 1] == '*' -> s.indexOf("*/", i + 2).let { if (it < 0) s.length else it + 2 }
+            c == '\'' -> {
+                var j = i + 1
+                while (j < s.length && s[j] != '\'') j += if (s[j] == '\\') 2 else 1
+                minOf(j + 1, s.length)
+            }
+            c == '"' && s.startsWith("\"\"\"", i) -> {
+                val close = s.indexOf("\"\"\"", i + 3)
+                if (close < 0) s.length else close + 3
+            }
+            c == '"' -> {
+                var j = i + 1
+                while (j < s.length && s[j] != '"') {
+                    j = when {
+                        s[j] == '\\' -> j + 2
+                        s[j] == '$' && j + 1 < s.length && s[j + 1] == '{' -> skipTemplate(s, j + 1)
+                        else -> j + 1
+                    }
+                }
+                minOf(j + 1, s.length)
+            }
+            else -> i
+        }
+    }
+
+    /** From the `{` of a `${…}` template, the index just after its matching `}`. */
+    private fun skipTemplate(s: String, open: Int): Int {
+        var depth = 0
+        var j = open
+        while (j < s.length) {
+            val skipped = skipLiteralOrComment(s, j)
+            if (skipped != j) { j = skipped; continue }
+            when (s[j]) {
+                '{' -> depth++
+                '}' -> { depth--; if (depth == 0) return j + 1 }
+            }
+            j++
+        }
+        return s.length
     }
 
     /**

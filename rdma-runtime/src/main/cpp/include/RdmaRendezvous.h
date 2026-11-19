@@ -158,6 +158,10 @@ void rdmaEvalBuffer(std::shared_ptr<const facebook::jsi::Buffer> buffer, const s
 // No-op with a log line if the file cannot be mapped.
 void rdmaEvalFile(const std::string& path);
 
+// Update point (compatibility.md §8.5): evaluates the files in order as ONE task on the Hermes
+// thread, so nothing runs between them. Files that cannot be mapped are skipped with a log line.
+void rdmaEvalFiles(const std::vector<std::string>& paths);
+
 // True once the runtime is ready and all enqueued evals have finished.
 bool rdmaIsReady();
 

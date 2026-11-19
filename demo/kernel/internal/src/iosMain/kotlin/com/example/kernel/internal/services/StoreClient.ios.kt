@@ -84,9 +84,14 @@ internal actual fun resyncExecute(pluginId: String, version: Int, onDone: (Strin
         val status = obj["status"]!!.jsonPrimitive.content
         when (status) {
             "UPDATE" -> {
-                obj["bundleHash"]?.jsonPrimitive?.content?.let { hash -> downloadAndEval(hash) }
-                obj["polyfills"]?.jsonArray?.forEach { key -> downloadAndEvalBytes(key.jsonPrimitive.content) }
-                onDone("updated $pluginId -> v${obj["targetVersion"]}")
+                // Polyfills first: the new plugin version may call the kernel symbols they add.
+                val keys = obj["polyfills"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty() +
+                    listOfNotNull(obj["bundleHash"]?.jsonPrimitive?.content)
+                downloadAndStage(keys) {
+                    // The user asked for this version (Generate), so this is the update point.
+                    RdmaBridge.applyUpdates()
+                    onDone("updated $pluginId -> v${obj["targetVersion"]}")
+                }
             }
             "CURRENT" -> onDone("current $pluginId v${obj["targetVersion"]}")
             "UNAVAILABLE" -> onDone("unavailable $pluginId")
@@ -96,19 +101,19 @@ internal actual fun resyncExecute(pluginId: String, version: Int, onDone: (Strin
     }
 }
 
-private fun downloadAndEval(hash: String) {
-    val file = "$storeCacheDir$hash.hbc"
-    downloadRaw("$storeBaseUrl/bundle/$hash") { bytes ->
+/**
+ * Downloads bundles (plugins by hash, polyfills by key) into the cache one after another,
+ * stages each for the next update point (`RdmaBridge.applyUpdates`), then calls [onDone].
+ */
+private fun downloadAndStage(keys: List<String>, onDone: () -> Unit) {
+    val key = keys.firstOrNull() ?: return onDone()
+    val file = storeCacheDir + key.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".hbc"
+    downloadRaw("$storeBaseUrl/bundle/$key") { bytes ->
         if (bytes != null) {
             bytes.toNSData().writeToFile(file, atomically = true)
-            RdmaBridge.nativeEvalFile(file)
+            RdmaBridge.stageUpdate(file)
         }
-    }
-}
-
-private fun downloadAndEvalBytes(key: String) {
-    downloadRaw("$storeBaseUrl/bundle/$key") { bytes ->
-        if (bytes != null) RdmaBridge.nativeEvalBytes(bytes)
+        downloadAndStage(keys.drop(1), onDone)
     }
 }
 

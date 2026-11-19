@@ -24,6 +24,9 @@ import androidx.compose.runtime.setValue
 import com.example.kernel.internal.Button
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Modifier
+import com.example.kernel.internal.PriorityBadge
+import com.example.kernel.internal.lastPriorityBadge
+import com.example.kernel.internal.services.Priority
 import com.example.kernel.internal.Row
 import com.example.kernel.internal.Text
 import com.example.kernel.internal.modifierApplied
@@ -48,11 +51,12 @@ fun ModifiersDemo() {
         Text("clicks=$clicks", modifier = Modifier().size(120.0, 24.0).testTag("mod-clicks"))
         // onClick omitted: the widget's default applies.
         Button("plain", modifier = Modifier().padding(2.0).testTag("mod-button"))
+        // An enum argument of a kernel widget (it used to arrive as null).
+        PriorityBadge(Priority.HIGH)
     }
     LaunchedEffect(Unit) {
-        // Counts are taken relative to this point: the stand host may have recreated this
-        // component (key(contentVersion)) while plugins were still registering, and that also
-        // restarts this effect.
+        // Counts are taken relative to this point: the composition may have settled while
+        // other plugins were still registering.
         delay(300)
         val stable0 = modifierCompositions("mod-stable")
         val changing0 = modifierCompositions("mod-changing")
@@ -69,5 +73,7 @@ fun ModifiersDemo() {
         println("MOD_APPLIED: column=[${modifierApplied("mod-column")}] stable=[${modifierApplied("mod-stable")}] noscope=[${modifierApplied("mod-noscope")}] button=[${modifierApplied("mod-button")}]")
         println("MOD_SKIP: stable=+$stable colstable=+$colStable changing=+$changing")
         println("MOD_CLICK: clicked=$clicked clicks=$clicks")
+        println("ENUM_WIDGET: ${lastPriorityBadge()}")
+        println(stringsProbe())
     }
 }

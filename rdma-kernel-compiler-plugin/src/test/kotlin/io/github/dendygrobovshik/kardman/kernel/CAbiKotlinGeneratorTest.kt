@@ -27,6 +27,7 @@ import io.github.dendygrobovshik.kardman.types.RdmaTypeRef
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains
+import kotlin.test.assertTrue
 import kotlin.test.assertFalse
 
 class CAbiKotlinGeneratorTest {
@@ -87,7 +88,11 @@ class CAbiKotlinGeneratorTest {
         )
         val kotlin = generate(emptyList(), listOf(fn))
         assertContains(kotlin, "fun rdma_computeSumAsync(completionId: Long, _p0: Int, _p1: Int)")
-        assertContains(kotlin, "RdmaSuspend.completeResult(completionId, com.example.kernel.computeSum(a, b))")
+        assertContains(kotlin, "{ com.example.kernel.computeSum(a, b) }")
+        assertContains(kotlin, "RdmaSuspend.completeResult(completionId, call())")
+        // C arguments are valid only during the C call: they are converted before the
+        // coroutine starts (on another thread), never inside it.
+        assertTrue(kotlin.indexOf("val a = _p0") < kotlin.indexOf("RdmaSuspend.launch(completionId)"))
         assertContains(kotlin, "RdmaSuspend.completeError(completionId, t)")
         assertContains(kotlin, "rdmaRegisterFunction(\"rdma_computeSumAsync\"")
         // A suspend function must not also be emitted as a synchronous shim.

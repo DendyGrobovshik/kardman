@@ -425,6 +425,26 @@ void rdmaEvalFile(const std::string& path) {
     rdmaEvalBuffer(buffer, path);
 }
 
+void rdmaEvalFiles(const std::vector<std::string>& paths) {
+    std::vector<std::pair<std::shared_ptr<const facebook::jsi::Buffer>, std::string>> buffers;
+    for (const auto& path : paths) {
+        auto buffer = mmapFileBuffer(path);
+        if (!buffer) {
+            LOGW("rdmaEvalFiles: cannot mmap %s", path.c_str());
+            continue;
+        }
+        buffers.emplace_back(std::move(buffer), path);
+    }
+    if (buffers.empty()) return;
+    // One task: nothing else (a composition, a callback) runs between the bundles, so no
+    // caller ever sees a half-applied update.
+    g_evalPending.fetch_add(1, std::memory_order_relaxed);
+    rdmaPostJsHigh([buffers] {
+        for (const auto& [buffer, url] : buffers) evalJavaScript(buffer, url);
+        g_evalPending.fetch_sub(1, std::memory_order_relaxed);
+    });
+}
+
 bool rdmaIsReady() {
     return g_runtimeReady.load(std::memory_order_acquire) &&
            g_evalPending.load(std::memory_order_relaxed) == 0;

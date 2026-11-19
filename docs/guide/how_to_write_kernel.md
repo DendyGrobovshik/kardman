@@ -177,6 +177,36 @@ An `@RDMA` signature may use an `@RDMA` type from another kernel module (a widge
 depends on the owner through Gradle. The only check is that the referenced type is itself
 `@RDMA`.
 
+## State
+
+Kernel state that plugins or other `@RDMA` code also work with must have **one home**. Keep it
+behind `@RDMA` functions or an `@RDMA` class — the usual `getX`/`setX` pattern — rather than
+reading a private variable from several places:
+
+```kotlin
+private var token: String? = null
+
+@RDMA fun currentToken(): String? = token
+@RDMA fun login(user: String, password: String) { token = /* … */ }
+```
+
+Everything that is not `@RDMA` — a private top-level variable, an `object`, a `lazy` value — is
+**runtime-local**: like a `ThreadLocal`, but per runtime. When a hotfix moves some code that
+touches it into a JS polyfill, that polyfill gets **its own copy**, with no synchronization, and
+native code keeps the original. With the pattern above this never happens: the hotfixed `login`
+reaches `token` through `currentToken`'s home in the native.
+
+A dynamic release detects such a split and fails, naming the variable and the code on each side.
+If separate copies are fine (a cache, a counter for logs), mark the variable — or its `object` —
+`@RuntimeLocal`; the annotation changes nothing, it records the decision. An unchanged `val` of a
+primitive, `String` or enum type never needs it. The fix has to be in place *before* the app
+version you want to hotfix was built: an accessor added later is itself a polyfill on those apps.
+
+For the same reason a hotfix changes behaviour, not the structure of an object: a changed
+constructor, `init` block or field initializer, or a method change that touches a non-`@RDMA`
+field of an existing class, needs an app update. To keep construction logic hotfixable, create
+objects through an `@RDMA` factory function and keep the constructor thin.
+
 ## Changing a released kernel
 
 Kernel changes reach users in two ways: with an app update (a *static* release), or as a

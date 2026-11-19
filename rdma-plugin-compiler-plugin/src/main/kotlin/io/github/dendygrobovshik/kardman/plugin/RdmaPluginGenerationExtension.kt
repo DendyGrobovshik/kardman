@@ -17,10 +17,14 @@ package io.github.dendygrobovshik.kardman.plugin
 
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
+import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 
 class RdmaPluginGenerationExtension : IrGenerationExtension {
+    @Suppress("DEPRECATION") // messageCollector: the IR phase has no source element to report on
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
-        RdmaPluginTransformState.flush()
+        for (error in RdmaPluginTransformState.flush()) {
+            pluginContext.messageCollector.report(CompilerMessageSeverity.ERROR, error)
+        }
     }
 }

@@ -125,7 +125,21 @@ Both sets are pre-built and live in the store; the app downloads what it needs b
 2. **Manually-emulatable** — the auto-materializer can't, but a human rewrites the semantics through `@RDMA` primitives → manual polyfill.
 3. **Non-emulatable (fundamentally native)** — there is no JS version (widget, Compose base protocol, JNI capability) → a polyfill is impossible → only `@Deprecated` → honest removal.
 
-The compiler does not distinguish level 2 from level 3 (the materializer just fails); a human makes the distinction.
+Everything that can be emulated, automatically or by hand, is emulated. Nothing is special by
+kind: a `@Composable` widget built from `@RDMA` primitives, a class, a function all follow the same
+rule. **Non-emulatable** means the code does not compile to JS (it calls a platform SDK or a
+JVM/Native-only library) **and** a manual polyfill is not realistic.
+
+The kernel compiler marks a declaration non-emulatable when it calls code of another module that
+does not exist in the plugin runtime (anything outside the Kotlin stdlib, `kotlinx.coroutines`,
+the Compose runtime and other modules' `@RDMA` symbols) and has no manual polyfill. The
+materializer's JS compile stays the final judge: a call the check misses fails the dynamic release,
+it never ships. The compiler cannot tell level 2 from level 3; a human makes the distinction by
+writing a manual polyfill.
+
+*Current limit:* the materializer cannot build widget polyfills yet, so a `@Composable` symbol is
+still treated as non-emulatable (it anchors the `floor`). This is an implementation gap, not part
+of the model.
 
 ### 5.3 `floor(S)` and `minHost`
 
@@ -138,7 +152,15 @@ The compiler does not distinguish level 2 from level 3 (the materializer just fa
 
 **`floor` in the manifest and its recalculation.** Each symbol in the manifest carries a `floor` (0 — no restrictions, or N). It is recalculated recursively: as soon as a non-emulatable anchor appears or changes in the transitive closure, the `floor` of all dependent symbols updates.
 
-**`minHost` is non-monotonic, and that's normal.** A rise in `minHost` narrows the audience: hosts below the floor stay on the old version (it keeps working — nothing breaks, the new functionality just doesn't reach them). A drop widens the audience. A rise must be **visible** to the developer (§9, §11), but there is no hard ban — except for hotfixes.
+**`minHost` moves only by hand.** The plugin developer declares it (`rdmaMinHost`); by default it
+is the oldest host the plugin can meet — the support floor `kernel.oldestActiveKernel`, or the first
+released kernel when there is none. The computed `max(floor(S))` is a **check**, never a value
+that is written: when a plugin uses a symbol whose `floor` is above the declared `minHost`, the
+plugin build fails, naming the symbols, and the developer either raises `minHost` explicitly or
+stops using them. The audience never narrows silently. Hosts below a raised `minHost` stay on the
+last version that suits them (it keeps working, the new functionality just doesn't reach them) —
+a valid scenario, not an error. Forcing an app update is not the framework's job; an app that
+wants it can build it on top.
 
 ### 5.4 Backward compatibility (new plugin on an old host `H`)
 
@@ -243,6 +265,51 @@ A polyfill replaces a kernel symbol **everywhere**: for plugin code, which calls
 
 To safely cut a polyfill into delta pieces, the materializer must know whether the module has **shared mutable non-`@RDMA` state** (one variable reachable from two or more `@RDMA` symbols): no — we cut into pieces; yes — we keep it monolithic. **Marked as an optimization that is not implemented yet**: without it the polyfill bundle is monolithic and correct. This optimization may be used to shrink the downloaded polyfill when only a little logic changed.
 
+### 6.6 State across runtimes
+
+`@RDMA` is the only boundary between runtimes — for calls and for state alike.
+
+- **Shared state lives behind `@RDMA`**: an `@RDMA` class instance, or a variable read and
+  written only through `@RDMA` functions (`getX`/`setX`). It has one home, and both runtimes reach
+  it through the boundary. This is the pattern kernel authors are taught.
+- **Everything else is runtime-local**: non-`@RDMA` top-level variables, `object` and `companion`
+  state, `lazy` values. Like `ThreadLocal`, but per runtime: each runtime that runs code touching
+  such a variable has its own copy, initialized by its own initializer, with no synchronization
+  between copies. A JS copy appears only when code touching the variable lands in a polyfill's
+  dirty subgraph (§6.1).
+- **Split detection.** If a polyfill for host `H` touches a runtime-local variable that code
+  staying native on `H` also touches, the variable splits. The release fails, naming the variable
+  and the code on each side, unless the variable (or its `object`) is annotated `@RuntimeLocal`.
+  The annotation changes no semantics: it records that the developer accepts the split (caches,
+  diagnostics counters). Exempt: a `val` of a primitive, `String` or enum type whose declaration
+  is unchanged — both copies hold the same value. A `val` → `var` change or a new value changes the
+  declaration, so it is never missed.
+- **No retrofit.** The fix for a split must already be in the native at `H`: an `@RDMA` accessor
+  added now is itself polyfilled on `H` and reads the JS copy. Put shared mutable state behind
+  `@RDMA` from the start; otherwise the change needs a static release.
+- **Reset on swap.** When every user of a variable moves into a polyfill, the JS copy starts from
+  the initializer; a value accumulated in the native is not carried over.
+- **Instance fields are not runtime-local**: an object lives in one runtime. A polyfill of a method
+  of an existing native class cannot reach its non-`@RDMA` fields.
+
+### 6.7 Behaviour, not structure
+
+A dynamic release changes **behaviour**: functions, methods, computed properties without a field.
+It cannot change the **structure** of an object the native at `H` creates — the native layout and
+construction are compiled in. So these are non-emulatable and need a static release:
+
+- a changed constructor or `init` block, a changed field initializer;
+- a method change that reads or writes a non-`@RDMA` field of an existing native class (§6.6).
+
+Classes added after `H` are not affected: they live entirely in JS. To keep construction logic
+hotfixable, create objects through an `@RDMA` factory function: it is an ordinary top-level
+function with a slot, and the constructor stays thin.
+
+*Open:* a new field on an existing native class (non-emulatable vs. a framework side table with a
+constant initializer) and a per-class layout fingerprint in the manifest, which lets the release
+tell structure changes from behaviour changes reliably. Until then class changes are refused as a
+hotfix altogether (§6.4).
+
 ## 7. API lifecycle and plugin currency
 
 ### 7.1 Symbol lifecycle (S1–S5)
@@ -320,6 +387,23 @@ Without the optimization the polyfill bundle is monolithic and the client downlo
 
 "Rollback" = releasing a new version (forward) whose code matches the old one. `version` grows monotonically; "current" never moves backward; clients update via re-sync. No downgrade and no special channel.
 
+### 8.5 Update points
+
+Nothing downloaded at re-sync changes running code by itself. New plugin versions and polyfills
+are **staged** and applied together at an **update point**:
+
+- **cold start** — the newest bundles are evaluated before the first frame;
+- **`RdmaBridge.applyUpdates()`** — called by the host where the user does not watch plugin
+  content (between screens, back from the background).
+
+At an update point every staged bundle is evaluated as one step on the plugin thread, so nothing
+runs against a half-applied update. Every place showing a component of an updated plugin is
+recreated with the new version (its `remember` state starts over), so two versions of one plugin
+never run side by side — they would otherwise each keep their own copy of the plugin's state
+(§6.6). Updated kernel functions switch for every caller at the same moment, including calls from
+components already on screen — a deliberate simplification instead of a state machine. The host
+stages polyfills before the plugins that need them.
+
 ## 9. Releases
 
 - **`release-dynamic`** — a dynamic release (no app update). It determines what changed by hash diff:
@@ -330,9 +414,17 @@ Without the optimization the polyfill bundle is monolithic and the client downlo
 
 **Release order** (protection against a half-done state): first **build → checks → tests**, and only after success — writing the changelog. The write is the commit point; any error before it writes nothing.
 
+**`release-dynamic` is all or nothing.** Every check runs first — signatures (§5.6),
+hotfixability (§6.4), emulatability (§5.2), structure changes (§6.7), state splits (§6.6),
+removals (§7.1) — and the problems are reported together: what cannot ship and why, which other
+changes do not ship because of them (a release never ships part of a change), and the options (fix
+it, write a manual polyfill, or a static release). `--dry-run` runs the checks and writes nothing.
+
 **Who writes the changelog**: only CI, at merge time. The kernel version is bumped **on a kernel change**; one release = one bump = a set of changes; tests are a hard gate.
 
-**Hotfix and `minHost`.** A hotfix (bugfix, API unchanged) **must not bump `minHost`**: if a release is declared a hotfix but `minHost` grew — that's an error. A rise in `minHost` is allowed only for a deliberate feature release that narrows the audience.
+**Hotfix and `minHost`.** A hotfix (bugfix, API unchanged) **must not bump the `floor`** of any
+symbol: if a release is declared a hotfix but a floor grew — that's an error. A plugin's `minHost`
+is never raised by a release at all (§5.3).
 
 **Coverage warning.** `release-dynamic` computes the coverage % (from the distribution of host versions in re-sync telemetry) and shows an infographic before publishing: "this release will reach X% of clients; `minHost` rose to N because of symbol Y (non-emulatable, introduced at N)". The developer consciously confirms.
 

@@ -404,5 +404,27 @@ class CppGeneratorTest {
         assertContains(bridgeCppAll, "CallObjectMethod(jret, g_rdmaCache.enumName)")
     }
 
+    @Test
+    fun `boolean property accessors use the JVM getter and setter names`() {
+        val session = RdmaClassInfo(
+            packageName = "com.example.kernel", className = "Session",
+            qualifiedName = "com.example.kernel.Session",
+            constructors = listOf(ConstructorInfo(emptyList())),
+            methods = emptyList(),
+            properties = listOf(
+                PropertyInfo("isAuthorized", "kotlin.Boolean", true),
+                PropertyInfo("enabled", "kotlin.Boolean", true),
+                PropertyInfo("issue", "kotlin.String", false),
+            ),
+        )
+        val cache = generate(session)["RdmaJniCache.cpp"] ?: error("RdmaJniCache.cpp not generated")
+        assertContains(cache, "\"isAuthorized\", \"()Z\"")
+        assertContains(cache, "\"setAuthorized\", \"(Z)V\"")
+        assertContains(cache, "\"getEnabled\", \"()Z\"")
+        assertContains(cache, "\"setEnabled\", \"(Z)V\"")
+        assertContains(cache, "\"getIssue\"")
+        assertFalse(cache.contains("isIsAuthorized") || cache.contains("isEnabled"))
+    }
+
     private fun generate(vararg classes: RdmaClassInfo) = generate(classes.toList())
 }

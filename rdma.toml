@@ -8,6 +8,9 @@
 #   toolchain.oldestActiveGeneration  oldest toolchain generation still live (FIFO)
 
 [kernel]
+# The stand's apps are built after the two initial static releases (internal, user:alice),
+# so the oldest host is 2. Plugins default their minHost to this floor.
+oldestActiveKernel = 2
 rootPackage = "com.example.kernel"
 project = ":tests:stand:kernel"
 internals = [":tests:stand:kernel:internal"]

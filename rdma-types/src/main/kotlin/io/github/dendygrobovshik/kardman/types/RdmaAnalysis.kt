@@ -48,9 +48,10 @@ data class RdmaSourceRange(
  * The [hash] is computed over the class header (signature/members signature) for classes and over
  * the whole declaration for everything else, so class-member changes are detected independently.
  *
- * [emulatable] is `false` when the symbol is fundamentally native and cannot have a JS polyfill
- * (e.g. a `@Composable` widget that talks to the native Compose protocol); such symbols are
- * non-emulatable anchors that set the `floor`/`minHost` bound (§5.2, §5.3).
+ * [emulatable] is `false` when the symbol cannot have a JS polyfill: it calls code that does not
+ * exist in the plugin runtime ([nativeRefs]) and has no manual polyfill, or it is a widget (the
+ * materializer cannot build widget polyfills yet). Such symbols are non-emulatable anchors that
+ * set the `floor` (§5.2, §5.3).
  *
  * [deprecated] is `true` when the declaration is annotated with Kotlin's `@Deprecated` — the
  * mandatory first step before removal (§7.1, S3).
@@ -80,6 +81,16 @@ data class RdmaDeclaration(
      * null when it can. Classes and properties are never hotfixable yet, whatever this says.
      */
     val hotfixBlocker: String? = null,
+    /** External declarations this one calls that do not exist in the plugin runtime (§5.2). */
+    val nativeRefs: List<String> = emptyList(),
+    /** A property's value type FQN (`enum:<fqn>` for an enum); decides the runtime-local exemption (§6.6). */
+    val valueType: String? = null,
+    /** A property that holds memory (a backing field or a delegate), i.e. state (§6.6). */
+    val hasField: Boolean = false,
+    /** Annotated `@RuntimeLocal`: a split of this state between runtimes is accepted (§6.6). */
+    val runtimeLocal: Boolean = false,
+    /** A class declared as `object` (its properties are module state, §6.6). */
+    val isObject: Boolean = false,
 )
 
 /** A single callable parameter as seen by the release-time signature classifier. */

@@ -43,6 +43,7 @@ import java.io.File
  *   dynamic-release  <analysis.json> <versionsDir> <polyfillOutDir> <internalModules> [telemetryFile]
  *   hotfix-release   <analysis.json> <versionsDir> <polyfillOutDir> <internalModules> [telemetryFile]
  *   plugin-release   [--no-bump] <versionsDir> <plugin.json> (<generation> <bundlePath>)+
+ *   publish-bundle   <versionsDir> <key> <bundleFile>
  *
  * Release order (§9): materialize + gate first, and only on success append the changelog entry
  * (the write is the commit point). `hotfix-release` additionally rejects a `minHost` bump (§9).
@@ -63,6 +64,10 @@ object RdmaReleaseCli {
         }
         if (command == "retire-generation") {
             retireGeneration(args)
+            return
+        }
+        if (command == "publish-bundle") {
+            publishBundle(args)
             return
         }
 
@@ -95,6 +100,11 @@ object RdmaReleaseCli {
                 // changes → append + bump H; with none → just bake (advance H to the latest).
                 val prev = RdmaChangelog.manifest(changelog, analysis.moduleId, RdmaChangelog.latestVersion(changelog))
                 val changes = RdmaChangelog.changes(analysis, prev)
+                if (args.contains("--dry-run")) {
+                    println("Dry run: a static release would record ${changes.size} change(s) and move H " +
+                        "(${changes.joinToString { "${it.kind.name.lowercase()} ${it.fqn}" }.ifEmpty { "bake only" }}). Nothing was written.")
+                    return
+                }
                 if (changes.isEmpty()) {
                     val baked = RdmaChangelog.bake(changelog)
                     if (baked.h != changelog.h) {
@@ -117,10 +127,10 @@ object RdmaReleaseCli {
             }
 
             "dynamic-release", "hotfix-release" -> {
-                // 0. Reject incompatible signature changes up front (before any polyfill work).
-                checkSignature(analysis, versionsDir)
-
-                // 1. Compute + materialize the F polyfill (everything after H).
+                // All or nothing (compatibility.md §9): every check runs first and the problems
+                // are reported together; one problem rejects the whole release, so a part of a
+                // change never ships without the rest. `--dry-run` stops after the checks.
+                val dryRun = args.contains("--dry-run")
                 val native = RdmaChangelog.nativeState(changelog, analysis.moduleId)
                 val dirty = RdmaHashDiff.diff(analysis.declarations, native)
                 val result = RdmaSubgraph.compute(analysis, dirty)
@@ -130,7 +140,27 @@ object RdmaReleaseCli {
                 println("changed: ${dirty.changed.sorted().joinToString()}")
                 println("entries: ${result.entries.sorted().joinToString()}")
                 println("nodes:   ${result.nodes.sorted().joinToString()}")
-                checkHotfixable(analysis, dirty, result)
+
+                val prev = RdmaChangelog.manifest(changelog, analysis.moduleId, RdmaChangelog.latestVersion(changelog))
+                val changes = RdmaChangelog.changes(analysis, prev)
+                val appended = if (changes.isEmpty()) null else RdmaChangelog.append(changelog, analysis.moduleId, changes, bumpH = false)
+
+                val problems = mutableListOf<String>()
+                problems += signatureErrors(analysis, versionsDir)
+                problems += hotfixErrors(analysis, dirty, result)
+                problems += nonEmulatableErrors(analysis, result)
+                problems += RdmaStateSplit.detect(analysis, dirty, result).map { it.message() }
+                if (appended != null) {
+                    problems += removalErrors(changelog, analysis, changes, internalModules)
+                    problems += gateErrors(appended, analysis, hotfix, RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)))
+                }
+                if (problems.isNotEmpty()) {
+                    reject(problems, result.entries)
+                }
+                if (dryRun) {
+                    println("Dry run: no problems; the release would ship ${result.entries.sorted().joinToString().ifEmpty { "no polyfill" }}. Nothing was written.")
+                    return
+                }
 
                 val files = RdmaPolyfillMaterializer.materialize(analysis, result)
                 if (files.isEmpty()) {
@@ -144,16 +174,13 @@ object RdmaReleaseCli {
                     }
                 }
 
-                // 2. Commit point: append the changelog entry (counter bump, H unchanged).
-                val prev = RdmaChangelog.manifest(changelog, analysis.moduleId, RdmaChangelog.latestVersion(changelog))
-                val changes = RdmaChangelog.changes(analysis, prev)
-                val updated = if (changes.isEmpty()) {
+                // Commit point: append the changelog entry (counter bump, H unchanged).
+                val updated = if (appended == null) {
                     println("No kernel changes; changelog untouched (H=${changelog.h}).")
                     changelog
                 } else {
                     checkRemoval(changelog, analysis, changes, internalModules, polyfillOutDir, versionsDir)
-                    val appended = RdmaChangelog.append(changelog, analysis.moduleId, changes, bumpH = false)
-                    gate(appended, analysis, hostVersions, hotfix, RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)), oldestActiveKernel = oldestActiveKernel)
+                    gate(appended, analysis, hostVersions, hotfix = false, RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)), oldestActiveKernel = oldestActiveKernel)
                     RdmaChangelog.write(changelogFile, appended)
                     println("Bumped counter to v${RdmaChangelog.latestVersion(appended)} (H=${appended.h}). Wrote ${changelogFile.path}")
                     appended
@@ -242,6 +269,9 @@ object RdmaReleaseCli {
             val bundle = provided[g] ?: continue
             val bundleHash = RdmaContentHasher.sha256Bytes(bundle.readBytes())
             val release = PluginRelease(contract.copy(version = version, builtAgainstToolchain = g), bundleHash)
+            // The bundle goes into the store before its release record, so a recorded release
+            // always has its bundle (and the bundle's gzip copy, §8.1).
+            RdmaBundleFiles.publish(versionsDir, bundleHash, bundle.readBytes())
             RdmaPluginReleases.append(versionsDir, release)
             written[g] = bundleHash
         }
@@ -263,6 +293,23 @@ object RdmaReleaseCli {
                 if (g !in active) println("  $g  ignored      (generation not active)")
             }
         }
+    }
+
+    /**
+     * `publish-bundle <versionsDir> <key> <bundleFile>` — puts a bundle into the store under its
+     * content key (`F:<module>:<H>[:<G>]`, `R:<module>[:<G>]`, or a plugin bundle hash), with
+     * its release-time gzip copy (§8.1). Plugin bundles are published by `plugin-release`.
+     */
+    private fun publishBundle(args: Array<String>) {
+        val versionsDir = args.getOrNull(1)?.let(::File)
+        val key = args.getOrNull(2)
+        val bundle = args.getOrNull(3)?.let(::File)
+        if (versionsDir == null || key.isNullOrBlank() || bundle == null || !bundle.isFile) {
+            System.err.println("usage: publish-bundle <versionsDir> <key> <bundleFile>")
+            kotlin.system.exitProcess(2)
+        }
+        val file = RdmaBundleFiles.publish(versionsDir, key, bundle.readBytes())
+        println("published bundle $key -> ${file.path} (+${RdmaBundleFiles.GZIP_SUFFIX})")
     }
 
     /** `generation-release <g> <versionsDir> [alias]` — records a new toolchain generation and, on the first generation, sets the FIFO floor. */
@@ -420,6 +467,12 @@ object RdmaReleaseCli {
      * insertion / adding a required parameter on any `@RDMA` callable. Only appending trailing
      * defaulted parameters is compatible.
      */
+    private fun signatureErrors(analysis: RdmaAnalysis, versionsDir: File): List<String> {
+        val oldSignatures = RdmaBaseline.readSignatures(analysis.moduleId, versionsDir)
+        return RdmaSignatureClassifier.classify(oldSignatures, analysis.declarations).errors
+            .map { "$it (only trailing defaulted parameters may be appended)" }
+    }
+
     private fun checkSignature(analysis: RdmaAnalysis, versionsDir: File) {
         val oldSignatures = RdmaBaseline.readSignatures(analysis.moduleId, versionsDir)
         val report = RdmaSignatureClassifier.classify(oldSignatures, analysis.declarations)
@@ -435,9 +488,9 @@ object RdmaReleaseCli {
      * an existing symbol only if every call site of it runs the new version. Added symbols
      * have no native call sites on older hosts and pass.
      */
-    private fun checkHotfixable(analysis: RdmaAnalysis, dirty: RdmaDirtySet, result: PolyfillResult) {
+    private fun hotfixErrors(analysis: RdmaAnalysis, dirty: RdmaDirtySet, result: PolyfillResult): List<String> {
         val byFqn = analysis.declarations.associateBy { it.fqn }
-        val errors = result.entries.filter { it !in dirty.added }.sorted().mapNotNull { fqn ->
+        return result.entries.filter { it !in dirty.added }.sorted().mapNotNull { fqn ->
             val decl = byFqn[fqn] ?: return@mapNotNull null
             val reason = when (decl.kind) {
                 RdmaSymbolKind.CLASS -> "class members are not hotfixable yet"
@@ -446,11 +499,57 @@ object RdmaReleaseCli {
             } ?: return@mapNotNull null
             "$fqn changed, but $reason: some call sites would keep running the old version"
         }
-        for (e in errors) System.err.println("ERROR: $e")
-        if (errors.isNotEmpty()) {
-            System.err.println("Release rejected: these changes cannot be hotfixed yet — ship them with a static release.")
-            kotlin.system.exitProcess(1)
+    }
+
+    /**
+     * Code the polyfill would have to run in JS but that does not exist there (§5.2): a node
+     * of the polyfill calling platform or JVM/Native-only API, or a widget. A manual polyfill
+     * of the entry replaces it, together with its closure.
+     */
+    private fun nonEmulatableErrors(analysis: RdmaAnalysis, result: PolyfillResult): List<String> {
+        val manual = analysis.polyfills.map { it.target }.toSet()
+        val boundaries = analysis.declarations.filter { it.isRdma }.map { RdmaSubgraph.nodeOf(it) }.toSet()
+        val adjacency = analysis.uses.groupBy({ it.from }, { it.to })
+        val emitted = mutableSetOf<String>()
+        for (entry in result.entries - manual) {
+            val stack = ArrayDeque(listOf(entry))
+            while (stack.isNotEmpty()) {
+                val node = stack.removeLast()
+                if (!emitted.add(node)) continue
+                for (next in adjacency[node].orEmpty()) if (next !in boundaries) stack.addLast(next)
+            }
         }
+        return analysis.declarations
+            .filter { !it.emulatable && it.fqn !in manual && RdmaSubgraph.nodeOf(it) in emitted }
+            .sortedBy { it.fqn }
+            .map { decl ->
+                val why = if (decl.nativeRefs.isNotEmpty()) "it calls ${decl.nativeRefs.joinToString()}, which does not exist in the plugin runtime"
+                else "widget polyfills are not supported yet"
+                "${decl.fqn} cannot run as a polyfill: $why. Write a manual polyfill (@Polyfill) or ship it with a static release"
+            }
+    }
+
+    /** Removal without a prior `@Deprecated` period in an internal module (§7.1). */
+    private fun removalErrors(changelog: Changelog, analysis: RdmaAnalysis, changes: List<ChangelogChange>, internalModules: Set<String>): List<String> {
+        val removed = changes.filter { it.kind == ChangelogChangeKind.REMOVE }.map { it.fqn }.toSet()
+        if (removed.isEmpty()) return emptyList()
+        return RdmaRemovalPolicy.validate(changelog, analysis.moduleId, removed, internalModules).errors
+    }
+
+    private fun gateErrors(updated: Changelog, analysis: RdmaAnalysis, hotfix: Boolean, minHostBefore: Int): List<String> {
+        val minHostAfter = RdmaReleaseGates.minHostOf(RdmaFloor.compute(updated, analysis))
+        return RdmaReleaseGates.checkHotfix(hotfix, minHostBefore, minHostAfter)
+    }
+
+    /** Prints every problem and what does not ship because of them, then exits (nothing written). */
+    private fun reject(problems: List<String>, entries: Set<String>): Nothing {
+        System.err.println("Release rejected — nothing was written. ${problems.size} problem(s):")
+        for (p in problems) System.err.println("ERROR: $p")
+        if (entries.isNotEmpty()) {
+            System.err.println("Not shipped because of them (a release ships all of its changes or none): ${entries.sorted().joinToString()}")
+        }
+        System.err.println("Fix the problems above, or ship the changes with a static release.")
+        kotlin.system.exitProcess(1)
     }
 
     private fun readHostVersions(file: File): List<Int> =

@@ -107,7 +107,14 @@ class MainActivity : ComponentActivity() {
             // first content composition (a throwing content would otherwise crash the app
             // before the ready marker appears).
             var ready by remember { mutableStateOf(false) }
-            var contentVersion by remember { mutableStateOf(RdmaBridge.nativeContentVersion()) }
+            // A component argument that changes after the first composition must reach the plugin.
+            var live by remember { mutableStateOf(0) }
+            LaunchedEffect(ready) {
+                if (ready) {
+                    delay(1500)
+                    live = 5
+                }
+            }
             LaunchedEffect(Unit) {
                 var readyLogged = false
                 while (true) {
@@ -117,16 +124,14 @@ class MainActivity : ComponentActivity() {
                         readyLogged = true
                         Log.i("RDMA", "Runtime ready")
                     }
-                    val cv = RdmaBridge.nativeContentVersion()
-                    if (cv != contentVersion) contentVersion = cv
                     delay(16)
                 }
             }
             if (ready) {
                 // Every stand component; a component not registered (plugin not loaded)
-                // composes nothing. Keyed on the content version so a new plugin version
-                // renders at once (the default is at the next appearance).
-                key(contentVersion) {
+                // composes nothing. A new plugin version replaces every place at the update
+                // point (`RdmaBridge.applyUpdates` at the end of a re-sync).
+                run {
                     Column {
                         RdmaComposeHost.Component("alice:counter/main")
                         RdmaComposeHost.Component("itest:newplug/main")
@@ -134,6 +139,7 @@ class MainActivity : ComponentActivity() {
                         RdmaComposeHost.Component("itest:exceptions2/main")
                         RdmaComposeHost.Component("bob:services/card", "a", 1)
                         RdmaComposeHost.Component("bob:services/card", "b", 2)
+                        RdmaComposeHost.Component("bob:services/card", "c", live)
                         RdmaComposeHost.Component("bob:services/modifiers")
                         RdmaComposeHost.Component("bob:services/keys")
                     }
@@ -201,53 +207,60 @@ class MainActivity : ComponentActivity() {
         Thread {
             try {
                 while (!RdmaBridge.nativeIsReady()) Thread.sleep(16)
+                val updated = mutableListOf<String>()
                 for ((id, version, builtAgainst) in plugins) {
                     val resp = client.resync(ResyncRequest(id, version, builtAgainst, hostVersion, hostGeneration))
                     when (resp.status) {
                         ResyncStatus.UPDATE -> {
-                            resp.bundleHash?.let { h ->
-                                client.download(h)?.let { cacheAndEvalBundle(h, it) }
-                            }
-                            evalPolyfills(client, resp.polyfills)
+                            // Polyfills first: the new plugin version may call what they add.
+                            updated += stagePolyfills(client, resp.polyfills)
+                            resp.bundleHash?.let { h -> client.download(h)?.let { stage(h, it) } }
                             knownPlugins[id] = resp.targetVersion
-                            Log.i("RDMA", "updated $id -> v${resp.targetVersion}")
+                            updated += "updated $id -> v${resp.targetVersion}"
                         }
                         ResyncStatus.CURRENT -> {
                             // A current plugin can still be at-risk (§7.2): its symbols may have
                             // been removed, so the R polyfills must be fetched even without a new
                             // plugin bundle.
-                            evalPolyfills(client, resp.polyfills)
+                            updated += stagePolyfills(client, resp.polyfills)
                             Log.i("RDMA", "current $id v${resp.targetVersion}")
                         }
                         ResyncStatus.UNAVAILABLE -> Log.i("RDMA", "unavailable $id on this host")
                         ResyncStatus.REFUSED -> Log.i("RDMA", "refused $id (mandatory update)")
                     }
                 }
+                // The stand's update point (compatibility.md §8.5): right after a re-sync, so the
+                // tests see a new version at once. A real app picks a moment the user does not
+                // watch plugin content (between screens, back from the background).
+                if (RdmaBridge.applyUpdates()) {
+                    while (!RdmaBridge.nativeIsReady()) Thread.sleep(16)
+                }
+                updated.forEach { Log.i("RDMA", it) }
             } catch (e: Exception) {
                 Log.i("RDMA", "re-sync unavailable: ${e.message}")
             }
         }.start()
     }
 
-    private fun evalPolyfills(client: RdmaSyncClient, keys: List<String>) {
-        for (key in keys) {
+    /** Stages the polyfills; returns the log lines to print once they are applied. */
+    private fun stagePolyfills(client: RdmaSyncClient, keys: List<String>): List<String> =
+        keys.mapNotNull { key ->
             client.download(key)?.let { bytes ->
-                RdmaBridge.nativeEvalBytes(bytes)
-                Log.i("RDMA", "polyfill $key evaluated")
+                stage(key, bytes)
+                "polyfill $key evaluated"
             }
         }
-    }
 
     /**
-     * Caches a downloaded plugin bundle to `cacheDir/rdma/<hash>.hbc` (content-addressed, so a
-     * repeated download is skipped) and mmap-loads it through the native runtime.
+     * Caches a downloaded bundle to `cacheDir/rdma/<key>.hbc` (content-addressed for plugins, so
+     * a repeated download is skipped) and stages it for the next update point.
      */
-    private fun cacheAndEvalBundle(hash: String, bytes: ByteArray) {
+    private fun stage(key: String, bytes: ByteArray) {
         val dir = File(cacheDir, "rdma")
         if (!dir.isDirectory) dir.mkdirs()
-        val file = File(dir, "$hash.hbc")
-        if (!file.isFile) file.writeBytes(bytes)
-        RdmaBridge.nativeEvalFile(file.absolutePath)
+        val file = File(dir, key.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".hbc")
+        if (!file.isFile || key.contains(':')) file.writeBytes(bytes)
+        RdmaBridge.stageUpdate(file.absolutePath)
     }
 
     private companion object {

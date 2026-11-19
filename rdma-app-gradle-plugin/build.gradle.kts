@@ -24,6 +24,8 @@ version = "1.0"
 
 dependencies {
     compileOnly(libs.kotlin.gradle.plugin.api)
+    // Framework export configuration (KotlinNativeTarget / Framework); the host build supplies it.
+    compileOnly(libs.kotlin.gradle.plugin)
     compileOnly(libs.android.gradle.plugin)
     implementation(project(":rdma-types"))
 }

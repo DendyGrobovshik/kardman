@@ -76,6 +76,7 @@ package $kernelPackage
 import io.github.dendygrobovshik.kardman.runtime.RdmaSuspend
 import io.github.dendygrobovshik.kardman.runtime.rdmaCaptureError
 import io.github.dendygrobovshik.kardman.runtime.rdmaRegisterFunction
+import io.github.dendygrobovshik.kardman.runtime.rdmaBoundaryCStr
 import io.github.dendygrobovshik.kardman.runtime.rdmaStringToCStr
 import kotlin.native.EagerInitialization
 import kotlinx.cinterop.ByteVar
@@ -157,7 +158,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
             return if (m.nullable) "$expr?.obj<Map<$key, $value>>()" else "$expr.obj<Map<$key, $value>>()"
         }
         return when {
-            m.type == "kotlin.String" -> "$expr?.toKString() ?: \"\""
+            m.type == "kotlin.String" -> if (m.nullable) "$expr?.toKString()" else "$expr?.toKString() ?: \"\""
             // Enum params cross as name strings; validate/materialize via `valueOf`.
             isEnumType(m.type) -> "${m.type}.valueOf($expr?.toKString() ?: \"\")"
             CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> expr
@@ -200,7 +201,7 @@ private fun <T : Any> COpaquePointer.obj(): T = asStableRef<Any>().get() as T
     private fun toC(expr: String, m: MemberType): String = when {
         m.isList -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
         m.isMap -> if (m.nullable) "$expr?.handle()" else "$expr.handle()"
-        m.type == "kotlin.String" -> "rdmaStringToCStr($expr ?: \"\")"
+        m.type == "kotlin.String" -> if (m.nullable) "$expr?.let { rdmaBoundaryCStr(it) }" else "rdmaBoundaryCStr($expr)"
         // Enum returns cross as their name string.
         isEnumType(m.type) -> "rdmaStringToCStr(($expr).name)"
         CAbi.isPrimitive(m.type) || CAbi.isVoid(m.type) -> expr
@@ -373,7 +374,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
 
     private fun functionParamFromC(p: io.github.dendygrobovshik.kardman.types.RdmaParameterInfo, raw: String): String = when (val ty = p.type.type) {
         is RdmaType.UnitType -> raw
-        is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "$raw?.toKString() ?: \"\"" else raw
+        is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") (if (p.type.nullable) "$raw?.toKString()" else "$raw?.toKString() ?: \"\"") else raw
         is RdmaType.Ref -> when {
             isEnumType(ty.fqn) -> "${ty.fqn}.valueOf($raw?.toKString() ?: \"\")"
             p.type.nullable -> "$raw?.obj<${ty.fqn}>()"
@@ -386,7 +387,7 @@ fun $name(handle: COpaquePointer, vtable: COpaquePointer) {
 
     private fun functionReturnToC(t: RdmaTypeRef, expr: String): String = when (val ty = t.type) {
         is RdmaType.UnitType -> ""
-        is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") "rdmaStringToCStr($expr ?: \"\")" else expr
+        is RdmaType.Primitive -> if (ty.fqn == "kotlin.String") (if (t.nullable) "$expr?.let { rdmaBoundaryCStr(it) }" else "rdmaBoundaryCStr($expr)") else expr
         is RdmaType.Ref -> if (isEnumType(ty.fqn)) "rdmaStringToCStr(($expr).name)" else "$expr.handle()"
         is RdmaType.ListType -> "$expr.handle()"
         is RdmaType.MapType -> "$expr.handle()"
@@ -534,16 +535,31 @@ $body}
         val call = "${fn.qualifiedName}($args)"
         // Enum results cross back as their name string.
         val result = if ((fn.returnType.type as? RdmaType.Ref)?.let { isEnumType(it.fqn) } == true) "($call).name" else call
-        out.write("""
+        out.write(suspendBody(name, declParams, lambdaDecls.toString() + resolutions, result))
+        registered += name
+    }
+
+    /**
+     * The body of a `suspend` bridge. The C arguments — UTF-8 strings, StableRef handles — are
+     * valid only while the C call runs, and the coroutine starts later on another thread, so
+     * they are converted first, synchronously; the coroutine captures only Kotlin values. A
+     * failed conversion completes the call with the error instead of escaping into C.
+     */
+    private fun suspendBody(name: String, declParams: List<String>, conversions: String, result: String): String = """
 fun $name(${declParams.joinToString(", ")}) {
+    val call: suspend () -> Any? = try {
+$conversions        val c: suspend () -> Any? = { $result }
+        c
+    } catch (t: Throwable) {
+        RdmaSuspend.completeError(completionId, t)
+        return
+    }
     RdmaSuspend.launch(completionId) {
-$lambdaDecls$resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
+        try { RdmaSuspend.completeResult(completionId, call()) }
         catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
     }
 }
-""")
-        registered += name
-    }
+"""
 
     private fun writeSuspendMethod(out: BufferedWriter, info: RdmaClassInfo, method: MethodInfo, registered: MutableList<String>) {
         val name = cName(info.className + "_" + method.name + "Async")
@@ -569,14 +585,7 @@ $lambdaDecls$resolutions        try { RdmaSuspend.completeResult(completionId, $
         val args = method.parameters.joinToString(", ") { it.name }
         val call = "self.${method.name}($args)"
         val result = if (method.returnType in enumFqns) "($call).name" else call
-        out.write("""
-fun $name(${declParams.joinToString(", ")}) {
-    RdmaSuspend.launch(completionId) {
-$resolutions        try { RdmaSuspend.completeResult(completionId, $result) }
-        catch (t: Throwable) { RdmaSuspend.completeError(completionId, t) }
-    }
-}
-""")
+        out.write(suspendBody(name, declParams, resolutions.toString(), result))
         registered += name
     }
 

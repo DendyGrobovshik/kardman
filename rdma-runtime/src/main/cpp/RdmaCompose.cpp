@@ -204,8 +204,7 @@ jobject rdmaBoxLeafValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, con
     }
     if (fqn == "kotlin.String") {
         if (!v.isString()) throwTypeError(rt, "expected a String value at the boundary");
-        std::string s = v.getString(rt).utf8(rt);
-        return env->NewStringUTF(s.c_str());
+        return rdmaNewJString(env, rt, v.getString(rt));
     }
     // `@RDMA` class leaf (and unknown leafs): the plugin-side value is the object's
     // handle; the caller stores the kernel object itself.
@@ -615,8 +614,7 @@ jobject boxJsi(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
         return env->CallStaticObjectMethod(b.dbl, b.doubleValueOf, (jdouble)d);
     }
     if (v.isString()) {
-        std::string s = v.getString(rt).utf8(rt);
-        return env->NewStringUTF(s.c_str());
+        return rdmaNewJString(env, rt, v.getString(rt));
     }
     if (v.isBool()) {
         return env->CallStaticObjectMethod(b.boolean, b.booleanValueOf, (jboolean)v.getBool());
@@ -799,6 +797,30 @@ RdmaExceptionInfo fromJniThrowable(JNIEnv* env, jthrowable t) {
     env->DeleteLocalRef(throwableClass);
     env->DeleteLocalRef(classClass);
     return info;
+}
+
+jstring rdmaNewJString(JNIEnv* env, jsi::Runtime& rt, const jsi::String& s) {
+    std::u16string u = s.utf16(rt);
+    return env->NewString(reinterpret_cast<const jchar*>(u.data()), (jsize)u.size());
+}
+
+jstring rdmaJsToJString(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
+    if (v.isNull() || v.isUndefined()) return nullptr;
+    return rdmaNewJString(env, rt, v.getString(rt));
+}
+
+jstring rdmaJsToJStringNonNull(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v) {
+    if (!v.isString()) throw jsi::JSError(rt, "expected a String at the boundary");
+    return rdmaNewJString(env, rt, v.getString(rt));
+}
+
+jsi::Value rdmaJStringToJs(JNIEnv* env, jsi::Runtime& rt, jstring s) {
+    if (!s) return jsi::Value::null();
+    jsize len = env->GetStringLength(s);
+    const jchar* chars = env->GetStringChars(s, nullptr);
+    jsi::Value out = jsi::String::createFromUtf16(rt, reinterpret_cast<const char16_t*>(chars), (size_t)len);
+    env->ReleaseStringChars(s, chars);
+    return out;
 }
 
 void checkAndThrowJs(JNIEnv* env, jsi::Runtime& rt) {

@@ -129,6 +129,20 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalFile(JNIEnv*
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalFiles(JNIEnv* env, jclass, jobjectArray filePaths) {
+    std::vector<std::string> paths;
+    jsize n = filePaths ? env->GetArrayLength(filePaths) : 0;
+    for (jsize i = 0; i < n; i++) {
+        auto js = (jstring)env->GetObjectArrayElement(filePaths, i);
+        const char* path = env->GetStringUTFChars(js, nullptr);
+        paths.emplace_back(path);
+        env->ReleaseStringUTFChars(js, path);
+        env->DeleteLocalRef(js);
+    }
+    facebook::rdma::rdmaEvalFiles(paths);
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalBytes(JNIEnv* env, jclass, jbyteArray bytes) {
     if (bytes == nullptr) return;
     jsize length = env->GetArrayLength(bytes);

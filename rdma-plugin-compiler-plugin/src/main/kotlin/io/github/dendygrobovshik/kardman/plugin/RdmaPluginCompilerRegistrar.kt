@@ -40,6 +40,7 @@ object RdmaPluginKeys {
     val BUILT_AGAINST_TOOLCHAIN: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("builtAgainstToolchain")
     val MODULE_DEPS: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("rdmaModuleDeps")
     val FLOOR_MAP: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("rdmaFloorMap")
+    val MIN_HOST: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("minHost")
 }
 
 class RdmaPluginCommandLineProcessor : CommandLineProcessor {
@@ -57,6 +58,7 @@ class RdmaPluginCommandLineProcessor : CommandLineProcessor {
         CliOption("builtAgainstToolchain", "<g>", "Toolchain generation the plugin is compiled against", required = false),
         CliOption("rdmaModuleDeps", "<ids>", "Kernel module ids visible to the plugin, joined by the platform path separator", required = false),
         CliOption("rdmaFloorMap", "<json>", "Merged kernel floor map (node FQN -> floor) as a JSON object", required = false),
+        CliOption("minHost", "<int>", "Declared minimum host version of the plugin", required = false),
     )
 
     override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
@@ -72,6 +74,7 @@ class RdmaPluginCommandLineProcessor : CommandLineProcessor {
             "builtAgainstToolchain" -> configuration.put(RdmaPluginKeys.BUILT_AGAINST_TOOLCHAIN, value)
             "rdmaModuleDeps" -> configuration.put(RdmaPluginKeys.MODULE_DEPS, value)
             "rdmaFloorMap" -> configuration.put(RdmaPluginKeys.FLOOR_MAP, value)
+            "minHost" -> configuration.put(RdmaPluginKeys.MIN_HOST, value)
         }
     }
 }
@@ -107,6 +110,7 @@ class RdmaPluginCompilerRegistrar : CompilerPluginRegistrar() {
             builtAgainstToolchain = configuration.get(RdmaPluginKeys.BUILT_AGAINST_TOOLCHAIN),
             moduleDeps = moduleDeps,
             floorMap = floorMap,
+            declaredMinHost = configuration.get(RdmaPluginKeys.MIN_HOST)?.toIntOrNull() ?: 0,
         )
         FirExtensionRegistrarAdapter.registerExtension(RdmaPluginFirExtensionRegistrar())
         IrGenerationExtension.registerExtension(RdmaPluginGenerationExtension())

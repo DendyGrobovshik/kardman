@@ -132,9 +132,11 @@ struct ListCall {
 
 jsi::String jstringToJs(JNIEnv* env, jsi::Runtime& r, jstring s, const char* fallback) {
     if (!s) return jsi::String::createFromUtf8(r, fallback);
-    const char* c = env->GetStringUTFChars(s, nullptr);
-    jsi::String out = jsi::String::createFromUtf8(r, c ? c : "");
-    if (c) env->ReleaseStringUTFChars(s, c);
+    // UTF-16: JNI's modified UTF-8 would mangle supplementary characters and U+0000.
+    jsize len = env->GetStringLength(s);
+    const jchar* chars = env->GetStringChars(s, nullptr);
+    jsi::String out = jsi::String::createFromUtf16(r, reinterpret_cast<const char16_t*>(chars), (size_t)len);
+    env->ReleaseStringChars(s, chars);
     return out;
 }
 

@@ -69,8 +69,11 @@ internal actual fun resyncExecute(pluginId: String, version: Int, onDone: (Strin
             val resp = json.decodeFromString(ResyncResponse.serializer(), http("POST", "$storeBaseUrl/resync", body))
             when (resp.status) {
                 ResyncStatus.UPDATE -> {
-                    resp.bundleHash?.let { hash -> downloadAndEval(hash) }
-                    resp.polyfills.forEach { key -> downloadAndEvalBytes(key) }
+                    // Polyfills first: the new plugin version may call the kernel symbols they add.
+                    resp.polyfills.forEach { key -> downloadAndStage(key) }
+                    resp.bundleHash?.let { hash -> downloadAndStage(hash) }
+                    // The user asked for this version (Generate), so this is the update point.
+                    RdmaBridge.applyUpdates()
                     onDone("updated $pluginId -> v${resp.targetVersion}")
                 }
                 ResyncStatus.CURRENT -> onDone("current $pluginId v${resp.targetVersion}")
@@ -83,20 +86,18 @@ internal actual fun resyncExecute(pluginId: String, version: Int, onDone: (Strin
     }
 }
 
-/** Downloads a plugin bundle, caches it to disk and mmap-evaluates it. */
-private fun downloadAndEval(hash: String) {
+/**
+ * Downloads a bundle (a plugin by hash or a polyfill by key) into the disk cache and stages it
+ * for the next update point (`RdmaBridge.applyUpdates`).
+ */
+private fun downloadAndStage(key: String) {
     val dir = storeCacheDir ?: return
-    val file = File(dir, "$hash.hbc")
+    val file = File(dir, key.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".hbc")
     if (!file.isFile) {
-        val bytes = download("$storeBaseUrl/bundle/$hash") ?: return
+        val bytes = download("$storeBaseUrl/bundle/$key") ?: return
         file.writeBytes(bytes)
     }
-    RdmaBridge.nativeEvalFile(file.absolutePath)
-}
-
-/** Downloads a polyfill bundle and evaluates it in memory. */
-private fun downloadAndEvalBytes(key: String) {
-    download("$storeBaseUrl/bundle/$key")?.let { RdmaBridge.nativeEvalBytes(it) }
+    RdmaBridge.stageUpdate(file.absolutePath)
 }
 
 private fun download(url: String): ByteArray? {

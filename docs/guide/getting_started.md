@@ -123,11 +123,23 @@ The framework modules are published as `io.github.dendygrobovshik.kardman:*:1.0`
    |--------|---------|---------|
    | `:kernel:…` | your `@RDMA` classes, functions and widgets | `id("io.github.dendygrobovshik.kardman.rdma-kernel-compiler") version "1.0"` |
    | `:plugin:…` | your plugin code (Kotlin/JS) | `id("io.github.dendygrobovshik.kardman.rdma-plugin-compiler") version "1.0"` |
+   | `:shared-runtime` | the Kotlin/JS libraries every plugin runs on (stdlib, Compose runtime, coroutines), whole and loaded once | Kotlin Multiplatform, `js` target with `-Xir-export-all` and `-Xir-dce=false` (copy [`shared-runtime/build.gradle.kts`](../../shared-runtime/build.gradle.kts)) |
    | `:androidApp` / `:iosApp` | loads Hermes and the plugins | `id("io.github.dendygrobovshik.kardman.rdma-app") version "1.0"` |
 
    The `rdma-app` plugin does the app-side wiring: it adds the dependencies, compiles the
    generated bridges into `librdma_user`, adds the widget entries and bakes the plugin
    bundles (`.hbc`) into the app.
+
+   The shared runtime is required, even with a single plugin: every plugin — baked in or
+   delivered later by the store — links against the same full libraries, and a plugin's own
+   copy of the stdlib is trimmed to what that plugin uses. The app build fails without it
+   (another module name can be set with `rdmaSharedRuntimeProject`).
+
+   On iOS the kernel modules are exported to the framework's Objective-C header, so Swift
+   code of the host can use kernel types — implement a kernel interface, call a kernel
+   service. Set `rdmaExportKernelToObjC=false` to keep them out. A Swift implementation is
+   reached through an Objective-C message per call (strings and collections are converted),
+   cannot be hotfixed, and must tolerate calls from any thread.
 
 4. **Set the module paths and packages** in `gradle.properties`:
 

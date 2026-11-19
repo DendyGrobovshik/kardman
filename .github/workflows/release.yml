@@ -35,6 +35,10 @@ on:
       telemetryFile:
         description: "Optional host-version telemetry for the coverage warning"
         required: false
+      dryRun:
+        description: "Run every check and write nothing (dynamic/hotfix release)"
+        required: false
+        default: "false"
 
 jobs:
   release:
@@ -51,6 +55,8 @@ jobs:
         run: ./gradlew :tests:rdma-tests:test :rdma-kernel-compiler-plugin:test :rdma-store:test
 
       - name: Release (changelog write is the commit point)
+        env:
+          DRY_RUN: ${{ github.event.inputs.dryRun == 'true' && '1' || '0' }}
         run: |
           ./scripts/release.sh \
             "${{ github.event.inputs.command }}" \

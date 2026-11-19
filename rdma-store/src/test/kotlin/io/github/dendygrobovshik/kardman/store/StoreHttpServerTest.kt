@@ -25,9 +25,56 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class StoreHttpServerTest {
+
+    @Test
+    fun `serves the release-time gzip copy when the client accepts it`() {
+        val versions = kotlin.io.path.createTempDirectory("rdma-store").toFile()
+        val bundle = ByteArray(64 * 1024) { (it % 7).toByte() }
+        io.github.dendygrobovshik.kardman.kernel.RdmaBundleFiles.publish(versions, "F:internal:2", bundle)
+        assertTrue(java.io.File(versions, "bundles/F:internal:2.gz").isFile)
+        val store = RdmaStore()
+        store.loadBundles(java.io.File(versions, "bundles"))
+        // A bundle published without a gzip copy is served as is, never compressed on the fly.
+        store.putBundle("plain", bundle)
+        val server = StoreHttpServer(store, port = 0)
+        server.start()
+        try {
+            val client = HttpClient.newHttpClient()
+            val uri = URI("http://localhost:${server.boundPort()}/bundle/F:internal:2")
+            val gz = client.send(
+                HttpRequest.newBuilder(uri).header("Accept-Encoding", "gzip, deflate").GET().build(),
+                HttpResponse.BodyHandlers.ofByteArray(),
+            )
+            assertEquals(200, gz.statusCode())
+            assertEquals("gzip", gz.headers().firstValue("Content-Encoding").orElse(""))
+            assertTrue(gz.body().size < bundle.size / 10, "compressed ${gz.body().size} of ${bundle.size}")
+            assertContentEquals(bundle, java.util.zip.GZIPInputStream(gz.body().inputStream()).readBytes())
+
+            val plain = client.send(HttpRequest.newBuilder(uri).GET().build(), HttpResponse.BodyHandlers.ofByteArray())
+            assertEquals("", plain.headers().firstValue("Content-Encoding").orElse(""))
+            assertContentEquals(bundle, plain.body())
+
+            val missing = client.send(
+                HttpRequest.newBuilder(URI("http://localhost:${server.boundPort()}/bundle/nope")).header("Accept-Encoding", "gzip").GET().build(),
+                HttpResponse.BodyHandlers.ofByteArray(),
+            )
+            assertEquals(404, missing.statusCode())
+
+            val noCopy = client.send(
+                HttpRequest.newBuilder(URI("http://localhost:${server.boundPort()}/bundle/plain")).header("Accept-Encoding", "gzip").GET().build(),
+                HttpResponse.BodyHandlers.ofByteArray(),
+            )
+            assertEquals("", noCopy.headers().firstValue("Content-Encoding").orElse(""))
+            assertContentEquals(bundle, noCopy.body())
+        } finally {
+            server.stop()
+        }
+    }
 
     @Test
     fun `serves resync over http`() {

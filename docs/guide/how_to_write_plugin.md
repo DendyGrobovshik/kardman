@@ -63,9 +63,10 @@ RdmaComposeHost.Component("alice:feed/feed-card", item, true)
   do not share their `remember`s.
 - A place that renders a component before the plugin is loaded shows nothing and fills in
   as soon as the component is registered.
-- A new plugin version is used the next time a component appears; places already on screen
-  keep the version they started with (an app that wants new code at once can key its
-  content on `RdmaBridge.nativeContentVersion()`).
+- A new plugin version takes effect at the app's next update point (a cold start or
+  `RdmaBridge.applyUpdates()`); then every place showing the component is recreated with it
+  and starts with fresh state. Two versions of a plugin never run side by side. See
+  [hotfix_and_releases.md](hotfix_and_releases.md#when-an-update-takes-effect).
 - Arguments are converted by the declared parameter types; a value of another type throws
   `RdmaException`.
 

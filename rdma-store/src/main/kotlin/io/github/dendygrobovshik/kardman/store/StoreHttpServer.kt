@@ -25,6 +25,7 @@ import java.net.InetSocketAddress
  * A minimal zero-dependency HTTP transport for the store, exposing the re-sync endpoint (§8.2):
  *
  *   POST /resync   body: [ResyncRequest] JSON  →  [ResyncResponse] JSON
+ *   GET  /bundle/<key>  →  the bundle, gzip-compressed when accepted ([RdmaBundleCompression])
  *   GET  /health   →  "ok"
  */
 class StoreHttpServer(
@@ -47,17 +48,7 @@ class StoreHttpServer(
             exchange.sendResponseHeaders(200, body.size.toLong())
             exchange.responseBody.use { it.write(body) }
         }
-        s.createContext("/bundle") { exchange ->
-            val key = exchange.requestURI.path.removePrefix("/bundle/")
-            val bytes = if (key.isBlank()) null else store.bundle(key)
-            if (bytes == null) {
-                exchange.sendResponseHeaders(404, -1)
-                exchange.close()
-            } else {
-                exchange.sendResponseHeaders(200, bytes.size.toLong())
-                exchange.responseBody.use { it.write(bytes) }
-            }
-        }
+        s.createContext("/bundle") { exchange -> RdmaBundleCompression.serve(exchange, store) }
         s.createContext("/resync") { exchange ->
             try {
                 val request = json.decodeFromString(

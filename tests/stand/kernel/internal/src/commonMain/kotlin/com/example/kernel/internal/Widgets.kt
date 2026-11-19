@@ -21,6 +21,7 @@ import androidx.compose.material3.Button as M3Button
 import androidx.compose.material3.Text as M3Text
 import androidx.compose.runtime.Composable
 import io.github.dendygrobovshik.kardman.RDMA
+import io.github.dendygrobovshik.kardman.RuntimeLocal
 
 // Compose-style widgets: `modifier` first among the optional parameters. The framework needs
 // defaulted parameters to be trailing (docs/guide/types.md), so the trailing lambdas default
@@ -31,6 +32,21 @@ import io.github.dendygrobovshik.kardman.RDMA
 fun Text(text: String, modifier: Modifier = Modifier()) {
     M3Text(text, modifier = modifier.toComposeUi())
 }
+
+/** A widget with an `@RDMA` enum parameter: the entry crosses as its name and is rebuilt. */
+@Composable
+@RDMA
+fun PriorityBadge(priority: com.example.kernel.internal.services.Priority, modifier: Modifier = Modifier()) {
+    lastPriorityBadge = priority.name
+    M3Text("priority=${priority.name}", modifier = modifier.toComposeUi())
+}
+
+@RuntimeLocal // a test probe read back by the plugin, never hotfixed
+private var lastPriorityBadge = ""
+
+/** The priority [PriorityBadge] last composed with (test probe). */
+@RDMA
+fun lastPriorityBadge(): String = lastPriorityBadge
 
 @Composable
 @RDMA

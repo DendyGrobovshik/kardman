@@ -17,9 +17,11 @@ package org.example.server
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import io.github.dendygrobovshik.kardman.kernel.RdmaBundleFiles
 import io.github.dendygrobovshik.kardman.kernel.RdmaContentHasher
 import io.github.dendygrobovshik.kardman.kernel.RdmaPluginReleases
 import io.github.dendygrobovshik.kardman.kernel.RdmaToolchain
+import io.github.dendygrobovshik.kardman.store.RdmaBundleCompression
 import io.github.dendygrobovshik.kardman.store.RdmaStore
 import io.github.dendygrobovshik.kardman.types.PluginRelease
 import io.github.dendygrobovshik.kardman.types.RdmaPluginContract
@@ -67,17 +69,7 @@ fun main() {
         store.reload()
         respondText(it, 200, "ok")
     }
-    server.createContext("/bundle") { exchange ->
-        val key = exchange.requestURI.path.removePrefix("/bundle/")
-        val bytes = if (key.isBlank()) null else store.bundle(key)
-        if (bytes == null) {
-            exchange.sendResponseHeaders(404, -1)
-            exchange.close()
-        } else {
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
-        }
-    }
+    server.createContext("/bundle") { exchange -> RdmaBundleCompression.serve(exchange, store) }
     server.createContext("/resync") { exchange ->
         try {
             val request = json.decodeFromString(ResyncRequest.serializer(), exchange.requestBody.readBytes().decodeToString())
@@ -143,10 +135,9 @@ private fun generate(
         val hash = RdmaContentHasher.sha256Bytes(hbc.readBytes())
         RdmaPluginReleases.append(versionsDir, PluginRelease(contract.copy(version = version, builtAgainstToolchain = "g1"), hash))
 
-        val bundlesDir = File(versionsDir, "bundles")
-        bundlesDir.mkdirs()
-        File(bundlesDir, hash).writeBytes(hbc.readBytes())
-        store.putBundle(hash, hbc.readBytes())
+        val bytes = hbc.readBytes()
+        val published = RdmaBundleFiles.publish(versionsDir, hash, bytes)
+        store.putBundle(hash, bytes, File(published.path + RdmaBundleFiles.GZIP_SUFFIX).readBytes())
         store.reload()
 
         println("released ${contract.pluginId} v$version ($hash)")
