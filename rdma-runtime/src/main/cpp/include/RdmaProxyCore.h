@@ -49,6 +49,7 @@ enum class RdmaStateKind : uint8_t {
     State = 5,    // Compose MutableState proxy
     Composer = 6, // Compose Composer proxy
     Scope = 7,    // Compose ScopeUpdateScope proxy
+    RecomposeScope = 8, // Compose RecomposeScope tracked by a plugin ComposableLambda
     Other = 15,   // runtime-internal states without a dedicated kind
 };
 

@@ -237,7 +237,9 @@ class RdmaKernelGenerationExtension(
             CAbiWidgetIrGenerator(pluginContext, moduleFragment, modId, pkg).generate(widgets)
         }
 
-        if (classes.isEmpty() && functions.isEmpty() && enums.isEmpty()) return
+        // A module with nothing `@RDMA` in this compilation (e.g. all of it in another platform's
+        // source set) still gets its (empty) bridge and manifest: the app's aggregate bridge
+        // includes `RdmaBridge_<module>.h` for every kernel module.
 
         if (isCapi) {
             kotlinOutputDir?.let { dir ->

@@ -175,6 +175,13 @@ object RdmaPluginTransformState {
         else -> error("not a compose entry point: $fqn")
     }
 
+    /**
+     * The rewritten callee: the bridge helper qualified with the plugin's root package, where
+     * the generated `RdmaRuntimeBridge.kt` declares it — a source file in a subpackage would
+     * not resolve the bare name.
+     */
+    fun bridgeCallFor(fqn: String): String = "$pluginPackage.${bridgeNameFor(fqn)}"
+
     private data class ConstructorCall(val path: String, val start: Int, val end: Int, val fqn: String, val argTexts: List<String>)
 
     private val constructorCalls = mutableListOf<ConstructorCall>()

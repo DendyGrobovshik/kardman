@@ -414,6 +414,11 @@ static bool initComposeJniCache(JNIEnv* env) {
         env->GetStaticMethodID(g_composeCache.composeHostClass, "onComponentsChanged", "()V");
     g_composeCache.suspendClass = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/RdmaSuspend");
     g_composeCache.suspendCancel = env->GetStaticMethodID(g_composeCache.suspendClass, "cancel", "(J)V");
+    g_composeCache.lambdaScopesClass = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/RdmaLambdaScopes");
+    g_composeCache.lambdaScopesTrack = env->GetStaticMethodID(g_composeCache.lambdaScopesClass, "track",
+        "(Landroidx/compose/runtime/Composer;)Landroidx/compose/runtime/RecomposeScope;");
+    g_composeCache.lambdaScopesInvalidate = env->GetStaticMethodID(g_composeCache.lambdaScopesClass, "invalidate",
+        "(Landroidx/compose/runtime/RecomposeScope;)V");
 
     if (!g_composeCache.composerClass || !g_composeCache.mutableStateClass ||
         !g_composeCache.snapshotStateKt || !g_composeCache.composerCompanion) {
@@ -501,6 +506,7 @@ static bool initComposeJniCache(JNIEnv* env) {
            g_composeCache.structuralEqualityPolicy &&
            g_composeCache.getEmpty && g_composeCache.updateScope &&
            g_composeCache.scopeBlockCtor &&
+           g_composeCache.lambdaScopesTrack && g_composeCache.lambdaScopesInvalidate &&
            g_composeCache.objectCtor &&
            g_composeCache.jsValueHolderCtor && g_composeCache.jsValueHolderGetId &&
            g_composeCache.jsIdentityKeyCtor &&
@@ -1006,6 +1012,65 @@ jsi::Object makeScopeUpdateScopeProxy(jsi::Runtime& rt, jobject scopeGlobal) {
     if (!proto) proto = new jsi::Object(rdmaLazyProto(rt, resolveScopeMethod));
     jsi::Object obj = jsi::Object::create(rt, jsi::Value(rt, *proto));
     obj.setNativeState(rt, std::make_shared<ScopeProxyState>(scopeGlobal));
+    return obj;
+}
+
+// RecomposeScope proxy for plugin composable lambdas (field report #50). A plugin
+// `ComposableLambdaImpl` tracks the scopes that ran it and invalidates them when the
+// parent recomposes with new captures; without it the widget call is skipped (same
+// lambda instance) and the content keeps the old captured values.
+struct LambdaScopeState : public RdmaTaggedState {
+    explicit LambdaScopeState(jobject scope) : RdmaTaggedState(RdmaStateKind::RecomposeScope), scope_(scope) {}
+    ~LambdaScopeState() override {
+        if (scope_ && g_composeCache.jvm) {
+            JNIEnv* env = getEnv(g_composeCache.jvm);
+            if (env) env->DeleteGlobalRef(scope_);
+        }
+    }
+    jobject scope_; // global ref
+};
+
+static jsi::Value resolveLambdaScopeMethod(jsi::Runtime& rt, const std::string& n) {
+    if (n.rfind("invalidate", 0) != 0) return jsi::Value::undefined();
+    return jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "invalidate"), 0,
+        [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value*, size_t) -> jsi::Value {
+            auto st = rdmaStateAs<LambdaScopeState>(r, thisVal, RdmaStateKind::RecomposeScope);
+            if (!st) throw jsi::JSError(r, "receiver is not a RecomposeScope proxy");
+            jobject scope = st->scope_;
+            RdmaResult result = rdmaCallUi([scope]() -> RdmaResult {
+                JNIEnv* e = getEnv(g_composeCache.jvm);
+                if (!e) return RdmaResult::undefined();
+                e->CallStaticVoidMethod(g_composeCache.lambdaScopesClass, g_composeCache.lambdaScopesInvalidate, scope);
+                RdmaResult err;
+                if (captureJniError(e, err)) return err;
+                return RdmaResult::undefined();
+            });
+            if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, result);
+            return jsi::Value::undefined();
+        });
+}
+
+jsi::Value rdmaLambdaScope(jsi::Runtime& rt, jobject composer) {
+    jobject scope = nullptr; // global ref, set on the UI thread
+    RdmaResult result = rdmaCallUi([composer, &scope]() -> RdmaResult {
+        JNIEnv* e = getEnv(g_composeCache.jvm);
+        if (!e) return RdmaResult::undefined();
+        jobject local = e->CallStaticObjectMethod(g_composeCache.lambdaScopesClass, g_composeCache.lambdaScopesTrack, composer);
+        RdmaResult err;
+        if (captureJniError(e, err)) { if (local) e->DeleteLocalRef(local); return err; }
+        if (local) {
+            scope = e->NewGlobalRef(local);
+            e->DeleteLocalRef(local);
+        }
+        return RdmaResult::undefined();
+    });
+    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsi(rt, result);
+    if (!scope) return jsi::Value::null();
+    static jsi::Object* proto = nullptr; // shared, intentionally leaked
+    if (!proto) proto = new jsi::Object(rdmaLazyProto(rt, resolveLambdaScopeMethod));
+    jsi::Object obj = jsi::Object::create(rt, jsi::Value(rt, *proto));
+    obj.setNativeState(rt, std::make_shared<LambdaScopeState>(scope));
     return obj;
 }
 

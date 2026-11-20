@@ -71,7 +71,11 @@ EOF
     cat > "$scratch/build.gradle.kts" <<EOF
 plugins { id("org.jetbrains.kotlin.multiplatform") version "$KOTLIN_VERSION" }
 kotlin {
-    js(IR) { browser(); binaries.executable() }
+    js(IR) {
+        browser(); binaries.executable()
+        // Named like the shared runtime the polyfill runs on (see rdma-plugin-gradle-plugin).
+        compilerOptions { freeCompilerArgs.addAll("-Xir-minimized-member-names=false", "-Xir-dce=false") }
+    }
     sourceSets { jsMain { kotlin.srcDir("$scratch/src") } }
 }
 EOF

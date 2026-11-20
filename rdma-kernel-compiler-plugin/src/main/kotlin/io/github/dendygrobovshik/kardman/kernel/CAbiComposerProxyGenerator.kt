@@ -93,6 +93,13 @@ jsi::Object makeComposerProxy(jsi::Runtime& rt) {
     private fun handler(m: ComposerMethod): String = when (m.returnKind) {
         ComposerReturnKind.NOOP -> noopHandler(m, "undefined")
         ComposerReturnKind.NOOP_NULL -> noopHandler(m, "null")
+        ComposerReturnKind.LAMBDA_SCOPE -> """
+            return jsi::Function::createFromHostFunction(
+                rt, jsi::PropNameID::forAscii(rt, "${m.jsName}"), 0,
+                [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+                    return rdmaLambdaScopeCAbi(r);
+                });
+"""
         ComposerReturnKind.VOID -> voidHandler(m)
         ComposerReturnKind.BOOLEAN -> booleanHandler(m)
         ComposerReturnKind.COMPOSER_SELF -> composerSelfHandler(m)

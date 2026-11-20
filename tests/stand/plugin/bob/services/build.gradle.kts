@@ -41,6 +41,8 @@ kotlin {
         androidMain {
             kotlin.setSrcDirs(listOf("src/kotlin"))
             dependencies {
+                // Only for plugin-compile-errors.sh: `@RDMA` in a plugin must be a compile error.
+                compileOnly(project(":rdma-annotation"))
                 implementation(project(":tests:stand:kernel:internal"))
                 implementation(libs.compose.runtime)
             }

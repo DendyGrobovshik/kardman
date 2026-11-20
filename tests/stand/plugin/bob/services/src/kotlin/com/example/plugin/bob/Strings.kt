@@ -30,6 +30,10 @@ fun stringsProbe(): String {
     box.text = null
     val emoji = "a😀b"
     val nul = try { echoText("a\u0000b").length.toString() } catch (e: Throwable) { "error" }
+    val sb = StringBuilder()
+    sb.append("x").append(1).append('c')
+    val built = buildString { append("y"); append(2) }
+    println("STRING_BUILDER: sb=$sb built=$built")
     return "STRINGS: echoNull=${echoNullableText(null) == null} describe=${describeText(null)} " +
         "boxNull=$boxNull boxSet=$boxSet boxReset=${box.text == null} " +
         "emoji=${echoText(emoji) == emoji} nul=$nul"

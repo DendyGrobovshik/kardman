@@ -165,6 +165,8 @@ inline void* rdma_mutableStateListOf(void* sourceList) { static auto fn = (void*
 inline void* rdma_mutableStateMapOf(void* sourceMap) { static auto fn = (void* (*)(void*))rdma_lookupFunction("rdma_mutableStateMapOf"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(void*))rdma_lookupFunction("rdma_mutableStateMapOf"); return fn(sourceMap); }
 
 // Scope.
+inline void* rdma_composer_lambdaScope() { static auto fn = (void* (*)())rdma_lookupFunction("rdma_composer_lambdaScope"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)())rdma_lookupFunction("rdma_composer_lambdaScope"); return fn(); }
+inline void rdma_lambdaScopeInvalidate(void* scopeHandle) { static auto fn = (void (*)(void*))rdma_lookupFunction("rdma_lambdaScopeInvalidate"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(void*))rdma_lookupFunction("rdma_lambdaScopeInvalidate"); fn(scopeHandle); }
 inline void rdma_scopeUpdateScope(void* scopeHandle, int64_t blockId) { static auto fn = (void (*)(void*, int64_t))rdma_lookupFunction("rdma_scopeUpdateScope"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(void*, int64_t))rdma_lookupFunction("rdma_scopeUpdateScope"); fn(scopeHandle, blockId); }
 
 // Effects (composer read from the shim global).
@@ -186,6 +188,10 @@ jsi::Value wrapAnyCAbi(jsi::Runtime& rt, HostContext ctx, void* handle);
 // makeScopeUpdateScopeProxy. Take ownership of the passed handle.
 jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle, const std::string& typeDesc = "kotlin.Any");
 jsi::Object makeScopeUpdateScopeProxyCAbi(jsi::Runtime& rt, void* scopeHandle);
+// `Composer.recomposeScope` for a plugin `ComposableLambdaImpl` (field report #50): the
+// current scope, recorded used, as a proxy whose `invalidate` invalidates it — or `null`
+// when this scope was already handed out and not invalidated since.
+jsi::Value rdmaLambdaScopeCAbi(jsi::Runtime& rt);
 
 // The registered object wrapper (generated `wrapUserObject`). Set via the
 // user-bridge registration hook.

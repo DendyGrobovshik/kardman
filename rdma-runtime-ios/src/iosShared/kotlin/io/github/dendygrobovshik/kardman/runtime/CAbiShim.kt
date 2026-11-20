@@ -25,6 +25,7 @@ package io.github.dendygrobovshik.kardman.runtime
 
 import androidx.compose.runtime.Composer
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.RecomposeScope
 import androidx.compose.runtime.ScopeUpdateScope
 import androidx.compose.runtime.cache
 import androidx.compose.runtime.mutableStateListOf
@@ -588,6 +589,14 @@ fun rdma_scopeUpdateScope(scopeHandle: COpaquePointer, blockId: Long) {
     rdmaCaptureError(Unit) { scopeHandle.obj<ScopeUpdateScope>().updateScope(ComposerScopeBlock(blockId)) }
 }
 
+// Recompose scopes tracked by plugin composable lambdas (field report #50, RdmaLambdaScopes).
+fun rdma_composer_lambdaScope(): COpaquePointer? =
+    rdmaCaptureError(null) { rdmaGetCurrentComposer()?.let { RdmaLambdaScopes.track(it) }?.handle() }
+
+fun rdma_lambdaScopeInvalidate(scopeHandle: COpaquePointer) {
+    rdmaCaptureError(Unit) { RdmaLambdaScopes.invalidate(scopeHandle.obj<RecomposeScope>()) }
+}
+
 // ------------------------------------------------------------------- effects
 
 fun rdma_sideEffect(blockId: Long) {
@@ -711,6 +720,8 @@ private val _register = run {
     rdmaRegisterFunction("rdma_mutableStateListOf", staticCFunction(::rdma_mutableStateListOf))
     rdmaRegisterFunction("rdma_mutableStateMapOf", staticCFunction(::rdma_mutableStateMapOf))
     rdmaRegisterFunction("rdma_scopeUpdateScope", staticCFunction(::rdma_scopeUpdateScope))
+    rdmaRegisterFunction("rdma_composer_lambdaScope", staticCFunction(::rdma_composer_lambdaScope))
+    rdmaRegisterFunction("rdma_lambdaScopeInvalidate", staticCFunction(::rdma_lambdaScopeInvalidate))
     rdmaRegisterFunction("rdma_sideEffect", staticCFunction(::rdma_sideEffect))
     rdmaRegisterFunction("rdma_disposableEffect", staticCFunction(::rdma_disposableEffect))
     rdmaRegisterFunction("rdma_dispatchUncaught", staticCFunction(::rdma_dispatchUncaught))

@@ -27,6 +27,7 @@ import com.example.kernel.internal.Text
 import com.example.kernel.internal.TextWithDefault
 import com.example.kernel.internal.registerComponent
 import com.example.kernel.user.alice.PersonProbe
+import com.example.plugin.alice.sub.SubpackageProbe
 
 @Composable
 fun Counter() {
@@ -38,6 +39,8 @@ fun Counter() {
         ColumnWithDefault()
     }
     StateTypesProbe()
+    SubpackageProbe()
+    CaptureProbe()
     // Overrides called by a kernel widget on the UI thread (vtable, runtime_rework §6.4).
     val probe = remember { Cyborg("probe", 1) }
     PersonProbe(probe)

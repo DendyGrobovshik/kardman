@@ -27,6 +27,7 @@ import org.junit.Test
 import java.io.ByteArrayOutputStream
 import kotlin.test.assertContains
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class CAbiCppGeneratorTest {
 
@@ -36,6 +37,17 @@ class CAbiCppGeneratorTest {
             ByteArrayOutputStream().also { files[fileName] = it }
         }.generate(classInfos, functions)
         return files.mapValues { it.value.use { it.toString("UTF-8") } }
+    }
+
+    @Test
+    fun `a module with nothing to bridge still gets its bridge files`() {
+        val files = mutableMapOf<String, ByteArrayOutputStream>()
+        CAbiCppGenerator("empty_mod") { fileName, _ -> ByteArrayOutputStream().also { files[fileName] = it } }
+            .generate(emptyList(), emptyList())
+        val generated = files.mapValues { it.value.toString("UTF-8") }
+        assertTrue("RdmaBridge_empty_mod.h" in generated, "files: ${generated.keys}")
+        assertTrue("RdmaBridge_empty_mod.cpp" in generated, "files: ${generated.keys}")
+        assertFalse(generated.getValue("RdmaBridge_empty_mod.h").contains("jni.h"))
     }
 
     @Test

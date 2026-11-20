@@ -121,6 +121,9 @@ step_2_run_and_assert() {
 
     # Scalar round-trips: Double keeps its fraction.
     wait_marker "$log" "STATE_DOUBLE: 19.9"
+    wait_marker "$log" "SUBPACKAGE: state=sub"
+    wait_marker "$log" "CAPTURE: body=7"
+    wait_marker "$log" "CAPTURE: content=7"
     wait_marker "$log" "STATE_DOUBLE_SET: 20.5"
     # Long keeps all 64 bits, including beyond the exact JS-integer range.
     wait_marker "$log" "STATE_LONG: 9007199254740993"

@@ -583,6 +583,52 @@ jsi::Object makeScopeUpdateScopeProxyCAbi(jsi::Runtime& rt, void* scopeHandle) {
     return obj;
 }
 
+// RecomposeScope proxy for plugin composable lambdas (field report #50; see the
+// Android RdmaCompose.cpp counterpart).
+struct LambdaScopeStateCAbi : public RdmaTaggedState {
+    explicit LambdaScopeStateCAbi(void* scope) : RdmaTaggedState(RdmaStateKind::RecomposeScope), scope_(scope) {}
+    ~LambdaScopeStateCAbi() override {
+        if (scope_) rdma_disposeStableRef(scope_);
+    }
+    void* scope_;
+};
+
+static jsi::Value resolveLambdaScopeMethodCAbi(jsi::Runtime& rt, const std::string& n) {
+    if (n.rfind("invalidate", 0) != 0) return jsi::Value::undefined();
+    return jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "invalidate"), 0,
+        [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value*, size_t) -> jsi::Value {
+            auto st = rdmaStateAs<LambdaScopeStateCAbi>(r, thisVal, RdmaStateKind::RecomposeScope);
+            if (!st) throw jsi::JSError(r, "receiver is not a RecomposeScope proxy");
+            void* scope = st->scope_;
+            RdmaResult result = rdmaCallUi([scope]() -> RdmaResult {
+                rdma_lambdaScopeInvalidate(scope);
+                RdmaResult err;
+                if (captureCAbiError(err)) return err;
+                return RdmaResult::undefined();
+            });
+            if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, result);
+            return jsi::Value::undefined();
+        });
+}
+
+jsi::Value rdmaLambdaScopeCAbi(jsi::Runtime& rt) {
+    void* scope = nullptr; // stable ref, set on the UI thread
+    RdmaResult result = rdmaCallUi([&scope]() -> RdmaResult {
+        scope = rdma_composer_lambdaScope();
+        RdmaResult err;
+        if (captureCAbiError(err)) { if (scope) rdma_disposeStableRef(scope); scope = nullptr; return err; }
+        return RdmaResult::undefined();
+    });
+    if (result.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(rt, result);
+    if (!scope) return jsi::Value::null();
+    static jsi::Object* proto = nullptr; // shared, intentionally leaked
+    if (!proto) proto = new jsi::Object(rdmaLazyProto(rt, resolveLambdaScopeMethodCAbi));
+    jsi::Object obj = jsi::Object::create(rt, jsi::Value(rt, *proto));
+    obj.setNativeState(rt, std::make_shared<LambdaScopeStateCAbi>(scope));
+    return obj;
+}
+
 // ------------------------------------------------------------ collections
 // List/map proxies live on shared prototypes (RdmaCollectionsCAbi.cpp,
 // docs/design/runtime_rework.md §3).

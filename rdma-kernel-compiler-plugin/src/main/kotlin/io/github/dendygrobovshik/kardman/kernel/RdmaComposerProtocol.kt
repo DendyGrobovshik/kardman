@@ -60,6 +60,15 @@ enum class ComposerReturnKind {
 
     /** Diagnostics-only, not forwarded to JNI; returns `null`. */
     NOOP_NULL,
+
+    /**
+     * `recomposeScope`, read by a plugin `ComposableLambdaImpl` to track the scopes that ran
+     * it, so that a changed lambda invalidates them (field report #50). Served by the runtime
+     * (`rdmaLambdaScope`): it records the scope used and hands each scope out once until it is
+     * invalidated — the JS lambda cannot recognise a proxy as the same scope and would
+     * otherwise collect one per run.
+     */
+    LAMBDA_SCOPE,
 }
 
 enum class ComposerParamKind {
@@ -86,7 +95,9 @@ data class ComposerMethod(
     val returnKind: ComposerReturnKind,
     val params: List<ComposerParamKind> = emptyList(),
 ) {
-    val needsMethodId: Boolean get() = returnKind != ComposerReturnKind.NOOP && returnKind != ComposerReturnKind.NOOP_NULL
+    val needsMethodId: Boolean
+        get() = returnKind != ComposerReturnKind.NOOP && returnKind != ComposerReturnKind.NOOP_NULL &&
+            returnKind != ComposerReturnKind.LAMBDA_SCOPE
     val arity: Int get() = params.size
 }
 
@@ -210,7 +221,8 @@ object RdmaComposerProtocol {
             returnKind = ComposerReturnKind.BOOLEAN,
             params = listOf(ComposerParamKind.BOOLEAN, ComposerParamKind.INT),
         ),
-        // Source information / recompose scope (diagnostics-only no-ops)
+        // Source information (diagnostics-only no-ops) and the recompose scope; `recordUsed`
+        // is a no-op because `rdmaLambdaScope` records the scope it hands out.
         ComposerMethod(
             jsName = "sourceInformation",
             jniName = "sourceInformation",
@@ -233,7 +245,7 @@ object RdmaComposerProtocol {
             jsName = "get_recomposeScope",
             jniName = "getRecomposeScope",
             jniSignature = "()Landroidx/compose/runtime/RecomposeScope;",
-            returnKind = ComposerReturnKind.NOOP_NULL,
+            returnKind = ComposerReturnKind.LAMBDA_SCOPE,
         ),
         ComposerMethod(
             jsName = "recordUsed",

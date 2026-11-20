@@ -67,7 +67,9 @@ How collections work inside: [collections.md](../internals/collections.md).
 ## State values
 
 Every boundary type except `Unit` can be a `mutableStateOf` value: primitives (nullable
-included), enums, `@RDMA` references, `List`, `Map`.
+included), kernel enums, kernel `@RDMA` references, `List`, `Map`. A plugin's own classes
+are not boundary types: keep such an object in `remember { }` and put its fields, or a
+kernel type, in state.
 
 - **The static type must be concrete** — `mutableStateOf<Any?>(…)` or a `dynamic`
   initial value is a compile error.

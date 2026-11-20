@@ -87,6 +87,10 @@ main() {
     expect_compile_error "Enum.values()" "Enum.values() is not supported" \
         'fun probe(): Int = HttpMethod.values().size'
 
+    expect_compile_error "@RDMA in a plugin" "@RDMA is not allowed in a plugin" \
+        '@io.github.dendygrobovshik.kardman.RDMA
+class PluginOwn(val n: Int)'
+
     step "control: the plugin compiles without a probe"
     run_gradle "$PLUGIN:compileAndroidMain" >"$IT_DIR/control.log" 2>&1 || {
         grep -E "^e: " "$IT_DIR/control.log" | head -5 >&2

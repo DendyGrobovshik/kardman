@@ -27,7 +27,9 @@ import org.jetbrains.kotlin.fir.analysis.checkers.expression.ExpressionCheckers
 import org.jetbrains.kotlin.fir.analysis.checkers.expression.FirExpressionChecker
 import org.jetbrains.kotlin.fir.analysis.diagnostics.FirErrors
 import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtension
+import org.jetbrains.kotlin.fir.declarations.FirDeclaration
 import org.jetbrains.kotlin.fir.declarations.FirFile
+import org.jetbrains.kotlin.fir.declarations.toAnnotationClassId
 import org.jetbrains.kotlin.fir.declarations.FirNamedFunction
 import org.jetbrains.kotlin.fir.declarations.FirRegularClass
 import org.jetbrains.kotlin.fir.expressions.FirExpression
@@ -52,6 +54,8 @@ import org.jetbrains.kotlin.fir.types.coneTypeSafe
 import org.jetbrains.kotlin.fir.types.isMarkedNullable
 import org.jetbrains.kotlin.fir.types.resolvedType
 import org.jetbrains.kotlin.fir.types.type
+import org.jetbrains.kotlin.name.ClassId
+import org.jetbrains.kotlin.name.FqName
 
 /**
  * The plugin's JVM resolve pass (docs/design/runtime_rework.md §5.0).
@@ -73,6 +77,7 @@ class RdmaPluginAdditionalCheckersExtension(session: FirSession) : FirAdditional
     override val declarationCheckers: DeclarationCheckers = object : DeclarationCheckers() {
         override val fileCheckers = setOf(RdmaPluginFileChecker, RdmaPluginComposeImportChecker)
         override val regularClassCheckers = setOf(RdmaPluginRegularClassChecker)
+        override val basicDeclarationCheckers = setOf(RdmaPluginRdmaAnnotationChecker)
     }
 
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
@@ -146,6 +151,29 @@ object RdmaPluginFileChecker : FirDeclarationChecker<FirFile>(MppCheckerKind.Com
                 "Kernel symbol '$fqn' is not visible to this plugin (only internal kernel modules and your own user module are accessible)",
             )
         }
+    }
+}
+
+private val RDMA_ANNOTATION = ClassId.topLevel(FqName("io.github.dendygrobovshik.kardman.RDMA"))
+
+/**
+ * `@RDMA` is a kernel annotation: it marks a declaration that lives in a kernel module and
+ * crosses the boundary. A plugin cannot add native code, so in a plugin it would do nothing —
+ * it is an error instead of a silent no-op. A subclass of an `open` kernel class needs no
+ * annotation (it is recognised by its supertype).
+ */
+object RdmaPluginRdmaAnnotationChecker : FirDeclarationChecker<FirDeclaration>(MppCheckerKind.Common) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(declaration: FirDeclaration) {
+        val annotation = declaration.annotations.firstOrNull {
+            it.toAnnotationClassId(context.session) == RDMA_ANNOTATION
+        } ?: return
+        reporter.reportOn(
+            annotation.source ?: declaration.source ?: return,
+            FirErrors.UNSUPPORTED,
+            "@RDMA is not allowed in a plugin: @RDMA declarations belong to kernel modules. " +
+                "Plugin classes stay plain Kotlin (a subclass of an open kernel class needs no annotation)",
+        )
     }
 }
 
@@ -240,7 +268,7 @@ object RdmaPluginComposeEntryCallChecker : FirExpressionChecker<FirFunctionCall>
 
         val nameSrc = expression.calleeReference.source ?: return
         val path = filePathOf(context) ?: return
-        RdmaPluginTransformState.addEdit(path, nameSrc.startOffset, nameSrc.endOffset, RdmaPluginTransformState.bridgeNameFor(fqn))
+        RdmaPluginTransformState.addEdit(path, nameSrc.startOffset, nameSrc.endOffset, RdmaPluginTransformState.bridgeCallFor(fqn))
 
         if (fqn !in RdmaPluginTransformState.stateFactoryFqns) return
         // The state factory opens an erased value channel: bake the channel's type
@@ -254,9 +282,10 @@ object RdmaPluginComposeEntryCallChecker : FirExpressionChecker<FirFunctionCall>
             reporter.reportOn(
                 src,
                 FirErrors.UNSUPPORTED,
-                "kardman state requires a concrete allowed value type — primitives, @RDMA classes/enums, " +
+                "kardman state requires a concrete allowed value type — primitives, kernel @RDMA classes/enums, " +
                     "List/Map of those ('Any'/'dynamic'/function types and nullable collections are not " +
-                    "supported yet; docs/design/type_descriptors.md)",
+                    "supported yet; docs/design/type_descriptors.md). The plugin's own classes cannot be state " +
+                    "values: keep such an object in remember { } and put its fields, or a kernel type, in state",
             )
             return
         }

@@ -84,6 +84,9 @@ step_1_build_and_launch_app() {
 step_2_scalars() {
     step "2: scalar round-trips"
     wait_logcat "RdmaRuntime" "STATE_DOUBLE: 19.9"
+    wait_logcat "RdmaRuntime" "SUBPACKAGE: state=sub"
+    wait_logcat "RdmaRuntime" "CAPTURE: body=7"
+    wait_logcat "RdmaRuntime" "CAPTURE: content=7"
     wait_logcat "RdmaRuntime" "STATE_DOUBLE_SET: 20.5"
 }
 

@@ -25,6 +25,7 @@ import org.jetbrains.kotlin.gradle.plugin.KotlinCompilerPluginSupportPlugin
 import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 import org.jetbrains.kotlin.gradle.plugin.SubpluginArtifact
 import org.jetbrains.kotlin.gradle.plugin.SubpluginOption
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
 import groovy.json.JsonSlurper
 import groovy.json.JsonOutput
 import java.io.File
@@ -362,6 +363,15 @@ class RdmaPluginGradlePlugin : KotlinCompilerPluginSupportPlugin {
         val dir = File(target.buildDir, "generated/rdma")
         dir.mkdirs()
         File(dir, "RdmaRuntimeBridge.kt").writeText(runtimeBridgeSource(target.pluginPackage(), target.pluginId()))
+
+        // A plugin runs on the shared runtime's libraries, so it must name their members the way
+        // the shared runtime does. Dead-code elimination changes some member names (an overload
+        // kept alone gets another name: `StringBuilder.append(Char)`), and the shared runtime is
+        // built without it, so plugins are linked without it too. Only the plugin's own module
+        // is shipped; its size does not depend on this.
+        target.tasks.withType(KotlinCompilationTask::class.java).configureEach { task ->
+            if (task.name.contains("KotlinJs")) task.compilerOptions.freeCompilerArgs.add("-Xir-dce=false")
+        }
     }
 
     override fun isApplicable(kotlinCompilation: KotlinCompilation<*>): Boolean =

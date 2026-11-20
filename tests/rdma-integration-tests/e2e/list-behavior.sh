@@ -137,6 +137,8 @@ step_6_collection_idioms() {
     wait_logcat "RdmaRuntime" "MOD_CLICK: clicked=true clicks=1"
     # An @RDMA enum argument of a kernel widget arrives intact (it used to be null).
     wait_logcat "RdmaRuntime" "ENUM_WIDGET: HIGH"
+    # StringBuilder in plugin code (field report).
+    wait_logcat "RdmaRuntime" "STRING_BUILDER: sb=x1c built=y2"
     # Long and String? widget arguments (#42, #43).
     wait_logcat "RdmaRuntime" "WIDGET_ARGS: a=\\[argb=ff112233 subtitle=null\\] b=\\[argb=7fffffffffffffff subtitle=sub\\] c=\\[argb=ffffffffffffffff subtitle=null\\]"
     # Strings: null both ways, emoji, U+0000 (Android crosses UTF-16; iOS refuses it loudly).

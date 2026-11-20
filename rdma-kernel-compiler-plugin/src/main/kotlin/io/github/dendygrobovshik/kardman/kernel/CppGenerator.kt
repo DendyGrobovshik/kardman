@@ -43,7 +43,7 @@ class CppGenerator(
 
     fun generate(classInfos: List<RdmaClassInfo>, functions: List<RdmaFunctionInfo> = emptyList(), enums: List<RdmaEnumInfo> = emptyList()) {
         val plainFunctions = functions.filter { !it.composable }
-        if (classInfos.isEmpty() && plainFunctions.isEmpty() && enums.isEmpty()) return
+        // A module with only widgets (or nothing) still gets its bridge: the app aggregates every module.
         enumFqns = enums.map { it.qualifiedName }.toSet()
         generateJniCacheHeader(classInfos, plainFunctions, enums)
         generateJniCacheCpp(classInfos, plainFunctions, enums)

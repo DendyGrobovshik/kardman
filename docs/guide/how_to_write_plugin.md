@@ -41,6 +41,10 @@ There is no serialization or glue code to write. Behind the scenes a kernel obje
 in the kernel and the plugin holds a proxy to it; a kernel `List` is a real Kotlin list in
 the plugin, so the whole stdlib works on it.
 
+`@RDMA` is a kernel annotation: a plugin uses `@RDMA` declarations but does not declare
+them — writing `@RDMA` in a plugin is a compile error. The plugin's own classes are plain
+Kotlin and live in JS; a subclass of an `open` kernel class needs no annotation.
+
 ## Components
 
 A plugin shows UI by registering **components** in `main()`; the app renders them by name

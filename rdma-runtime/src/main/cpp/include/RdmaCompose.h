@@ -87,6 +87,10 @@ struct ComposeJniCache {
     // RdmaSuspend.cancel (static): the plugin cancelled a coroutine waiting for a kernel call.
     jclass suspendClass = nullptr;
     jmethodID suspendCancel = nullptr;
+    // RdmaLambdaScopes (static): recompose scopes tracked by plugin composable lambdas.
+    jclass lambdaScopesClass = nullptr;
+    jmethodID lambdaScopesTrack = nullptr;
+    jmethodID lambdaScopesInvalidate = nullptr;
     jmethodID scopeBlockCtor = nullptr;
 
     jclass objectClass = nullptr;
@@ -277,6 +281,11 @@ jobject rdmaBoxComposeKey(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v);
 
 // Takes ownership of a global ref to a ScopeUpdateScope.
 jsi::Object makeScopeUpdateScopeProxy(jsi::Runtime& rt, jobject scopeGlobal);
+
+// `Composer.recomposeScope` for a plugin `ComposableLambdaImpl` (field report #50): the
+// current scope, recorded used, as a proxy whose `invalidate` invalidates it — or `null`
+// when this scope was already handed out and not invalidated since.
+jsi::Value rdmaLambdaScope(jsi::Runtime& rt, jobject composer);
 
 extern std::shared_ptr<jsi::Object> g_empty;
 extern std::unordered_map<int64_t, std::shared_ptr<jsi::Object>> g_jsValues;

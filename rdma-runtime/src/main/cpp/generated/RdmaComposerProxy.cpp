@@ -517,8 +517,8 @@ static jsi::Value resolveComposerMethod(jsi::Runtime& rt, const std::string& n) 
 
             return jsi::Function::createFromHostFunction(
                 rt, jsi::PropNameID::forAscii(rt, "get_recomposeScope"), 0,
-                [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-                    return jsi::Value::null();
+                [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
+                    return rdmaLambdaScope(r, composerStateOf(r, thisVal)->composer_);
                 });
         }
         if (n.rfind("recordUsed", 0) == 0) {
