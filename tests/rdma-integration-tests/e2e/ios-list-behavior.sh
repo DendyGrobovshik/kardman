@@ -130,6 +130,8 @@ step_2_run_and_assert() {
     wait_marker "$log" "CARD: b 2 state=b#2"
     # A changed component argument reaches the live content (same place, same state).
     wait_marker "$log" "CARD: c 5 state=c#0"
+    # A new kernel object as a component argument reaches the live content (field report #40).
+    wait_marker "$log" "BOX: two"
     # Modifiers (@RDMA class): the chain applies, scope elements only in their container, an
     # equal chain lets the widget skip, a changed one recomposes it, a click reaches the plugin.
     wait_marker "$log" "MOD_APPLIED: column=\\[padding(4.0) background testTag\\] stable=\\[weight(1.0)@Row clickable testTag\\] noscope=\\[weight(ignored) testTag\\] button=\\[padding(2.0) testTag\\]"
@@ -137,6 +139,8 @@ step_2_run_and_assert() {
     wait_marker "$log" "MOD_CLICK: clicked=true clicks=1"
     # An @RDMA enum argument of a kernel widget arrives intact (it used to be null).
     wait_marker "$log" "ENUM_WIDGET: HIGH"
+    # Long and String? widget arguments (#42, #43).
+    wait_marker "$log" "WIDGET_ARGS: a=\\[argb=ff112233 subtitle=null\\] b=\\[argb=7fffffffffffffff subtitle=sub\\] c=\\[argb=ffffffffffffffff subtitle=null\\]"
     # Strings: null both ways, emoji, U+0000 (Android crosses UTF-16; iOS refuses it loudly).
     wait_marker "$log" "STRINGS: echoNull=true describe=null boxNull=true boxSet=set boxReset=true emoji=true nul=error"
     # Object keys: when the parent recomposes, the same plugin object, an equal kernel object

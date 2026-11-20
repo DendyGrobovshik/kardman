@@ -17,6 +17,7 @@
 
 package org.example
 
+import com.example.kernel.internal.services.TextBox
 import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -76,10 +77,12 @@ private fun Content() {
     }
     // A component argument that changes after the first composition must reach the plugin.
     var live by remember { mutableStateOf(0) }
+    var liveBox by remember { mutableStateOf(TextBox("one")) }
     LaunchedEffect(ready) {
         if (ready) {
             delay(1500)
             live = 5
+            liveBox = TextBox("two")
         }
     }
     if (ready) {
@@ -89,6 +92,7 @@ private fun Content() {
             RdmaComposeHost.Component("bob:services/card", "a", 1)
             RdmaComposeHost.Component("bob:services/card", "b", 2)
             RdmaComposeHost.Component("bob:services/card", "c", live)
+            RdmaComposeHost.Component("bob:services/box", liveBox)
             RdmaComposeHost.Component("bob:services/modifiers")
             RdmaComposeHost.Component("bob:services/keys")
         }

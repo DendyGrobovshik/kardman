@@ -44,6 +44,21 @@ fun PriorityBadge(priority: com.example.kernel.internal.services.Priority, modif
 @RuntimeLocal // a test probe read back by the plugin, never hotfixed
 private var lastPriorityBadge = ""
 
+/** Widget arguments of type `Long` and `String?` (test probe, read back by tag). */
+@Composable
+@RDMA
+fun StyleProbe(tag: String, colorArgb: Long, subtitle: String? = null, modifier: Modifier = Modifier()) {
+    styleProbes[tag] = "argb=${colorArgb.toULong().toString(16)} subtitle=${subtitle ?: "null"}"
+    M3Text("$tag ${subtitle ?: ""}", modifier = modifier.toComposeUi())
+}
+
+@RuntimeLocal // a test probe read back by the plugin, never hotfixed
+private val styleProbes = HashMap<String, String>()
+
+/** What [StyleProbe] with [tag] last composed with. */
+@RDMA
+fun styleProbe(tag: String): String = styleProbes[tag] ?: "none"
+
 /** The priority [PriorityBadge] last composed with (test probe). */
 @RDMA
 fun lastPriorityBadge(): String = lastPriorityBadge

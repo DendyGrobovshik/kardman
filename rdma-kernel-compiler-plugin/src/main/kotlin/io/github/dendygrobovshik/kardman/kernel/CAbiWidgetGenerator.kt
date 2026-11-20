@@ -52,7 +52,10 @@ class CAbiWidgetGenerator(
         abstract val hasDefault: Boolean
         abstract val defaultValue: String?
 
-        data class Value(override val name: String, val jvmType: String, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
+        data class Value(override val name: String, val jvmType: String, override val hasDefault: Boolean = false, override val defaultValue: String? = null, val nullable: Boolean = false) : Param() {
+            /** A `String?`: crosses as a null C string for `null`. */
+            val nullableString: Boolean get() = nullable && jvmType == "kotlin.String"
+        }
         data class Ref(override val name: String, val fqn: String, val nullable: Boolean, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
         data class Content(override val name: String, val arity: Int, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
         data class Callback(override val name: String, val arity: Int, val paramTypes: List<RdmaTypeRef>, override val hasDefault: Boolean = false, override val defaultValue: String? = null) : Param()
@@ -90,7 +93,7 @@ class CAbiWidgetGenerator(
             }
             p.type.type is RdmaType.Ref ->
                 Param.Ref(p.name, (p.type.type as RdmaType.Ref).fqn, p.type.nullable, p.hasDefault, p.defaultValue)
-            else -> Param.Value(p.name, valueFqn(p.type.type), p.hasDefault, p.defaultValue)
+            else -> Param.Value(p.name, valueFqn(p.type.type), p.hasDefault, p.defaultValue, p.type.nullable)
         }
     }
 
@@ -147,6 +150,7 @@ import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.asStableRef
 import kotlinx.cinterop.staticCFunction
+import kotlinx.cinterop.toKString
 
 """)
         val refFqns = widgets
@@ -292,7 +296,7 @@ import kotlinx.cinterop.staticCFunction
     }
 
     private fun resolvedType(p: Param): String = when (p) {
-        is Param.Value -> kotlinType(p.jvmType)
+        is Param.Value -> kotlinType(p.jvmType) + if (p.nullableString) "?" else ""
         is Param.Ref -> "${p.fqn}${if (p.nullable) "?" else ""}"
         is Param.Content -> if (p.arity == 0) "@Composable () -> Unit" else "@Composable (Int) -> Unit"
         is Param.Callback -> if (p.arity == 0) "() -> Unit"
@@ -302,7 +306,11 @@ import kotlinx.cinterop.staticCFunction
     }
 
     private fun convertExpr(p: Param, raw: String, cName: String): String = when (p) {
-        is Param.Value -> if (p.jvmType == "kotlin.String") "rdmaToKString($raw)" else raw
+        is Param.Value -> when {
+            p.nullableString -> "$raw?.toKString()"
+            p.jvmType == "kotlin.String" -> "rdmaToKString($raw)"
+            else -> raw
+        }
         is Param.Ref -> "$raw.obj<${p.fqn}>()"
         is Param.Content, is Param.Callback, is Param.ListVal, is Param.ListHandle -> "${cName}_${p.name}($raw)"
     }
@@ -396,6 +404,7 @@ $nsClose} // namespace rdma
         val out = cppOutput("RdmaWidgetBridge$fileSuffix.cpp", "RdmaWidgetBridge$fileSuffix.cpp").bufferedWriter()
         out.write("""#include "RdmaWidgetBridge$fileSuffix.h"
 #include "RdmaComposeCAbi.h"
+#include "RdmaJsLong.h"
 
 #include <string>
 
@@ -457,14 +466,18 @@ $ownedCleanups                if (result.kind == RdmaResultKind::Error) return r
     }
 
     private fun captureExpr(i: Int, p: Param): String = when (p) {
-        is Param.Value -> "cpp_p$i"
+        is Param.Value -> if (p.nullableString) "cpp_p$i, null_p$i" else "cpp_p$i"
         is Param.Ref -> "cpp_p$i"
         is Param.Content, is Param.Callback -> "cpp_p$i"
         is Param.ListVal, is Param.ListHandle -> "cpp_p$i"
     }
 
     private fun callArgExpr(i: Int, p: Param): String = when (p) {
-        is Param.Value -> if (p.jvmType == "kotlin.String") "cpp_p$i.c_str()" else "cpp_p$i"
+        is Param.Value -> when {
+            p.nullableString -> "(null_p$i ? nullptr : cpp_p$i.c_str())"
+            p.jvmType == "kotlin.String" -> "cpp_p$i.c_str()"
+            else -> "cpp_p$i"
+        }
         is Param.Ref -> "cpp_p$i"
         is Param.Content, is Param.Callback -> "cpp_p$i"
         is Param.ListVal, is Param.ListHandle -> "cpp_p$i"
@@ -478,12 +491,15 @@ $ownedCleanups                if (result.kind == RdmaResultKind::Error) return r
             is Param.Value -> when (p.jvmType) {
                 "kotlin.String" ->
                     "                std::string cpp_p$i = count > $i && ${notUndef()}args[$i].isString() ? args[$i].getString(r).utf8(r) : std::string();\n" +
+                        (if (p.nullableString) "                bool null_p$i = count > $i && args[$i].isNull();\n" else "") +
                         maskLine()
                 "kotlin.Int" ->
                     "                int32_t cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? (int32_t)args[$i].getNumber() : 0;\n" +
                         maskLine()
                 "kotlin.Long" ->
-                    "                int64_t cpp_p$i = count > $i && ${notUndef()}args[$i].isNumber() ? (int64_t)args[$i].getNumber() : 0;\n" +
+                    // A plugin Long is a Kotlin/JS object (low, high), never a JS number.
+                    "                int64_t cpp_p$i = 0;\n" +
+                        "                if (${notUndef()}count > $i && !args[$i].isUndefined() && !args[$i].isNull()) cpp_p$i = (int64_t)rdmaCheckedJLong(r, args[$i]);\n" +
                         maskLine()
                 "kotlin.Boolean" ->
                     "                bool cpp_p$i = count > $i && ${notUndef()}args[$i].isBool() ? args[$i].getBool() : false;\n" +

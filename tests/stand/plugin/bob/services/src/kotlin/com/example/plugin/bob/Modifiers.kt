@@ -25,6 +25,8 @@ import com.example.kernel.internal.Button
 import com.example.kernel.internal.Column
 import com.example.kernel.internal.Modifier
 import com.example.kernel.internal.PriorityBadge
+import com.example.kernel.internal.StyleProbe
+import com.example.kernel.internal.styleProbe
 import com.example.kernel.internal.lastPriorityBadge
 import com.example.kernel.internal.services.Priority
 import com.example.kernel.internal.Row
@@ -53,6 +55,10 @@ fun ModifiersDemo() {
         Button("plain", modifier = Modifier().padding(2.0).testTag("mod-button"))
         // An enum argument of a kernel widget (it used to arrive as null).
         PriorityBadge(Priority.HIGH)
+        // Long and String? widget arguments (Long used to arrive as 0; String? broke iOS codegen).
+        StyleProbe("a", 0xFF112233L)
+        StyleProbe("b", Long.MAX_VALUE, subtitle = "sub")
+        StyleProbe("c", -1L, subtitle = null)
     }
     LaunchedEffect(Unit) {
         // Counts are taken relative to this point: the composition may have settled while
@@ -75,5 +81,6 @@ fun ModifiersDemo() {
         println("MOD_CLICK: clicked=$clicked clicks=$clicks")
         println("ENUM_WIDGET: ${lastPriorityBadge()}")
         println(stringsProbe())
+        println("WIDGET_ARGS: a=[${styleProbe("a")}] b=[${styleProbe("b")}] c=[${styleProbe("c")}]")
     }
 }

@@ -481,7 +481,8 @@ $cleanups
                         maskLine()
                 "kotlin.Long" ->
                     "                jlong cpp_p$i = 0;\n" +
-                        "                if (${notUndef()}count > $i && args[$i].isNumber()) cpp_p$i = (jlong)rdmaCheckedJLong(r, args[$i]); // guarded crossing\n" +
+                        // A plugin Long is a Kotlin/JS object (low, high), never a JS number.
+                        "                if (${notUndef()}count > $i && !args[$i].isUndefined() && !args[$i].isNull()) cpp_p$i = (jlong)rdmaCheckedJLong(r, args[$i]);\n" +
                         maskLine()
                 "kotlin.Boolean" ->
                     "                jboolean cpp_p$i = count > $i && ${notUndef()}args[$i].isBool() ? args[$i].getBool() : false;\n" +

@@ -22,14 +22,23 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import com.example.kernel.internal.Text
 import com.example.kernel.internal.registerComponent
+import com.example.kernel.internal.services.TextBox
 
 fun main() {
     // A component with parameters: the host renders "bob:services/card" twice with
     // different arguments, each with its own state (docs/internals/compose_protocol.md).
     registerComponent("card") { title: String, count: Int -> Card(title, count) }
+    // A kernel object argument: a new object from the host must reach the live content.
+    registerComponent("box") { box: TextBox -> BoxCard(box) }
     registerComponent("modifiers") { ModifiersDemo() }
     registerComponent("keys") { KeysDemo() }
     runServicesDemo()
+}
+
+@Composable
+fun BoxCard(box: TextBox) {
+    Text("box: ${box.text}")
+    SideEffect { println("BOX: ${box.text}") }
 }
 
 @Composable
