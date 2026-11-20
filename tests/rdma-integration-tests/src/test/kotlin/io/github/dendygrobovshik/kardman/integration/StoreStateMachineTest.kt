@@ -15,6 +15,8 @@
  */
 package io.github.dendygrobovshik.kardman.integration
 
+import io.github.dendygrobovshik.kardman.types.PolyfillRef
+import io.github.dendygrobovshik.kardman.types.PolyfillIndex
 import io.github.dendygrobovshik.kardman.store.RdmaStore
 import io.github.dendygrobovshik.kardman.types.Changelog
 import io.github.dendygrobovshik.kardman.types.ChangelogChange
@@ -146,11 +148,12 @@ class StoreStateMachineTest {
         store.registerRelease(
             release("p2", 1, moduleDeps = listOf("internal", "user_b"), usedSymbols = listOf("user:bar")),
         )
+        store.setPolyfillIndex(PolyfillIndex(r = mapOf("user_b" to mapOf("" to listOf(PolyfillRef("r-user_b", 2))))))
 
         val atRisk = store.resync(req("p2", 1), removalTime.plusSeconds(1))
         assertEquals(PluginState.AT_RISK, atRisk.state)
         assertEquals(UpdateSeverity.MANDATORY, atRisk.severity)
-        assertContains(atRisk.polyfills, "R:user_b")
+        assertContains(atRisk.polyfills, "r-user_b")
 
         // Inside the retention window (< 90 days): still served.
         val inside = store.resync(req("p2", 1), removalTime.plus(Duration.ofDays(89)))
@@ -184,12 +187,13 @@ class StoreStateMachineTest {
         store.registerRelease(
             release("p2", 1, moduleDeps = listOf("internal", "user_b"), usedSymbols = listOf("user:bar")),
         )
+        store.setPolyfillIndex(PolyfillIndex(r = mapOf("user_b" to mapOf("" to listOf(PolyfillRef("r-user_b", 2))))))
         store.recordLive(listOf("user:bar"))
         store.recordLive(listOf("user:bar"))
 
         val res = store.resync(req("p2", 1), removalTime.plus(Duration.ofDays(200)))
         assertEquals(PluginState.AT_RISK, res.state)
-        assertContains(res.polyfills, "R:user_b")
+        assertContains(res.polyfills, "r-user_b")
     }
 
     // §5.4: the newest *compatible* release is chosen by minHost ≤ H.
@@ -299,22 +303,40 @@ class StoreStateMachineTest {
         assertEquals(ResyncStatus.UPDATE, g2.status)
     }
 
-    // toolchain_compatibility.md §3 / compatibility.md §8.1: polyfill keys carry the generation.
+    // compatibility.md §8.1–§8.2: polyfills come from the index, per host and generation, and a
+    // version whose polyfill the store does not have is not offered.
     @Test
-    fun `polyfill keys are scoped by generation`() {
+    fun `polyfills come from the index per host and generation`() {
         val store = RdmaStore()
-        store.setChangelog(Changelog(h = 1))
-        store.registerRelease(release("alice", 1, builtAgainstToolchain = "g1", moduleDeps = listOf("internal")))
-        store.registerRelease(release("alice", 1, builtAgainstToolchain = "g2", moduleDeps = listOf("internal")))
-        store.registerRelease(release("alice", 1, moduleDeps = listOf("internal")))
+        // internal changed at v3, after host H=2.
+        store.setChangelog(
+            Changelog(
+                h = 2,
+                entries = listOf(
+                    entry(2, "internal", change("internal:a", ChangelogChangeKind.ADD)),
+                    entry(3, "internal", change("internal:b", ChangelogChangeKind.ADD)),
+                ),
+            ),
+        )
+        store.registerRelease(release("alice", 1, builtAgainstKernel = 2, builtAgainstToolchain = "g1", moduleDeps = listOf("internal")))
+        store.registerRelease(release("alice", 2, builtAgainstKernel = 3, builtAgainstToolchain = "g1", moduleDeps = listOf("internal")))
+        store.registerRelease(release("alice", 1, builtAgainstKernel = 2, builtAgainstToolchain = "g2", moduleDeps = listOf("internal")))
+        store.registerRelease(release("alice", 2, builtAgainstKernel = 3, builtAgainstToolchain = "g2", moduleDeps = listOf("internal")))
+        // F for H=2 exists for g1 only.
+        store.setPolyfillIndex(PolyfillIndex(f = mapOf("internal" to mapOf("2" to mapOf("g1" to PolyfillRef("f-g1", 3))))))
 
         val g1 = store.resync(req("alice", 1, hostVersion = 2, hostGeneration = "g1"))
-        assertContains(g1.polyfills, "F:internal:2:g1")
+        assertEquals(2, g1.targetVersion)
+        assertEquals(listOf("f-g1"), g1.polyfills)
 
+        // g2 has no F for v2's kernel, so it keeps v1, which needs none.
         val g2 = store.resync(req("alice", 1, hostVersion = 2, hostGeneration = "g2"))
-        assertContains(g2.polyfills, "F:internal:2:g2")
+        assertEquals(1, g2.targetVersion)
+        assertEquals(emptyList(), g2.polyfills)
 
-        val legacy = store.resync(req("alice", 1, hostVersion = 2))
-        assertContains(legacy.polyfills, "F:internal:2")
+        // A host at H=3 has internal natively: no polyfill.
+        val h3 = store.resync(req("alice", 1, hostVersion = 3, hostGeneration = "g1"))
+        assertEquals(2, h3.targetVersion)
+        assertEquals(emptyList(), h3.polyfills)
     }
 }

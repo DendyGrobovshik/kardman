@@ -52,6 +52,7 @@ int32_t rdma_is_ready(void);
 void rdma_eval_bytes(const void* code, int32_t len);
 void rdma_eval_file(const char* path);
 void rdma_eval_files(const char* newlineSeparatedPaths);
+int32_t rdma_verify_ed25519(const void* message, int32_t length, const void* signature, const void* publicKey);
 int32_t rdma_content_version(void);
 void rdma_set_uncaught_handler(void);
 const char* rdma_takeNativeError(void);

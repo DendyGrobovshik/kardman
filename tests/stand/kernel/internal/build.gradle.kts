@@ -41,6 +41,11 @@ kotlin {
                 implementation(libs.coil.compose)
             }
         }
+        // Kernel tests are also contract tests: scripts/contract-test.sh runs them on an emulator
+        // against the native code and against each prepared polyfill (compatibility.md §10).
+        commonTest.dependencies {
+            implementation(libs.kotlin.test)
+        }
         androidMain {
             kotlin.srcDir("build/generated/rdma/androidMain")
         }

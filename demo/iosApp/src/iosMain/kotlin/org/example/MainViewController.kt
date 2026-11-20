@@ -17,6 +17,7 @@
 
 package org.example
 
+import com.example.kernel.RdmaHost
 import androidx.compose.ui.window.ComposeUIViewController
 import com.example.kernel.internal.services.installStore
 import io.github.dendygrobovshik.kardman.runtime.RdmaBridge
@@ -44,7 +45,7 @@ fun MainViewController(): UIViewController {
     rdma_userBridgeInstall()
     RdmaBridge.nativeInit()
     loadBundles()
-    installStore("http://localhost:8080", NSTemporaryDirectory() + "rdma", 1)
+    installStore("http://localhost:8080", NSTemporaryDirectory() + "rdma", RdmaHost.VERSION)
     return ComposeUIViewController { DemoShell() }
 }
 

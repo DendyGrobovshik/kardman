@@ -43,6 +43,10 @@ HOTFIX_SRC="$ROOT_DIR/tests/stand/kernel/internal/src/commonMain/kotlin/com/exam
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo; echo "==== $* ===="; }
 
+# Bundles are signed with the e2e test key; the stand app trusts its public key (rdma.toml).
+RDMA_SIGNING_KEY="$(grep -v '^#' "$ROOT_DIR/tests/rdma-integration-tests/signing/test-signing-key.txt")"
+export RDMA_SIGNING_KEY
+
 run_gradle() { "$GRADLE" -p "$ROOT_DIR" --console=plain -PrdmaVersionsDir="$VERSIONS_DIR" "$@"; }
 
 adb_dev() { adb devices | grep -q 'emulator-.*\sdevice' || fail "no emulator attached"; }
@@ -110,6 +114,26 @@ store_reload() { # re-read changelog + releases + bundles after a release/step
 # Publishes a bundle into the store the way a release does: the bundle plus its gzip copy.
 seed_bundle() {
     run_gradle :rdma-kernel-compiler-plugin:publishBundle -PversionsDir="$VERSIONS_DIR" -PbundleKey="$1" -PbundleFile="$2"
+}
+
+# Asserts the release published a signed polyfill of <kind> (f|r) for <module> into the store.
+assert_polyfill() { # assert_polyfill <f|r> <module>
+    python3 - "$VERSIONS_DIR" "$1" "$2" <<'PY' || fail "no published $2 polyfill ($1) in polyfills.json"
+import json, os, sys
+versions, kind, module = sys.argv[1:4]
+index = json.load(open(os.path.join(versions, "polyfills.json")))
+entries = index.get(kind, {}).get(module)
+assert entries, f"no {kind} entry for {module}"
+def refs(x):
+    if isinstance(x, list): return x
+    if isinstance(x, dict) and "hash" in x: return [x]
+    return [r for v in x.values() for r in refs(v)]
+for ref in refs(entries):
+    for suffix in ("", ".gz", ".sig"):
+        path = os.path.join(versions, "bundles", ref["hash"] + suffix)
+        assert os.path.isfile(path), f"missing {path}"
+print(f"published {kind} polyfill(s) for {module}: " + ", ".join(r["hash"][:12] for r in refs(entries)))
+PY
 }
 
 # Runs a kernel release via scripts/release.sh (changelog write + polyfill bundle compilation).
@@ -248,11 +272,8 @@ EOF
     local analysis="$ROOT_DIR/tests/stand/kernel/user/itest/build/generated/rdma/kernel_manifest_android.json"
     local polyfillOut="$IT_DIR/polyfill-f"
     release "dynamic-release" "$analysis" "$polyfillOut"
-    local h
-    h=$(python3 -c "import json;print(json.load(open('$VERSIONS_DIR/changelog.json'))['h'])")
-    if [ -f "$polyfillOut/polyfill.hbc" ]; then
-        seed_bundle "F:user_itest:$h" "$polyfillOut/polyfill.hbc"
-    fi
+    # The release itself built F for the running app's host and published it (polyfills.json).
+    assert_polyfill f user_itest
     cat > "$NEWPLUG_SRC" <<'EOF'
 package com.example.plugin.itest
 
@@ -336,11 +357,7 @@ EOF
     local analysis="$ROOT_DIR/tests/stand/kernel/user/alice/build/generated/rdma/kernel_manifest_android.json"
     local polyfillOut="$IT_DIR/polyfill-r"
     release "dynamic-release" "$analysis" "$polyfillOut"
-    if [ -f "$polyfillOut/polyfill.hbc" ]; then
-        seed_bundle "R:user_alice" "$polyfillOut/polyfill.hbc"
-    else
-        fail "expected an R polyfill bundle to be materialized"
-    fi
+    assert_polyfill r user_alice
 }
 
 # 9) The manual polyfill reaches the app and is evaluated (dispatch re-wiring).
@@ -350,7 +367,9 @@ step_9_manual_polyfill_delivered() {
     broadcast_resync "alice:counter" 1
     # The R bundle (manual polyfill) is downloaded + evaluated by the client; the
     # registration `js("RDMA").aliceTagline = ::aliceTagline_polyfill` re-wires the call.
-    wait_logcat "RDMA" "polyfill R:user_alice evaluated"
+    local r_hash
+    r_hash=$(python3 -c "import json;print(json.load(open('$VERSIONS_DIR/polyfills.json'))['r']['user_alice']['g1'][-1]['hash'])")
+    wait_logcat "RDMA" "polyfill $r_hash evaluated"
 }
 
 # 10) Hotfix a native function (docs/design/runtime_rework.md §6): change only the body
@@ -373,10 +392,7 @@ PY
     local analysis="$ROOT_DIR/tests/stand/kernel/internal/build/generated/rdma/kernel_manifest_android.json"
     local polyfillOut="$IT_DIR/polyfill-hotfix"
     release "dynamic-release" "$analysis" "$polyfillOut"
-    [ -f "$polyfillOut/polyfill.hbc" ] || fail "expected an F polyfill bundle for the hotfix"
-    # The store serves `F:<module>:<hostVersion>`; the stand host always reports
-    # MainActivity.DEMO_HOST_VERSION (2), not the changelog's current H.
-    seed_bundle "F:internal:2" "$polyfillOut/polyfill.hbc"
+    assert_polyfill f internal
     cat > "$NEWPLUG_SRC" <<'EOF'
 package com.example.plugin.itest
 

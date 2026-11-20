@@ -27,6 +27,7 @@ object RdmaBridge {
     external fun nativeEvalFile(filePath: String)
     external fun nativeEvalBytes(bytes: ByteArray)
     private external fun nativeEvalFiles(filePaths: Array<String>)
+    private external fun nativeVerifyEd25519(message: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean
     external fun nativeIsReady(): Boolean
     external fun nativeContentVersion(): Int
     external fun nativeSetUncaughtExceptionHandler(handler: (String, RdmaException) -> Unit)
@@ -60,6 +61,21 @@ object RdmaBridge {
         if (paths.isEmpty()) return false
         nativeEvalFiles(paths)
         return true
+    }
+
+    /**
+     * Checks a downloaded bundle before it is staged (compatibility.md §8.1): its SHA-256 is
+     * [hash] (bundles are content-addressed) and, when [trustedKeys] (raw 32-byte Ed25519 public
+     * keys) are given, [signature] is a valid signature of [hash] by one of them. A bundle that
+     * fails is never evaluated.
+     */
+    fun verifyBundle(bytes: ByteArray, hash: String, signature: ByteArray?, trustedKeys: List<ByteArray>): Boolean {
+        val actual = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        if (!actual.equals(hash, ignoreCase = true)) return false
+        if (trustedKeys.isEmpty()) return true
+        val sig = signature ?: return false
+        val message = hash.lowercase().encodeToByteArray()
+        return trustedKeys.any { key -> nativeVerifyEd25519(message, sig, key) }
     }
 
     /** Installs the host-side global uncaught-exception handler (see design §6). */

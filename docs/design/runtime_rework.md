@@ -891,27 +891,26 @@ each item names what it would add.
 | Export only marked kernel types to Swift | Prototype (2026-11-19): a kernel type referenced from the framework's public API lands in the header with its members even without module export (named with the module prefix, `InternalTextBox`). An annotation could generate such references instead of exporting whole modules |
 | C-ABI glue in the iOS header | The app compiles the kernels' C-ABI glue, so its `rdma_*` functions and widget entries are public in the framework header; they could be `internal` |
 
-**Release pipeline — production readiness (review 2026-11-19).** Done the same day: bundles
-are compressed at release (`publish-bundle`, `plugin-release` publish `<key>` + `<key>.gz`), the
-store serves the stored copy; `--dry-run` reaches `release.sh` (`DRY_RUN=1`) and the CI workflow,
-and `static-release` honours it. Open:
+**Release pipeline — production readiness (review 2026-11-19, done 2026-11-20).** A release
+is tests → prepare → build → contract tests → commit (`scripts/release.sh`, `commit-release`):
+changelog entries carry a release `type` (static releases are the host versions); `F` is built
+for every supported host, once per distinct native state of the module, and for every live
+generation (`blocked` when its toolchain is unavailable); `F`/`R` bundles are content-addressed
+with `polyfills.json` as the index; the store offers only versions whose polyfills it has;
+bundles are signed (Ed25519, `RDMA_SIGNING_KEY`) and apps check hash and signature
+(`RdmaBridge.verifyBundle`, Monocypher); the kernel's `commonTest` runs as contract tests on an
+emulator against the native code and each `F` (`scripts/contract-test.sh`); `RdmaHost` carries
+the app's `H`, `G` and keys; releases take both platforms' analyses; re-sync telemetry is
+persisted for `R` retention; the CI workflow serializes releases, persists the release state and
+uploads the bundles. Also fixed the same day: widget defaults were recorded as required in the
+signature baseline (so appending a defaulted widget parameter was refused); `SideEffect` ran only
+once when its block was a remembered lambda (Android).
 
-| Item | Why it matters |
+| Still open | Why |
 |---|---|
-| `F` for every supported host | `dynamic-release` materializes `F` only against the current `H`; a host between `oldestActiveKernel` and `H` gets no polyfill for what changed after its own `H` (the store still offers `F:<module>:<its H>`, which is missing). `F(module, H, G)` must be rebuilt for every live `H` on each dynamic release |
-| `F` per toolchain generation | Polyfills are compiled with one pinned toolchain while their keys carry `G`; like plugin bundles they must be built for every live generation |
-| Commit point before the polyfill build | The CLI writes the changelog, then `release.sh` compiles the polyfill; a failed compile leaves a recorded release without its bundle. Needs prepare → build → publish → commit |
-| Polyfill publication is manual | `release.sh` leaves `polyfill.hbc` in a directory and the key (`F:<module>:<H>[:<G>]`) is chosen by hand (the e2e seeds `F:internal:2`). The release should publish under the right keys |
-| Store offers polyfills it does not have | Re-sync lists `F`/`R` keys without checking they exist, so an update can reach a host that cannot get its polyfill. Offer only a version whose polyfills exist for that `(H, G)`, else the previous one |
-| CI workflow | The changelog and bundles written in the runner are not persisted (no commit, no upload to the store host); no concurrency guard against two releases racing on the changelog; plugin and generation releases are not in CI |
-| One platform's analysis | Releases read `kernel_manifest_android.json`; a change only in an iOS `actual` is never detected, and floors/native state are assumed equal on both platforms |
-| Release gate tests | `release.sh` runs the framework's tests, not the kernel's own tests or the native-vs-polyfill contract suite (`compatibility.md` §10) |
-| Bundle integrity | Clients do not check a downloaded bundle against the hash from re-sync; bundles are not signed (`compatibility.md` §12) |
-| Store client is app code | Download, hash check, cache, persisting staged updates for the cold start, retry/backoff and cleanup of old bundles live in the stand/demo apps; needs a framework module |
-| `R` retention telemetry | `recordLive` is never called by re-sync and is kept in memory, so `R` removal is effectively by age only and resets on restart |
-| Store server | In-memory bundles, unauthenticated `/reload`, plain HTTP — a development stand-in; production needs a deployment story (static files with `Content-Encoding`, a re-sync service) |
-| Host version in the app | The stand and demo hard-code the host's `H`; the app build should take it from the changelog it was built against |
-| Do not rebuild unchanged `F` | Agreed principle (rebuild a polyfill only when its code changed), not implemented |
+| Store client as a framework module | Parked (2026-11-20): download, cache, persisting staged updates for the cold start, retry/backoff and cleanup still live in the stand/demo apps |
+| Do not rebuild unchanged `F` | Unchanged polyfills get the same content hash (no new bundle), but are still compiled each release |
+| Store server for production | The in-memory store with an unauthenticated `/reload` is a development stand-in |
 
 **Later:**
 

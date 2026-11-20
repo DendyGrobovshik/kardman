@@ -65,16 +65,22 @@ The store (`:rdma-store`, `StoreHttpServer` + `RdmaStoreEngine`) keeps plugin re
 bundles in the versions directory and answers:
 
 - `POST /resync` — request: plugin id, the version the client has, host version `H` and
-  generation `G`; response: the plugin state and severity (P1–P4,
-  [compatibility.md §7](../design/compatibility.md)), `status` (`UPDATE`, `CURRENT`,
-  `UNAVAILABLE`, `REFUSED`), the target version, the plugin bundle hash and the polyfill
-  bundle keys the host needs;
-- `GET /bundle/<key>` — a bundle by content hash or polyfill key
-  (`F:<module>:<H>`, `R:…`). With `Accept-Encoding: gzip` it is sent as the gzip copy made
-  at release time (`<key>.gz` next to `<key>`, level 9 — on the stand's shared runtime about a
-  third of the size) with `Content-Encoding: gzip`; the store never compresses on the fly. `HttpURLConnection` on Android and `NSURLSession` on
-  iOS ask for it and decompress transparently; the client caches the decompressed bytecode,
-  which Hermes maps directly. Content keys are hashes of the uncompressed bytes;
+  generation `G` (the app's `RdmaHost.VERSION` / `GENERATION`); response: the plugin state and
+  severity (P1–P4, [compatibility.md §7](../design/compatibility.md)), `status` (`UPDATE`,
+  `CURRENT`, `UNAVAILABLE`, `REFUSED`), the target version, the plugin bundle hash and the hashes
+  of the polyfills the host needs. The target is the newest compatible version whose polyfills
+  the store has for this `(H, G)` (`polyfills.json`): a version needs an `F` of a module when the
+  module changed after `H` up to the kernel the plugin was built against, and that `F` must be
+  at least that recent; at-risk plugins also get the module's `R` polyfills. Every re-sync of a
+  known version is recorded in `versions/telemetry.json` (the usage `R` retention reads);
+- `GET /bundle/<hash>` — a bundle by content hash. With `Accept-Encoding: gzip` it is sent as
+  the gzip copy made at release time (`<hash>.gz`, level 9 — on the stand's shared runtime
+  about a third of the size) with `Content-Encoding: gzip`; the store never compresses on the
+  fly. `HttpURLConnection` on Android and `NSURLSession` on iOS ask for it and decompress
+  transparently; the client caches the decompressed bytecode, which Hermes maps directly.
+  `GET /bundle/<hash>.sig` is the bundle's Ed25519 signature when the release signed it; the
+  client checks the hash and, when the app has trusted keys (`RdmaHost.PUBLIC_KEYS`), the
+  signature with `RdmaBridge.verifyBundle` before staging (Monocypher in the C++ runtime);
 - `GET /health`.
 
 The client side is app code, not a framework module yet: the demo kernel's `StoreClient`

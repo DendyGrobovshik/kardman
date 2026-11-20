@@ -191,6 +191,20 @@ object RdmaSymbolIndexer {
     private fun signatureOf(params: List<IrValueParameter>, sourceText: String?): List<RdmaParameterSignature> =
         params.map { RdmaParameterSignature(it.name.asString(), signatureType(it.type), it.defaultValue != null, defaultValueText(it, sourceText)) }
 
+    /**
+     * A function's signature. The Compose compiler runs first and clears `defaultValue` on a
+     * `@Composable` function's parameters, so defaults are also read from the source (as the API
+     * extractor does); otherwise a widget's defaulted parameters look required and appending one
+     * is refused as an incompatible change.
+     */
+    private fun functionSignatureOf(fn: IrSimpleFunction, sourceText: String): List<RdmaParameterSignature> {
+        val fromSource = RdmaDefaultSupport.defaultValuesFromFunctionSource(sourceText, fn.startOffset, fn.endOffset)
+        return signatureOf(functionParameters(fn), sourceText).mapIndexed { i, sig ->
+            val text = fromSource[i] ?: return@mapIndexed sig
+            sig.copy(hasDefault = true, defaultValue = sig.defaultValue ?: text)
+        }
+    }
+
     private fun defaultValueText(p: IrValueParameter, sourceText: String?): String? {
         val d = p.defaultValue ?: return null
         if (sourceText == null || d.startOffset < 0 || d.endOffset < d.startOffset || d.endOffset > sourceText.length) return null
@@ -364,7 +378,7 @@ object RdmaSymbolIndexer {
                     emulatable = emulatableOf(decl, nativeRefs(decl)),
                     nativeRefs = nativeRefs(decl),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
-                    signature = signatureOf(functionParameters(decl), text),
+                    signature = functionSignatureOf(decl, text),
                     hotfixBlocker = if (memberOfClass) null else hotfixBlockerOf(decl, isRdma),
                 )
                 irToNode[decl] = fqn
@@ -448,7 +462,7 @@ object RdmaSymbolIndexer {
                     emulatable = emulatableOf(decl, nativeRefs(decl)),
                     nativeRefs = nativeRefs(decl),
                     deprecated = decl.hasAnnotation(DEPRECATED_ANNOTATION),
-                    signature = signatureOf(functionParameters(decl), text),
+                    signature = functionSignatureOf(decl, text),
                 )
                 irToNode[decl] = containerFqn
             }

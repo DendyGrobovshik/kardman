@@ -15,6 +15,7 @@
  */
 package org.example
 
+import com.example.kernel.RdmaHost
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -41,7 +42,7 @@ class MainActivity : ComponentActivity() {
 
         loadDevPolyfills()
 
-        installStore(STORE_URL, File(cacheDir, "rdma").absolutePath, DEMO_HOST_VERSION)
+        installStore(STORE_URL, File(cacheDir, "rdma").absolutePath, RdmaHost.VERSION)
 
         setContent {
             DemoShell()
@@ -72,7 +73,5 @@ class MainActivity : ComponentActivity() {
     private companion object {
         // Emulator loopback to the host's localhost.
         const val STORE_URL = "http://10.0.2.2:8080"
-        // The kernel native version (`h`) baked by the static release in demo.sh.
-        const val DEMO_HOST_VERSION = 1
     }
 }

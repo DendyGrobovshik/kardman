@@ -138,6 +138,26 @@ tasks.register<JavaExec>("generationRelease") {
     )
 }
 
+tasks.register<JavaExec>("generateSigningKey") {
+    group = "rdma"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.github.dendygrobovshik.kardman.kernel.RdmaReleaseCli")
+    args("generate-signing-key")
+}
+
+tasks.register<JavaExec>("commitRelease") {
+    group = "rdma"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.github.dendygrobovshik.kardman.kernel.RdmaReleaseCli")
+    args(
+        "commit-release",
+        project.findProperty("workDir")?.toString()
+            ?: error("pass -PworkDir=/path/to/prepared/release"),
+        project.findProperty("versionsDir")?.toString()
+            ?: error("pass -PversionsDir=/path/to/versions"),
+    )
+}
+
 tasks.register<JavaExec>("publishBundle") {
     group = "rdma"
     classpath = sourceSets["main"].runtimeClasspath

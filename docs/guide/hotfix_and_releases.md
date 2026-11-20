@@ -29,33 +29,102 @@ you run and what to expect.
 
 ## Releasing the kernel
 
-CI is the only writer of the changelog. Every release runs `build → checks → tests →
-write`; the changelog write is the commit point, so an error before it writes nothing.
+CI is the only writer of the changelog. A release runs in this order, and nothing in
+`versions/` changes before the last step:
+
+1. **tests** — the hard gate;
+2. **prepare** — every check runs; the polyfill sources and a release plan go to a work
+   directory;
+3. **build** — the polyfills are compiled for every live toolchain generation;
+4. **contract tests** — your kernel's tests run on an Android emulator against the native code
+   and with each polyfill loaded (see below);
+5. **commit** — the bundles go into the store, then `polyfills.json` and the changelog are
+   written. A failure before this step leaves everything as it was.
 
 | Command | What it does |
 |---|---|
-| `static-release` | records the kernel version baked into the next app build (moves `H`) |
-| `dynamic-release` | records a kernel change for installed apps and builds the `F` polyfills for it |
+| `static-release` | records the kernel version baked into the next app build (moves `H`); older supported apps get the changes as polyfills where they can |
+| `dynamic-release` | records a kernel change for installed apps and builds its polyfills for every supported app version |
 | `hotfix-release` | like `dynamic-release`, but rejects anything that would make a symbol need a newer host (a hotfix fixes a bug, it does not change the API) |
 
 ```bash
-scripts/release.sh <command> <kernel_manifest_<platform>.json> <versionsDir> [polyfillOutDir] [internalModules] [telemetryFile]
+scripts/release.sh <command> <kernel_manifest_android.json[,kernel_manifest_ios.json]> <versionsDir> [workDir] [internalModules] [telemetryFile]
 ```
 
-or the `release` GitHub Actions workflow. With a `telemetryFile` (a JSON array of host
-versions in the field), a release that makes symbols need a newer host prints how many installs
-it still reaches and which symbol is responsible.
+or the `release` GitHub Actions workflow (one release at a time; it commits the release state
+back to the branch and uploads the store bundles). Pass the analyses of both platforms, and
+the same ones on every release: a change that exists on one platform only is still a change.
+With a `telemetryFile` (a JSON array of host versions in the field), a release that makes
+symbols need a newer host prints how many installs it still reaches and which symbol is
+responsible.
 
-A dynamic release is **all or nothing**: it runs every check first and reports all problems
-together — what cannot ship and why, which other changes do not ship because of them, and what
-to do instead. Nothing is written when any check fails. Run with `DRY_RUN=1`
-(`scripts/release.sh`) or the workflow's `dryRun` input to see the report — and what would
-ship — without releasing; a static release then only lists the changes it would record.
+**Which apps get what.** Polyfills are built for every supported app version — every static
+release from `kernel.oldestActiveKernel` on — once per distinct state of the module: app
+versions that have the same native code share a bundle. A dynamic release is **all or
+nothing**: if a change cannot reach one of those versions, nothing ships. A static release
+ships to the new app build in any case and to older apps only where it can; the store keeps
+serving those apps plugin versions that do not need the change.
 
-Bundles go into the store with a gzip copy made at release time (`<key>` and `<key>.gz` in
-`versions/bundles/`), which the store serves to clients as is. `plugin-release` publishes the
-plugin bundles itself; a compiled polyfill is published with
-`./gradlew :rdma-kernel-compiler-plugin:publishBundle -PversionsDir=… -PbundleKey=F:<module>:<H> -PbundleFile=…/polyfill.hbc`.
+The release reports all problems together — what cannot ship and why, which other changes do
+not ship because of them, and what to do instead. Run with `DRY_RUN=1` (`scripts/release.sh`)
+or the workflow's `dryRun` input to see the report — and what would ship — without releasing.
+
+### Contract tests
+
+Write tests for your kernel as usual, in the kernel module's `commonTest` (with
+`kotlin("test")`), against its public API. They are also the **contract** of your kernel: a
+release runs them on an Android emulator twice — against the native code, and with each
+polyfill it is about to ship loaded, so the code runs in JS as it will on installed apps. If a
+test passes natively but fails with a polyfill, the release is rejected:
+
+```
+-- native
+  native: OK (12 tests)
+-- with F for hosts 2,5
+  F hosts 2,5: FAILED
+    labelsAPrice: expected:<v3:2.0> but was:<v3:2>
+Contract tests failed: the release is rejected and nothing was written.
+```
+
+That means the code behaves differently in JS (number formatting, `Long`, a missing API): change
+the code, or write a manual polyfill.
+
+- **Locally:** `./gradlew :androidApp:connectedDebugAndroidTest` runs them against the native code.
+- **In a release:** set `RDMA_CONTRACT_APP=<your app's Gradle path>` (and
+  `RDMA_CONTRACT_APP_ID` if its applicationId is not `org.example`), or the workflow's
+  `contractApp` input; an emulator must be connected (the workflow starts one). Without it the
+  step is skipped.
+- Tests see only the kernel's public API (they are compiled into the app's tests), and run in
+  JS only the functions a polyfill replaces; a class added after an app version is checked
+  natively.
+
+### Bundles and signing
+
+Every bundle is stored under the hash of its content, with a gzip copy made at release time
+(`<hash>` and `<hash>.gz` in `versions/bundles/`) that the store serves as is; `polyfills.json`
+says which polyfill serves which app version and toolchain generation. Bundles are signed when
+the release has a key:
+
+```bash
+./gradlew :rdma-kernel-compiler-plugin:generateSigningKey
+```
+
+prints a private key — keep it as the `RDMA_SIGNING_KEY` secret of CI — and a public key for
+`rdma.toml`:
+
+```toml
+[signing]
+publicKeys = ["<base64>"]
+```
+
+Apps built with keys check every downloaded bundle — its hash, and the signature by one of
+the keys — before staging it, and drop it otherwise. To rotate, add the new key in a static
+release, then start signing with it. The app's version `H`, its toolchain generation and the
+keys are generated into `RdmaHost` (`VERSION`, `GENERATION`, `PUBLIC_KEYS`) by the app build;
+use them when talking to the store.
+
+`plugin-release` publishes the plugin bundles itself; a bundle can also be published by hand
+with `./gradlew :rdma-kernel-compiler-plugin:publishBundle -PversionsDir=… -PbundleKey=<hash> -PbundleFile=…`.
 
 A plugin is always built against a released kernel: the plugin build reads the
 changelog's `h` and fails if there is none.

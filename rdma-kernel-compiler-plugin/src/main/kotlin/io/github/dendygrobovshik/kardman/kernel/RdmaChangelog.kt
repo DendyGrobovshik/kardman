@@ -19,6 +19,7 @@ import io.github.dendygrobovshik.kardman.types.Changelog
 import io.github.dendygrobovshik.kardman.types.ChangelogChange
 import io.github.dendygrobovshik.kardman.types.ChangelogChangeKind
 import io.github.dendygrobovshik.kardman.types.ChangelogEntry
+import io.github.dendygrobovshik.kardman.types.ReleaseType
 import io.github.dendygrobovshik.kardman.types.RdmaAnalysis
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -63,8 +64,28 @@ object RdmaChangelog {
      * `static-release` when the accumulated changes are already in the changelog (recorded by
      * prior `dynamic-release`s): the static release just "bakes" them by moving `H` forward.
      */
-    fun bake(changelog: Changelog): Changelog =
-        changelog.copy(h = latestVersion(changelog))
+    fun bake(changelog: Changelog, module: String): Changelog {
+        val version = nextVersion(changelog)
+        val entry = ChangelogEntry(version, Instant.now().toString(), module, emptyList(), ReleaseType.STATIC)
+        return changelog.copy(h = version, entries = changelog.entries + entry)
+    }
+
+    /**
+     * Host versions still supported: the versions of static releases at or above [floor]
+     * (`kernel.oldestActiveKernel`), plus the current `H`. Apps exist only at these versions,
+     * so these are the native states polyfills are built against.
+     */
+    fun hosts(changelog: Changelog, floor: Int?): List<Int> =
+        (changelog.entries.filter { it.type == ReleaseType.STATIC }.map { it.version } + changelog.h)
+            .filter { it > 0 && it >= (floor ?: 0) }
+            .distinct()
+            .sorted()
+
+    /** The version of the last change of [module] at or before [version] (0 when none). */
+    fun lastChange(changelog: Changelog, module: String, version: Int): Int =
+        changelog.entries
+            .filter { it.module == module && it.version <= version && it.changes.isNotEmpty() }
+            .maxOfOrNull { it.version } ?: 0
 
     /** FQNs that were removed at any point — they can never be re-added. */
     fun tombstoned(changelog: Changelog): Set<String> =
@@ -202,6 +223,7 @@ object RdmaChangelog {
         module: String,
         changes: List<ChangelogChange>,
         bumpH: Boolean,
+        type: ReleaseType = if (bumpH) ReleaseType.STATIC else ReleaseType.DYNAMIC,
     ): Changelog {
         if (changes.isEmpty()) return changelog
         val version = nextVersion(changelog)
@@ -216,6 +238,7 @@ object RdmaChangelog {
             time = Instant.now().toString(),
             module = module,
             changes = changes,
+            type = type,
         )
         return changelog.copy(
             h = if (bumpH) version else changelog.h,

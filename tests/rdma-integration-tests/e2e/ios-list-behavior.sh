@@ -132,6 +132,9 @@ step_2_run_and_assert() {
     wait_marker "$log" "CARD: c 5 state=c#0"
     # A new kernel object as a component argument reaches the live content (field report #40).
     wait_marker "$log" "BOX: two"
+    # A changed String argument reaches the live content (second field report).
+    wait_marker "$log" "CARD: s2 7 state=s1#7"
+    wait_marker "$log" "PLAIN: argb=1 subtitle=s2"
     # Modifiers (@RDMA class): the chain applies, scope elements only in their container, an
     # equal chain lets the widget skip, a changed one recomposes it, a click reaches the plugin.
     wait_marker "$log" "MOD_APPLIED: column=\\[padding(4.0) background testTag\\] stable=\\[weight(1.0)@Row clickable testTag\\] noscope=\\[weight(ignored) testTag\\] button=\\[padding(2.0) testTag\\]"

@@ -118,12 +118,17 @@ class RdmaStoreTest {
         )
         store.registerRelease(release("alice:counter", 1, 0, listOf("a.old")))
         store.registerRelease(release("alice:counter", 2, 0, listOf("a.ok")))
+        store.setPolyfillIndex(
+            io.github.dendygrobovshik.kardman.types.PolyfillIndex(
+                r = mapOf("user_alice" to mapOf("" to listOf(io.github.dendygrobovshik.kardman.types.PolyfillRef("r-hash", 2)))),
+            ),
+        )
 
-        // removal was recent -> R retained -> AT_RISK, serve the update with an R polyfill key.
+        // removal was recent -> R retained -> AT_RISK, serve the update with the R polyfill.
         val response = store.resync(ResyncRequest("alice:counter", 1, 0, hostVersion = 10), now)
         assertEquals(PluginState.AT_RISK, response.state)
         assertEquals(UpdateSeverity.MANDATORY, response.severity)
         assertEquals(ResyncStatus.UPDATE, response.status)
-        assertEquals(true, response.polyfills.any { it.startsWith("R:") })
+        assertEquals(listOf("r-hash"), response.polyfills)
     }
 }

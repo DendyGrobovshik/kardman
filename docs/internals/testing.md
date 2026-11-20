@@ -58,6 +58,7 @@ Each is self-contained and idempotent.
 | `exception-propagation.sh` | exceptions in both directions, global handler, bundle load errors (Android) |
 | `plugin-lifecycle.sh` | store, releases, polyfills, the hotfix gate (Android, runs its own store) |
 | `toolchain-generations.sh` | the generation axis |
+| `contract-tests.sh` | the release contract gate: the kernel's `commonTest` on the emulator against the native code and each polyfill; a hotfix that behaves differently in JS is rejected (Android) |
 | `plugin-compile-errors.sh` | compile-time rejections of the plugin JVM pass |
 | `generate-preview.sh` | the demo: dev server, Generate → Preview without a restart |
 

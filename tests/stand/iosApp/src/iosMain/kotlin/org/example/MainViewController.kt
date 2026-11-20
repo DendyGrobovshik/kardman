@@ -78,11 +78,13 @@ private fun Content() {
     // A component argument that changes after the first composition must reach the plugin.
     var live by remember { mutableStateOf(0) }
     var liveBox by remember { mutableStateOf(TextBox("one")) }
+    var liveTitle by remember { mutableStateOf("s1") }
     LaunchedEffect(ready) {
         if (ready) {
             delay(1500)
             live = 5
             liveBox = TextBox("two")
+            liveTitle = "s2"
         }
     }
     if (ready) {
@@ -93,6 +95,8 @@ private fun Content() {
             RdmaComposeHost.Component("bob:services/card", "b", 2)
             RdmaComposeHost.Component("bob:services/card", "c", live)
             RdmaComposeHost.Component("bob:services/box", liveBox)
+            RdmaComposeHost.Component("bob:services/card", liveTitle, 7)
+            RdmaComposeHost.Component("bob:services/plain", liveTitle)
             RdmaComposeHost.Component("bob:services/modifiers")
             RdmaComposeHost.Component("bob:services/keys")
         }

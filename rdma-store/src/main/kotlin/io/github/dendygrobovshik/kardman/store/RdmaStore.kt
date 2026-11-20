@@ -17,6 +17,8 @@ package io.github.dendygrobovshik.kardman.store
 
 import io.github.dendygrobovshik.kardman.kernel.RdmaBundleFiles
 import io.github.dendygrobovshik.kardman.kernel.RdmaChangelog
+import io.github.dendygrobovshik.kardman.kernel.RdmaPolyfillIndex
+import io.github.dendygrobovshik.kardman.types.PolyfillIndex
 import io.github.dendygrobovshik.kardman.kernel.RdmaPluginReleases
 import io.github.dendygrobovshik.kardman.types.Changelog
 import io.github.dendygrobovshik.kardman.types.PluginRelease
@@ -40,6 +42,10 @@ class RdmaStore(
     private val bundles = mutableMapOf<String, ByteArray>()
     private val gzipped = mutableMapOf<String, ByteArray>()
     private var totalLive = 0
+    private var index = PolyfillIndex()
+    // Live plugin versions seen by re-sync ("<pluginId>@<version>"), persisted in
+    // `versions/telemetry.json`: the usage the `R` retention policy reads (§7.3).
+    private val seen = mutableMapOf<String, LivePlugin>()
 
     /** Directory holding `changelog.json`, `plugins/` and `bundles/`; used by [reload]. */
     var versionsDir: File? = null
@@ -57,6 +63,31 @@ class RdmaStore(
             changelog = RdmaChangelog.read(changelogFile)
         }
         loadBundles(File(dir, "bundles"))
+        index = RdmaPolyfillIndex.read(dir)
+        File(dir, TELEMETRY_FILE).takeIf { it.isFile }?.let { f -> runCatching { seen.putAll(decodeTelemetry(f.readText())) } }
+    }
+
+    /** The polyfill index (normally read from `versions/polyfills.json` by [reload]). */
+    fun setPolyfillIndex(index: PolyfillIndex) {
+        this.index = index
+    }
+
+    /**
+     * The polyfill bundles [target] needs on host `(H, G)`, or null when the store does not have
+     * them (compatibility.md §8.2): for each kernel module the plugin uses that changed after
+     * `H` up to the kernel the plugin was built against, an `F` built at least that recently.
+     */
+    private fun fPolyfillsFor(target: PluginRelease, hostVersion: Int, hostGeneration: String): List<String>? {
+        val builtAgainst = target.contract.builtAgainstKernel
+        val keys = mutableListOf<String>()
+        for (module in target.contract.moduleDeps) {
+            val lastChange = RdmaChangelog.lastChange(changelog, module, builtAgainst)
+            if (lastChange <= hostVersion) continue
+            val ref = index.f[module]?.get(hostVersion.toString())?.get(hostGeneration) ?: return null
+            if (ref.version < lastChange) return null
+            keys += ref.hash
+        }
+        return keys
     }
 
     fun registerRelease(release: PluginRelease) {
@@ -108,7 +139,13 @@ class RdmaStore(
 
     fun resync(request: ResyncRequest, now: Instant = Instant.now()): ResyncResponse {
         val pluginReleases = releases[request.pluginId].orEmpty()
-        val target = RdmaStoreEngine.resolveNewest(pluginReleases, request.hostVersion, request.hostGeneration)
+        // The newest compatible version whose polyfills this host can get; a version that needs
+        // a polyfill the store does not have (not built for this host or generation) is skipped.
+        val target = pluginReleases
+            .filter { it.contract.minHost <= request.hostVersion }
+            .filter { request.hostGeneration.isBlank() || it.contract.builtAgainstToolchain == request.hostGeneration }
+            .sortedByDescending { it.contract.version }
+            .firstOrNull { fPolyfillsFor(it, request.hostVersion, request.hostGeneration) != null }
 
         val current = pluginReleases.firstOrNull { it.contract.version == request.version }
         fun rRetained(fqn: String): Boolean {
@@ -119,6 +156,7 @@ class RdmaStore(
         val state = current
             ?.let { RdmaStoreEngine.pluginState(changelog, it.contract.usedSymbols, ::rRetained) }
             ?: PluginState.CURRENT
+        current?.let { recordSeen(request.pluginId, request.version, it.contract.usedSymbols, now) }
         val severity = RdmaStoreEngine.severityFor(state)
 
         if (target == null) {
@@ -132,7 +170,8 @@ class RdmaStore(
             )
         }
 
-        val polyfills = polyfillKeys(target, request.hostVersion, request.hostGeneration, state)
+        val polyfills = fPolyfillsFor(target, request.hostVersion, request.hostGeneration).orEmpty() +
+            rPolyfills(target, request.hostGeneration, state)
 
         return when {
             state == PluginState.BROKEN -> ResyncResponse(
@@ -166,20 +205,57 @@ class RdmaStore(
         }
     }
 
-    private fun polyfillKeys(target: PluginRelease, hostVersion: Int, hostGeneration: String, state: PluginState): List<String> {
-        val keys = mutableListOf<String>()
-        val g = hostGeneration
-        for (module in target.contract.moduleDeps) {
-            keys += if (g.isBlank()) "F:$module:$hostVersion" else "F:$module:$hostVersion:$g"
-        }
-        if (state == PluginState.AT_RISK) {
-            for (module in target.contract.moduleDeps) {
-                keys += if (g.isBlank()) "R:$module" else "R:$module:$g"
-            }
-        }
-        return keys
+    /** `R` polyfills of the modules an at-risk plugin uses (every release that removed symbols). */
+    private fun rPolyfills(target: PluginRelease, hostGeneration: String, state: PluginState): List<String> {
+        if (state != PluginState.AT_RISK) return emptyList()
+        return target.contract.moduleDeps.flatMap { module -> index.r[module]?.get(hostGeneration).orEmpty().map { it.hash } }
     }
 
-    private fun usageFraction(fqn: String): Double =
-        if (totalLive == 0) 0.0 else (usageBySymbol[fqn] ?: 0).toDouble() / totalLive
+    private fun recordSeen(pluginId: String, version: Int, usedSymbols: List<String>, now: Instant) {
+        seen["$pluginId@$version"] = LivePlugin(now.toString(), usedSymbols.distinct())
+        val dir = versionsDir ?: return
+        runCatching { File(dir, TELEMETRY_FILE).writeText(encodeTelemetry(seen)) }
+    }
+
+    /**
+     * The share of live plugin versions using [fqn]: those seen by re-sync within the retention
+     * window, plus any recorded through [recordLive].
+     */
+    private fun usageFraction(fqn: String, now: Instant = Instant.now()): Double {
+        val cutoff = now.minus(java.time.Duration.ofDays(RdmaStoreEngine.RETENTION_DAYS))
+        val live = seen.values.filter { runCatching { Instant.parse(it.lastSeen) }.getOrNull()?.isAfter(cutoff) == true }
+        val total = totalLive + live.size
+        if (total == 0) return 0.0
+        return ((usageBySymbol[fqn] ?: 0) + live.count { fqn in it.usedSymbols }).toDouble() / total
+    }
+
+    private companion object {
+        const val TELEMETRY_FILE = "telemetry.json"
+
+        fun encodeTelemetry(seen: Map<String, LivePlugin>): String =
+            kotlinx.serialization.json.JsonObject(
+                seen.mapValues { (_, p) ->
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf(
+                            "lastSeen" to kotlinx.serialization.json.JsonPrimitive(p.lastSeen),
+                            "usedSymbols" to kotlinx.serialization.json.JsonArray(p.usedSymbols.map { kotlinx.serialization.json.JsonPrimitive(it) }),
+                        ),
+                    )
+                },
+            ).toString()
+
+        fun decodeTelemetry(text: String): Map<String, LivePlugin> {
+            val root = kotlinx.serialization.json.Json.parseToJsonElement(text) as kotlinx.serialization.json.JsonObject
+            return root.mapValues { (_, v) ->
+                val o = v as kotlinx.serialization.json.JsonObject
+                LivePlugin(
+                    (o["lastSeen"] as kotlinx.serialization.json.JsonPrimitive).content,
+                    (o["usedSymbols"] as kotlinx.serialization.json.JsonArray).map { (it as kotlinx.serialization.json.JsonPrimitive).content },
+                )
+            }
+        }
+    }
 }
+
+/** A plugin version seen by re-sync: when last, and the kernel symbols it uses. */
+data class LivePlugin(val lastSeen: String, val usedSymbols: List<String>)

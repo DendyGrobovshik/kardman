@@ -95,6 +95,8 @@ private fun downloadAndStage(key: String) {
     val file = File(dir, key.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".hbc")
     if (!file.isFile) {
         val bytes = download("$storeBaseUrl/bundle/$key") ?: return
+        // Bundles are content-addressed: the key is the hash (the demo has no signing keys).
+        if (!RdmaBridge.verifyBundle(bytes, key, null, emptyList())) return
         file.writeBytes(bytes)
     }
     RdmaBridge.stageUpdate(file.absolutePath)

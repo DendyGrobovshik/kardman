@@ -109,7 +109,8 @@ private fun downloadAndStage(keys: List<String>, onDone: () -> Unit) {
     val key = keys.firstOrNull() ?: return onDone()
     val file = storeCacheDir + key.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".hbc"
     downloadRaw("$storeBaseUrl/bundle/$key") { bytes ->
-        if (bytes != null) {
+        // Bundles are content-addressed: the key is the hash (the demo has no signing keys).
+        if (bytes != null && RdmaBridge.verifyBundle(bytes, key, null, emptyList())) {
             bytes.toNSData().writeToFile(file, atomically = true)
             RdmaBridge.stageUpdate(file)
         }

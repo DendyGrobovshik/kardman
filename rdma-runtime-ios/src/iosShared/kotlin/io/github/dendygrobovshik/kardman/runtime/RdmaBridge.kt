@@ -20,6 +20,13 @@ package io.github.dendygrobovshik.kardman.runtime
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_eval_bytes
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_eval_file
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_eval_files
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_verify_ed25519
+import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.allocArray
+import kotlinx.cinterop.get
+import kotlinx.cinterop.memScoped
+import platform.CoreCrypto.CC_SHA256
+import platform.CoreCrypto.CC_SHA256_DIGEST_LENGTH
 import kotlin.concurrent.AtomicReference
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_is_ready
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_content_version
@@ -94,6 +101,32 @@ object RdmaBridge {
         if (paths.isEmpty()) return false
         rdma_eval_files(paths.joinToString("\n"))
         return true
+    }
+
+    /**
+     * Checks a downloaded bundle before it is staged (compatibility.md §8.1): its SHA-256 is
+     * [hash] (bundles are content-addressed) and, when [trustedKeys] (raw 32-byte Ed25519 public
+     * keys) are given, [signature] is a valid signature of [hash] by one of them. A bundle that
+     * fails is never evaluated.
+     */
+    fun verifyBundle(bytes: ByteArray, hash: String, signature: ByteArray?, trustedKeys: List<ByteArray>): Boolean {
+        if (!sha256Hex(bytes).equals(hash, ignoreCase = true)) return false
+        if (trustedKeys.isEmpty()) return true
+        val sig = signature ?: return false
+        if (sig.size != 64) return false
+        val message = hash.lowercase().encodeToByteArray()
+        return trustedKeys.any { key ->
+            key.size == 32 && message.usePinned { m -> sig.usePinned { s -> key.usePinned { k ->
+                rdma_verify_ed25519(m.addressOf(0), message.size, s.addressOf(0), k.addressOf(0)) == 1
+            } } }
+        }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String = memScoped {
+        val digest = allocArray<UByteVar>(CC_SHA256_DIGEST_LENGTH)
+        if (bytes.isEmpty()) CC_SHA256(null, 0u, digest)
+        else bytes.usePinned { CC_SHA256(it.addressOf(0), bytes.size.toUInt(), digest) }
+        (0 until CC_SHA256_DIGEST_LENGTH).joinToString("") { digest[it].toString(16).padStart(2, '0') }
     }
 
     /**

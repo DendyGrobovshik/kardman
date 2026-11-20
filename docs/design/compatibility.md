@@ -48,6 +48,11 @@ One shared file for the whole kernel, next to `build.gradle.kts`. Append-only JS
                "com.example.kernel.baz": { "kind": "remove" } } }
 ```
 
+Each entry also records its release `type`: `static`, `dynamic` or `hotfix`. Static entries are
+the versions apps are built with — the **host versions**; a static release with nothing new
+still writes an entry (without changes), so every host version is known. The supported hosts
+are the static versions from `kernel.oldestActiveKernel` on.
+
 - **Only CI writes the changelog**, at merge time, never a developer locally. CI is the single writer: it allocates the next version number and appends the entry. Git serializes through the merge queue, so there is no double bump and no manual corruption; no conflict auto-resolution is needed — there is no conflict.
 - The changelog describes the addition, change and removal of declarations, along with their hashes.
 - **Tombstone**: a `remove` entry "buries" the FQN forever. Re-adding the same FQN is a **build error**. The per-FQN history is monotonic, so the `R` polyfill is always unambiguous and an old plugin can never pick up a new symbol with the same signature but different semantics.
@@ -361,15 +366,27 @@ Soft mandatory: while the symbol is in `R`, the client works and receives a noti
 
 ### 8.1 Artifacts (all pre-built, static store)
 
-- **`F(module, H, G)`** — symbols of the module added+changed after `H`, in current versions. Key `(module, H, G)`, shared by all plugins on the host.
-- **`R(module, G)`** — removed symbols (re-provide). Key `(module, G)`, shared.
+- **`F(module, H, G)`** — the module's symbols added or changed after `H`, in current versions,
+  built for toolchain generation `G`. Built for every supported host, **once per distinct native
+  state** of the module: hosts whose native code of the module is the same share one bundle.
+- **`R(module, G)`** — removed symbols (re-provide); one bundle per release that removed symbols,
+  all of them served.
 - **plugin bundle** — the code of a specific plugin.
 
-Resolution is done by CI at release; the app downloads by deterministic links. Consistency is a shared "snapshot" of the release (one symbol = one implementation).
+Every bundle is **content-addressed** — stored under the hash of its content, immutable, so
+caches and CDNs never serve a stale one — with a gzip copy made at release time and, when the
+release has a signing key, an Ed25519 signature of the hash. `polyfills.json` says which bundle
+serves which `(module, H, G)` and which `R` bundles a module has; it is written at the release's
+commit point, after every bundle it names is in the store. Apps carry the trusted public keys
+and check the hash and the signature of every downloaded bundle before staging it.
 
 ### 8.2 Reconciliation protocol (re-sync)
 
-The client keeps `(id → version)` of loaded plugins and reconciles: **on screen open** and **periodically** (e.g. once a minute) it sends the store `(id, version, builtAgainstKernel, hostVersion, hostGeneration)`. For each `id` the store resolves the **newest version with `minHost ≤ H` and `builtAgainstToolchain == G`**:
+The client keeps `(id → version)` of loaded plugins and reconciles: **on screen open** and **periodically** (e.g. once a minute) it sends the store `(id, version, builtAgainstKernel, hostVersion, hostGeneration)`. For each `id` the store resolves the **newest version with `minHost ≤ H` and
+`builtAgainstToolchain == G` whose polyfills it has**: a version needs `F(module, H, G)` for
+each module it uses that changed after `H` up to the kernel the version was built against, and
+that `F` must be at least that recent (`polyfills.json`). A version whose polyfill is missing —
+not built for this host or generation — is skipped, so a host never gets a plugin it cannot run. Then:
 
 - no such version → the plugin is **unavailable** on this host;
 - the newest compatible is newer than the current → the store replies "here's the right version + hash + polyfills + severity";
@@ -412,7 +429,17 @@ stages polyfills before the plugins that need them.
   - plugin + kernel → both atomically (one bump for the kernel part).
 - **`release-static`** — bake the accumulated changes into the native: bump the counter + move `H` (a heavy, rare operation; app rebuild).
 
-**Release order** (protection against a half-done state): first **build → checks → tests**, and only after success — writing the changelog. The write is the commit point; any error before it writes nothing.
+**Release order** (protection against a half-done state): **tests → prepare → build → contract
+tests → commit**. *Prepare* runs every check and writes the polyfill sources and the release
+plan to a work directory; *build* compiles each polyfill for every live generation (a generation
+whose toolchain is not available is `blocked` and keeps its previous polyfills); *contract
+tests* (§10) run the kernel's tests against the native code and each polyfill; *commit*
+publishes the bundles, then writes `polyfills.json` and the changelog. The changelog write is
+the commit point; any error before it writes nothing.
+
+A **static release** of a module also brings its changes to the older supported hosts as
+polyfills, per native-state group, where they can be delivered; a group that cannot receive
+them gets no new `F`, and §8.2 keeps serving it the plugin versions that do not need it.
 
 **`release-dynamic` is all or nothing.** Every check runs first — signatures (§5.6),
 hotfixability (§6.4), emulatability (§5.2), structure changes (§6.7), state splits (§6.6),
@@ -432,7 +459,11 @@ is never raised by a release at all (§5.3).
 
 Tests for `@RDMA` functionality are a **hard gate** on `release-dynamic`/`release-static`. They are the **symbol's contract** and verify that the **public API hasn't changed** (signatures and semantics at the boundary).
 
-- **Contract across all implementations**: the same test suite must be passed by the native, the auto-polyfill and the manual polyfill (the native refined semantics → a test appeared → it runs for the polyfills automatically).
+- **Contract across all implementations**: the same test suite must be passed by the native, the
+  auto-polyfill and the manual polyfill. The kernel's `commonTest` runs as the app's instrumented
+  tests on an emulator: once against the native code, then once per prepared `F` with it loaded
+  (kernel calls of the polyfilled functions run in JS through their slots). A failure rejects
+  the release. Classes added after a host are checked natively only.
 - **Differential runs**: a matrix `(native | polyfill) × (old kernel | new) × (plugin versions)` to verify no regressions when versions update and new polyfills appear.
 - **Screenshot tests** for UI — behavior across combinations is compared visually.
 

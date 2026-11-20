@@ -57,6 +57,10 @@ PLUG_JSON="$ROOT_DIR/tests/stand/plugin/itest/newplug/build/generated/rdma/plugi
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo; echo "==== $* ===="; }
 
+# Bundles are signed with the e2e test key; the stand app trusts its public key (rdma.toml).
+RDMA_SIGNING_KEY="$(grep -v '^#' "$ROOT_DIR/tests/rdma-integration-tests/signing/test-signing-key.txt")"
+export RDMA_SIGNING_KEY
+
 run_gradle() { "$GRADLE" -p "$ROOT_DIR" --console=plain -PrdmaVersionsDir="$VERSIONS_DIR" "$@"; }
 
 adb_dev() { adb devices | grep -q 'emulator-.*\sdevice' || fail "no emulator attached"; }

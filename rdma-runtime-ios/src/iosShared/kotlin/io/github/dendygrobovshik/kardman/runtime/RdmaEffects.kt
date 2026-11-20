@@ -16,6 +16,7 @@
 package io.github.dendygrobovshik.kardman.runtime
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.NonSkippableComposable
 import androidx.compose.runtime.RememberObserver
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
@@ -26,7 +27,11 @@ import androidx.compose.runtime.remember
  * [blockId] is invoked after every successful composition through the standard
  * callback channel.
  */
+// Never skipped: a plugin's effect block is often the same remembered lambda (it captures
+// nothing), so a skippable call would run the effect only on the first composition, while
+// `SideEffect` runs after every successful composition.
 @Composable
+@NonSkippableComposable
 fun sideEffect(blockId: Long) {
     // The composition holds the block while this call site keeps it (runtime_rework §4).
     val ref = rdmaRememberBlock(blockId)

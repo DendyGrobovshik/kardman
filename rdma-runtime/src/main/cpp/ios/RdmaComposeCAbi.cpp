@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "RdmaSignature.h"
 #include "RdmaComposeCAbi.h"
 #include "RdmaComposerProxy.h"
 #include "RdmaRuntime.h"
@@ -1609,6 +1610,11 @@ void rdma_eval_files(const char* newlineSeparatedPaths) {
         start = end + 1;
     }
     facebook::rdma::rdmaEvalFiles(paths);
+}
+
+int32_t rdma_verify_ed25519(const void* message, int32_t length, const void* signature, const void* publicKey) {
+    if (length < 0) return 0;
+    return facebook::rdma::rdmaVerifyEd25519((const uint8_t*)message, (size_t)length, (const uint8_t*)signature, (const uint8_t*)publicKey) ? 1 : 0;
 }
 
 int32_t rdma_content_version(void) {

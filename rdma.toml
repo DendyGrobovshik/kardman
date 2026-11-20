@@ -24,3 +24,7 @@ oldestActiveGeneration = "g1"
 
 [hermes]
 path = "third_party/bin/hermesc"
+
+[signing]
+# The stand trusts only the e2e test key (tests/rdma-integration-tests/signing/test-signing-key.txt).
+publicKeys = ["EYE7Wqetv1AxEQ9P5kPQsU00Rp/5CmGWipknzOYEKNs="]

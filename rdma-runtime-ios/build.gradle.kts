@@ -63,6 +63,9 @@ kotlin {
             "common/RdmaProxyCore.cpp",
             "common/RdmaBlocks.cpp",
             "common/RdmaIdentity.cpp",
+            "common/RdmaSignature.cpp",
+            "common/RdmaMonocypher.cpp",
+            "common/RdmaMonocypherEd25519.cpp",
             "ios/generated/RdmaComposerProxy.cpp",
         )
         val includeDirs = listOf(

@@ -1,0 +1,3 @@
+# TEST ONLY — the private Ed25519 key the e2e scenarios sign bundles with (RDMA_SIGNING_KEY).
+# Never use it for a real app: anyone can sign with it. Its public key is in rdma.toml [signing].
+MC4CAQAwBQYDK2VwBCIEIL9skWNkxKenKtPl0L/M5BU6sEoJoqprTxgTTKeGKkao

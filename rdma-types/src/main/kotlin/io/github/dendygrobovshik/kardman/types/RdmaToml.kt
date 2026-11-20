@@ -78,6 +78,9 @@ object RdmaToml {
             hermes = HermesConfig(
                 path = str("hermes.path"),
             ),
+            signing = SigningConfig(
+                publicKeys = arr("signing.publicKeys"),
+            ),
         )
     }
 

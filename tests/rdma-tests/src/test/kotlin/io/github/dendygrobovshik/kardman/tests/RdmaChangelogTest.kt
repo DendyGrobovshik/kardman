@@ -65,7 +65,7 @@ class RdmaChangelogTest {
     }
 
     @Test
-    fun `bake advances H to the latest version without adding an entry`() {
+    fun `bake records a static entry and moves H to it`() {
         val c = Changelog(
             h = 1,
             entries = listOf(
@@ -73,9 +73,12 @@ class RdmaChangelogTest {
                 entry(2, "m", "b" to ChangelogChangeKind.ADD),
             ),
         )
-        val baked = RdmaChangelog.bake(c)
-        assertEquals(2, baked.h)
-        assertEquals(2, baked.entries.size)
+        val baked = RdmaChangelog.bake(c, "m")
+        // A static release with nothing new still records its version as a host.
+        assertEquals(3, baked.h)
+        assertEquals(3, baked.entries.size)
+        assertEquals(io.github.dendygrobovshik.kardman.types.ReleaseType.STATIC, baked.entries.last().type)
+        assertEquals(listOf(3), RdmaChangelog.hosts(baked, null))
     }
 
     // --- fold / manifest -----------------------------------------------------

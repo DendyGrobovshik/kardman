@@ -20,7 +20,9 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import com.example.kernel.internal.StyleProbe
 import com.example.kernel.internal.Text
+import com.example.kernel.internal.styleProbe
 import com.example.kernel.internal.registerComponent
 import com.example.kernel.internal.services.TextBox
 
@@ -30,6 +32,11 @@ fun main() {
     registerComponent("card") { title: String, count: Int -> Card(title, count) }
     // A kernel object argument: a new object from the host must reach the live content.
     registerComponent("box") { box: TextBox -> BoxCard(box) }
+    // A String parameter handed straight to a kernel widget (second field report).
+    registerComponent("plain") { s: String ->
+        StyleProbe("plain", 1L, subtitle = s)
+        SideEffect { println("PLAIN: ${styleProbe("plain")}") }
+    }
     registerComponent("modifiers") { ModifiersDemo() }
     registerComponent("keys") { KeysDemo() }
     runServicesDemo()

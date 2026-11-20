@@ -15,6 +15,7 @@
  */
 package org.example
 
+import com.example.kernel.RdmaHost
 import com.example.kernel.internal.services.TextBox
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -55,8 +56,8 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val pluginId = intent?.getStringExtra(EXTRA_PLUGIN_ID) ?: return
             val version = intent.getIntExtra(EXTRA_VERSION, knownPlugins[pluginId] ?: 1)
-            val builtAgainst = intent.getIntExtra(EXTRA_BUILT_AGAINST, DEMO_HOST_VERSION)
-            val hostGeneration = intent.getStringExtra(EXTRA_HOST_GENERATION) ?: ""
+            val builtAgainst = intent.getIntExtra(EXTRA_BUILT_AGAINST, RdmaHost.VERSION)
+            val hostGeneration = intent.getStringExtra(EXTRA_HOST_GENERATION) ?: RdmaHost.GENERATION
             Log.i("RDMA", "re-sync requested for $pluginId v$version (builtAgainst=$builtAgainst, generation=$hostGeneration)")
             knownPlugins[pluginId] = version
             syncPlugins(listOf(Triple(pluginId, version, builtAgainst)), hostGeneration)
@@ -111,11 +112,13 @@ class MainActivity : ComponentActivity() {
             // A component argument that changes after the first composition must reach the plugin.
             var live by remember { mutableStateOf(0) }
             var liveBox by remember { mutableStateOf(TextBox("one")) }
+            var liveTitle by remember { mutableStateOf("s1") }
             LaunchedEffect(ready) {
                 if (ready) {
                     delay(1500)
                     live = 5
                     liveBox = TextBox("two")
+                    liveTitle = "s2"
                 }
             }
             LaunchedEffect(Unit) {
@@ -144,6 +147,8 @@ class MainActivity : ComponentActivity() {
                         RdmaComposeHost.Component("bob:services/card", "b", 2)
                         RdmaComposeHost.Component("bob:services/card", "c", live)
                         RdmaComposeHost.Component("bob:services/box", liveBox)
+                        RdmaComposeHost.Component("bob:services/card", liveTitle, 7)
+                        RdmaComposeHost.Component("bob:services/plain", liveTitle)
                         RdmaComposeHost.Component("bob:services/modifiers")
                         RdmaComposeHost.Component("bob:services/keys")
                     }
@@ -155,7 +160,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         // "Screen opened" re-sync (§8.2): drive every known plugin toward its newest version.
-        val plugins = knownPlugins.map { (id, version) -> Triple(id, version, DEMO_HOST_VERSION) }
+        val plugins = knownPlugins.map { (id, version) -> Triple(id, version, RdmaHost.VERSION) }
         syncPlugins(plugins)
     }
 
@@ -207,7 +212,7 @@ class MainActivity : ComponentActivity() {
     private fun syncPlugins(plugins: List<Triple<String, Int, Int>>, hostGeneration: String = "") {
         if (plugins.isEmpty()) return
         val client = RdmaSyncClient(STORE_URL)
-        val hostVersion = DEMO_HOST_VERSION
+        val hostVersion = RdmaHost.VERSION
         Thread {
             try {
                 while (!RdmaBridge.nativeIsReady()) Thread.sleep(16)
@@ -218,7 +223,7 @@ class MainActivity : ComponentActivity() {
                         ResyncStatus.UPDATE -> {
                             // Polyfills first: the new plugin version may call what they add.
                             updated += stagePolyfills(client, resp.polyfills)
-                            resp.bundleHash?.let { h -> client.download(h)?.let { stage(h, it) } }
+                            resp.bundleHash?.let { h -> client.download(h)?.let { stage(client, h, it) } }
                             knownPlugins[id] = resp.targetVersion
                             updated += "updated $id -> v${resp.targetVersion}"
                         }
@@ -250,29 +255,34 @@ class MainActivity : ComponentActivity() {
     private fun stagePolyfills(client: RdmaSyncClient, keys: List<String>): List<String> =
         keys.mapNotNull { key ->
             client.download(key)?.let { bytes ->
-                stage(key, bytes)
+                stage(client, key, bytes)
                 "polyfill $key evaluated"
             }
         }
 
     /**
-     * Caches a downloaded bundle to `cacheDir/rdma/<key>.hbc` (content-addressed for plugins, so
-     * a repeated download is skipped) and stages it for the next update point.
+     * Checks a downloaded bundle — its hash is its key, and it is signed by a trusted key when
+     * the app has any (`RdmaHost.PUBLIC_KEYS`) — then caches it to `cacheDir/rdma/<hash>.hbc`
+     * (content-addressed, so a repeated download is skipped) and stages it for the next update
+     * point. A bundle that fails the check is dropped.
      */
-    private fun stage(key: String, bytes: ByteArray) {
+    private fun stage(client: RdmaSyncClient, key: String, bytes: ByteArray) {
+        val trusted = RdmaHost.PUBLIC_KEYS.map { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) }
+        val signature = if (trusted.isEmpty()) null else client.download("$key.sig")
+        if (!RdmaBridge.verifyBundle(bytes, key, signature, trusted)) {
+            Log.i("RDMA", "rejected bundle $key (hash or signature check failed)")
+            return
+        }
         val dir = File(cacheDir, "rdma")
         if (!dir.isDirectory) dir.mkdirs()
-        val file = File(dir, key.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".hbc")
-        if (!file.isFile || key.contains(':')) file.writeBytes(bytes)
+        val file = File(dir, "$key.hbc")
+        if (!file.isFile) file.writeBytes(bytes)
         RdmaBridge.stageUpdate(file.absolutePath)
     }
 
     private companion object {
         // Emulator loopback to the host's localhost.
         const val STORE_URL = "http://10.0.2.2:8080"
-        // The kernel native version (`h`) baked by the initial static release in the
-        // integration test's step 0 (internal + user:alice).
-        const val DEMO_HOST_VERSION = 2
         const val RESYNC_ACTION = "org.example.rdma.RESYNC"
         const val BLOCKS_ACTION = "org.example.rdma.BLOCKS"
         const val EXTRA_PLUGIN_ID = "pluginId"

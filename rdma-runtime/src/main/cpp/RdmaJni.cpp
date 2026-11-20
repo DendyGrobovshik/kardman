@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <vector>
+#include "RdmaSignature.h"
 #include <jni.h>
 #include <string>
 #include <android/log.h>
@@ -140,6 +142,19 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalFiles(JNIEnv
         env->DeleteLocalRef(js);
     }
     facebook::rdma::rdmaEvalFiles(paths);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeVerifyEd25519(
+    JNIEnv* env, jclass, jbyteArray message, jbyteArray signature, jbyteArray publicKey) {
+    if (!message || !signature || !publicKey) return JNI_FALSE;
+    if (env->GetArrayLength(signature) != 64 || env->GetArrayLength(publicKey) != 32) return JNI_FALSE;
+    jsize len = env->GetArrayLength(message);
+    std::vector<uint8_t> msg((size_t)len), sig(64), pub(32);
+    if (len > 0) env->GetByteArrayRegion(message, 0, len, reinterpret_cast<jbyte*>(msg.data()));
+    env->GetByteArrayRegion(signature, 0, 64, reinterpret_cast<jbyte*>(sig.data()));
+    env->GetByteArrayRegion(publicKey, 0, 32, reinterpret_cast<jbyte*>(pub.data()));
+    return facebook::rdma::rdmaVerifyEd25519(msg.data(), msg.size(), sig.data(), pub.data()) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

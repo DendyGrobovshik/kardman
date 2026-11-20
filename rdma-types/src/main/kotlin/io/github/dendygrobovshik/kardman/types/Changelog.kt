@@ -51,9 +51,20 @@ data class ChangelogChange(
     val symbolKind: RdmaSymbolKind? = null,
 )
 
+/** The kind of release that wrote a changelog entry. */
+@Serializable
+enum class ReleaseType {
+    /** Baked into an app build: its version is a host version `H`. */
+    @SerialName("static") STATIC,
+    @SerialName("dynamic") DYNAMIC,
+    @SerialName("hotfix") HOTFIX,
+}
+
 /**
  * A single append-only changelog entry: one kernel release = one globally monotonic [version].
- * [time] is written as a safety net by the release tooling (only CI appends entries).
+ * [time] is written as a safety net by the release tooling (only CI appends entries). [type]
+ * tells static releases — the versions apps are built with — from dynamic ones; a static
+ * release with nothing new still writes an entry (without changes) so its version is known.
  */
 @Serializable
 data class ChangelogEntry(
@@ -61,6 +72,7 @@ data class ChangelogEntry(
     val time: String,
     val module: String,
     val changes: List<ChangelogChange> = emptyList(),
+    val type: ReleaseType = ReleaseType.DYNAMIC,
 )
 
 /**

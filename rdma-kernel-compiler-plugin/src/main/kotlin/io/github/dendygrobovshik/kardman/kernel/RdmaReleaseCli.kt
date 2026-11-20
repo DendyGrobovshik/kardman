@@ -19,6 +19,10 @@ import io.github.dendygrobovshik.kardman.types.Changelog
 import io.github.dendygrobovshik.kardman.types.ChangelogChange
 import io.github.dendygrobovshik.kardman.types.ChangelogChangeKind
 import io.github.dendygrobovshik.kardman.types.PluginRelease
+import io.github.dendygrobovshik.kardman.types.PolyfillRef
+import io.github.dendygrobovshik.kardman.types.ReleaseFPlan
+import io.github.dendygrobovshik.kardman.types.ReleasePlan
+import io.github.dendygrobovshik.kardman.types.ReleaseType
 import io.github.dendygrobovshik.kardman.types.RdmaAnalysis
 import io.github.dendygrobovshik.kardman.types.RdmaPluginContract
 import io.github.dendygrobovshik.kardman.types.RdmaSymbolKind
@@ -71,129 +75,220 @@ object RdmaReleaseCli {
             return
         }
 
+        if (command == "commit-release") {
+            commitRelease(args)
+            return
+        }
+        if (command == "generate-signing-key") {
+            val (privateKey, publicKey) = RdmaBundleFiles.generateKeyPair()
+            println("RDMA_SIGNING_KEY (keep secret, CI only):\n$privateKey")
+            println("public key (rdma.toml [signing] publicKeys):\n$publicKey")
+            return
+        }
+
         val analysisPath = args.getOrNull(1)
         val versionsDir = args.getOrNull(2)?.let(::File)
-        if (command == null || analysisPath == null || versionsDir == null) {
-            System.err.println("usage: (static-release|dynamic-release|hotfix-release) <analysis.json> <versionsDir> <polyfillOutDir> <internalModules> [telemetryFile]")
+        if (command !in setOf("static-release", "dynamic-release", "hotfix-release") || analysisPath == null || versionsDir == null) {
+            System.err.println(
+                "usage: (static-release|dynamic-release|hotfix-release) <analysis.json[,analysis.json]> <versionsDir> <workDir> <internalModules> [telemetryFile] [--dry-run]\n" +
+                    "       commit-release <workDir> <versionsDir>",
+            )
             kotlin.system.exitProcess(2)
         }
-        val analysis = json.decodeFromString(RdmaAnalysis.serializer(), File(analysisPath).readText())
-        val polyfillOutDir = args.getOrNull(3)?.let { it.trim().takeIf(String::isNotEmpty)?.let(::File) } ?: File("build/polyfill")
+        // One analysis per platform (android, ios): a change on either platform is a change.
+        val analysis = RdmaAnalysisMerge.merge(
+            analysisPath.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                .map { json.decodeFromString(RdmaAnalysis.serializer(), File(it).readText()) },
+        )
+        val workDir = args.getOrNull(3)?.let { it.trim().takeIf(String::isNotEmpty)?.let(::File) } ?: File("build/rdma-release")
         val internalModules = args.getOrNull(4)
             ?.split(',')
             ?.map { it.trim() }
             ?.filter { it.isNotEmpty() }
             ?.toSet()
             ?: setOf("internal")
-        val telemetryFile = args.getOrNull(5)?.let { it.trim().takeIf(String::isNotEmpty)?.let(::File) }
+        val telemetryFile = args.getOrNull(5)?.trim()?.takeIf { it.isNotEmpty() && !it.startsWith("--") }?.let(::File)
         val hostVersions = telemetryFile?.let(::readHostVersions).orEmpty()
-
-        val changelogFile = File(versionsDir, "changelog.json")
-        val changelog = if (changelogFile.isFile) RdmaChangelog.read(changelogFile) else Changelog()
-        val hotfix = command == "hotfix-release"
-        val oldestActiveKernel = RdmaToml.load(resolveRdmaConfigFile(args)).kernel.oldestActiveKernel
-
-        when (command) {
-            "static-release" -> {
-                // Diff against the changelog *head* (latestVersion), not the baked `H`: changes
-                // already recorded by prior dynamic-releases must not be re-added. With new
-                // changes → append + bump H; with none → just bake (advance H to the latest).
-                val prev = RdmaChangelog.manifest(changelog, analysis.moduleId, RdmaChangelog.latestVersion(changelog))
-                val changes = RdmaChangelog.changes(analysis, prev)
-                if (args.contains("--dry-run")) {
-                    println("Dry run: a static release would record ${changes.size} change(s) and move H " +
-                        "(${changes.joinToString { "${it.kind.name.lowercase()} ${it.fqn}" }.ifEmpty { "bake only" }}). Nothing was written.")
-                    return
-                }
-                if (changes.isEmpty()) {
-                    val baked = RdmaChangelog.bake(changelog)
-                    if (baked.h != changelog.h) {
-                        RdmaChangelog.write(changelogFile, baked)
-                        println("No new kernel changes; advanced H to ${baked.h} (baked accumulated changes).")
-                    } else {
-                        println("No kernel changes; changelog and H untouched (H=${changelog.h}).")
-                    }
-                    return
-                }
-                checkRemoval(changelog, analysis, changes, internalModules, polyfillOutDir, versionsDir)
-                checkSignature(analysis, versionsDir)
-                val updated = RdmaChangelog.append(changelog, analysis.moduleId, changes, bumpH = true)
-                gate(updated, analysis, hostVersions, hotfix = false, minHostBefore = RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)), oldestActiveKernel = oldestActiveKernel)
-                RdmaChangelog.write(changelogFile, updated)
-                val derived = RdmaBaseline.write(analysis, versionsDir)
-                println("Bumped counter to v${updated.h} (H moved). Wrote ${changelogFile.path}")
-                println("Derived native state: ${derived.path}")
-                writeSnapshots(updated, analysis, versionsDir)
-            }
-
-            "dynamic-release", "hotfix-release" -> {
-                // All or nothing (compatibility.md §9): every check runs first and the problems
-                // are reported together; one problem rejects the whole release, so a part of a
-                // change never ships without the rest. `--dry-run` stops after the checks.
-                val dryRun = args.contains("--dry-run")
-                val native = RdmaChangelog.nativeState(changelog, analysis.moduleId)
-                val dirty = RdmaHashDiff.diff(analysis.declarations, native)
-                val result = RdmaSubgraph.compute(analysis, dirty)
-
-                println("added:   ${dirty.added.sorted().joinToString()}")
-                println("removed: ${dirty.removed.sorted().joinToString()}")
-                println("changed: ${dirty.changed.sorted().joinToString()}")
-                println("entries: ${result.entries.sorted().joinToString()}")
-                println("nodes:   ${result.nodes.sorted().joinToString()}")
-
-                val prev = RdmaChangelog.manifest(changelog, analysis.moduleId, RdmaChangelog.latestVersion(changelog))
-                val changes = RdmaChangelog.changes(analysis, prev)
-                val appended = if (changes.isEmpty()) null else RdmaChangelog.append(changelog, analysis.moduleId, changes, bumpH = false)
-
-                val problems = mutableListOf<String>()
-                problems += signatureErrors(analysis, versionsDir)
-                problems += hotfixErrors(analysis, dirty, result)
-                problems += nonEmulatableErrors(analysis, result)
-                problems += RdmaStateSplit.detect(analysis, dirty, result).map { it.message() }
-                if (appended != null) {
-                    problems += removalErrors(changelog, analysis, changes, internalModules)
-                    problems += gateErrors(appended, analysis, hotfix, RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)))
-                }
-                if (problems.isNotEmpty()) {
-                    reject(problems, result.entries)
-                }
-                if (dryRun) {
-                    println("Dry run: no problems; the release would ship ${result.entries.sorted().joinToString().ifEmpty { "no polyfill" }}. Nothing was written.")
-                    return
-                }
-
-                val files = RdmaPolyfillMaterializer.materialize(analysis, result)
-                if (files.isEmpty()) {
-                    println("No F polyfill to emit.")
-                } else {
-                    polyfillOutDir.mkdirs()
-                    for (file in files) {
-                        val target = File(polyfillOutDir, file.name)
-                        target.writeText(file.content)
-                        println("Wrote ${target.path}")
-                    }
-                }
-
-                // Commit point: append the changelog entry (counter bump, H unchanged).
-                val updated = if (appended == null) {
-                    println("No kernel changes; changelog untouched (H=${changelog.h}).")
-                    changelog
-                } else {
-                    checkRemoval(changelog, analysis, changes, internalModules, polyfillOutDir, versionsDir)
-                    gate(appended, analysis, hostVersions, hotfix = false, RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)), oldestActiveKernel = oldestActiveKernel)
-                    RdmaChangelog.write(changelogFile, appended)
-                    println("Bumped counter to v${RdmaChangelog.latestVersion(appended)} (H=${appended.h}). Wrote ${changelogFile.path}")
-                    appended
-                }
-                writeSnapshots(updated, analysis, versionsDir)
-            }
-
-            else -> {
-                System.err.println("unknown command: $command")
-                kotlin.system.exitProcess(2)
-            }
-        }
+        val config = RdmaToml.load(resolveRdmaConfigFile(args))
+        prepareRelease(
+            command = command!!,
+            analysisPath = analysisPath,
+            analysis = analysis,
+            versionsDir = versionsDir,
+            workDir = workDir,
+            internalModules = internalModules,
+            hostVersions = hostVersions,
+            oldestActiveKernel = config.kernel.oldestActiveKernel,
+            generations = RdmaToolchain.liveGenerations(RdmaToolchain.read(versionsDir), config.toolchain.oldestActiveGeneration).map { it.g },
+            dryRun = args.contains("--dry-run"),
+        )
     }
+
+    /**
+     * Prepares a kernel release (compatibility.md §9): runs every check and writes, into
+     * [workDir] only, the polyfill sources to build and `plan.json` — the changelog entry, which
+     * hosts each `F` serves, the generations to build for. `versions/` does not change; after
+     * the bundles are built (and tested), `commit-release` publishes them and writes the
+     * changelog — the commit point.
+     *
+     * `F` is prepared for every supported host `H` (`RdmaChangelog.hosts`) whose native state of
+     * the module differs from the new code, once per distinct native state: hosts sharing a
+     * state share a bundle. A dynamic release is all or nothing across hosts. A static release
+     * delivers its changes to older hosts only where they can be delivered; a host group whose
+     * changes cannot gets no new `F`, and the store keeps serving it plugins that do not need it.
+     */
+    private fun prepareRelease(
+        command: String,
+        analysisPath: String,
+        analysis: RdmaAnalysis,
+        versionsDir: File,
+        workDir: File,
+        internalModules: Set<String>,
+        hostVersions: List<Int>,
+        oldestActiveKernel: Int?,
+        generations: List<String>,
+        dryRun: Boolean,
+    ) {
+        val module = analysis.moduleId
+        val changelog = File(versionsDir, "changelog.json").let { if (it.isFile) RdmaChangelog.read(it) else Changelog() }
+        val static = command == "static-release"
+        val hotfix = command == "hotfix-release"
+
+        // Changes are diffed against the changelog head: changes already recorded by earlier
+        // releases are not recorded again.
+        val head = RdmaChangelog.manifest(changelog, module, RdmaChangelog.latestVersion(changelog))
+        val changes = RdmaChangelog.changes(analysis, head)
+        val pending = when {
+            changes.isNotEmpty() -> RdmaChangelog.append(
+                changelog, module, changes, bumpH = static,
+                type = when { static -> ReleaseType.STATIC; hotfix -> ReleaseType.HOTFIX; else -> ReleaseType.DYNAMIC },
+            )
+            static -> RdmaChangelog.bake(changelog, module)
+            else -> changelog
+        }
+
+        val problems = mutableListOf<String>()
+        problems += signatureErrors(analysis, versionsDir)
+        if (changes.isNotEmpty()) {
+            problems += removalErrors(changelog, analysis, changes, internalModules)
+            problems += gateErrors(pending, analysis, hotfix, RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)))
+        }
+
+        // F: one per distinct native state of the module among the supported hosts.
+        val hosts = RdmaChangelog.hosts(pending, oldestActiveKernel)
+        val byState = hosts.groupBy { RdmaChangelog.manifest(pending, module, it) }
+        data class Group(val hosts: List<Int>, val dirty: RdmaDirtySet, val result: PolyfillResult, val problems: List<String>)
+        val groups = byState.mapNotNull { (native, groupHosts) ->
+            val dirty = RdmaHashDiff.diff(analysis.declarations, native)
+            val result = RdmaSubgraph.compute(analysis, dirty)
+            if (result.isEmpty) return@mapNotNull null
+            val groupProblems = hotfixErrors(analysis, dirty, result) +
+                nonEmulatableErrors(analysis, result) +
+                RdmaStateSplit.detect(analysis, dirty, result).map { it.message() }
+            Group(groupHosts, dirty, result, groupProblems)
+        }
+        for (g in groups) {
+            println("hosts ${g.hosts.joinToString()}: entries ${g.result.entries.sorted().joinToString()}")
+        }
+        val deliverable = if (static) {
+            groups.filter { g ->
+                g.problems.isEmpty().also { ok ->
+                    if (!ok) println("NOT DELIVERED to hosts ${g.hosts.joinToString()} (they keep their native version; plugins needing it are not served there): ${g.problems.joinToString("; ")}")
+                }
+            }
+        } else {
+            groups.forEach { g -> problems += g.problems.map { "[hosts ${g.hosts.joinToString()}] $it" } }
+            groups
+        }
+        if (problems.isNotEmpty()) {
+            reject(problems.distinct(), groups.flatMap { it.result.entries }.toSet())
+        }
+        if (dryRun) {
+            println(
+                "Dry run: no problems. The release would record ${changes.size} change(s)" +
+                    (if (static) " and move H" else "") +
+                    " and build F for hosts ${deliverable.joinToString("; ") { it.hosts.joinToString(",") }.ifEmpty { "none" }}. Nothing was written.",
+            )
+            return
+        }
+
+        workDir.deleteRecursively()
+        workDir.mkdirs()
+        val fPlans = deliverable.map { g ->
+            val state = RdmaContentHasher.sha256(byState.entries.first { it.value == g.hosts }.key.toSortedMap().toString()).take(16)
+            val dir = File(workDir, "F/$state").apply { mkdirs() }
+            for (file in RdmaPolyfillMaterializer.materialize(analysis, g.result)) File(dir, file.name).writeText(file.content)
+            ReleaseFPlan(state, g.hosts, dir.path)
+        }
+        val rDir = File(workDir, "R")
+        if (changes.isNotEmpty()) checkRemoval(changelog, analysis, changes, internalModules, rDir, versionsDir)
+        if (changes.isNotEmpty()) {
+            gate(pending, analysis, hostVersions, hotfix = false, RdmaReleaseGates.minHostOf(RdmaFloor.compute(changelog, analysis)), oldestActiveKernel)
+        }
+        val plan = ReleasePlan(
+            module = module,
+            command = command,
+            analysis = analysisPath,
+            changelog = pending,
+            version = RdmaChangelog.latestVersion(pending),
+            generations = generations.ifEmpty { listOf("") },
+            f = fPlans,
+            rDir = rDir.takeIf { d -> d.listFiles { f -> f.extension == "kt" }?.isNotEmpty() == true }?.path,
+        )
+        File(workDir, "plan.json").writeText(prettyJson.encodeToString(ReleasePlan.serializer(), plan))
+        println("Prepared ${command} of '$module' in ${workDir.path}: F for ${fPlans.size} host state(s), R ${if (plan.rDir != null) "yes" else "no"}. Build the bundles, then run commit-release.")
+    }
+
+    /**
+     * `commit-release <workDir> <versionsDir>` — the commit point (compatibility.md §9): puts the
+     * built polyfill bundles into the store (content-addressed, with their gzip copy and, when a
+     * signing key is configured, signature), updates `polyfills.json`, then writes the changelog
+     * and the release snapshots. A generation without a built bundle is reported `blocked`: its
+     * hosts keep the polyfills they had.
+     */
+    private fun commitRelease(args: Array<String>) {
+        val workDir = args.getOrNull(1)?.let(::File)
+        val versionsDir = args.getOrNull(2)?.let(::File)
+        val planFile = workDir?.let { File(it, "plan.json") }
+        if (planFile == null || !planFile.isFile || versionsDir == null) {
+            System.err.println("usage: commit-release <workDir> <versionsDir> (a prepared release with plan.json)")
+            kotlin.system.exitProcess(2)
+        }
+        val plan = json.decodeFromString(ReleasePlan.serializer(), planFile.readText())
+        var index = RdmaPolyfillIndex.read(versionsDir)
+        for (g in plan.generations) {
+            val label = g.ifEmpty { "-" }
+            for (f in plan.f) {
+                val bundle = File(f.dir, RdmaPolyfillIndex.bundleName(g))
+                if (!bundle.isFile) { println("  F hosts ${f.hosts.joinToString()} gen $label  blocked (no bundle built)"); continue }
+                val bytes = bundle.readBytes()
+                val hash = RdmaContentHasher.sha256Bytes(bytes)
+                RdmaBundleFiles.publish(versionsDir, hash, bytes)
+                index = RdmaPolyfillIndex.putF(index, plan.module, f.hosts, g, PolyfillRef(hash, plan.version))
+                println("  F hosts ${f.hosts.joinToString()} gen $label  built-ok  $hash")
+            }
+            val rDir = plan.rDir ?: continue
+            val bundle = File(rDir, RdmaPolyfillIndex.bundleName(g))
+            if (!bundle.isFile) { println("  R gen $label  blocked (no bundle built)"); continue }
+            val bytes = bundle.readBytes()
+            val hash = RdmaContentHasher.sha256Bytes(bytes)
+            RdmaBundleFiles.publish(versionsDir, hash, bytes)
+            index = RdmaPolyfillIndex.addR(index, plan.module, g, PolyfillRef(hash, plan.version))
+            println("  R gen $label  built-ok  $hash")
+        }
+        RdmaPolyfillIndex.write(versionsDir, index)
+        val changelogFile = File(versionsDir, "changelog.json")
+        RdmaChangelog.write(changelogFile, plan.changelog)
+        val analysis = RdmaAnalysisMerge.merge(
+            plan.analysis.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                .map { json.decodeFromString(RdmaAnalysis.serializer(), File(it).readText()) },
+        )
+        if (plan.command == "static-release") RdmaBaseline.write(analysis, versionsDir)
+        writeSnapshots(plan.changelog, analysis, versionsDir)
+        println("Committed ${plan.command} of '${plan.module}': v${plan.version} (H=${plan.changelog.h}). Wrote ${changelogFile.path}")
+    }
+
+    private val prettyJson = Json { prettyPrint = true }
 
     /** Resolves the `--rdmaConfig <path>` (or `--rdmaConfig=<path>`) flag, defaulting to `rdma.toml`. */
     private fun resolveRdmaConfigFile(args: Array<String>): File {

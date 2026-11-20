@@ -27,6 +27,16 @@ data class RdmaConfig(
     val plugin: PluginConfig = PluginConfig(),
     val toolchain: ToolchainConfig = ToolchainConfig(),
     val hermes: HermesConfig = HermesConfig(),
+    val signing: SigningConfig = SigningConfig(),
+)
+
+/**
+ * Bundle signing (compatibility.md §8.1). [publicKeys]: base64 raw Ed25519 public keys baked into
+ * the apps; a downloaded bundle must be signed by one of them. Empty: bundles are checked by hash
+ * only. Rotate by adding the new key in a static release before signing with it.
+ */
+data class SigningConfig(
+    val publicKeys: List<String> = emptyList(),
 )
 
 /**
