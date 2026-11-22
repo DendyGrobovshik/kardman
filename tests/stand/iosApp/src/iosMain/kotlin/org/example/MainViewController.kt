@@ -28,7 +28,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.window.ComposeUIViewController
 import io.github.dendygrobovshik.kardman.runtime.RdmaBridge
 import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
+import io.github.dendygrobovshik.kardman.runtime.RdmaDiagnostics
 import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.coroutines.delay
 import org.example.ios.rdma_userBridgeInstall
@@ -45,6 +47,7 @@ import platform.posix.fopen
 import platform.posix.fread
 import platform.posix.fseek
 import platform.posix.ftell
+import platform.posix.getenv
 
 /**
  * iOS host entry point. Bootstraps the Hermes runtime + user bridge, evaluates the
@@ -61,6 +64,9 @@ fun MainViewController(): UIViewController {
     }
 
     RdmaBridge.nativeInit()
+    // Recomposition tracer (e2e: launched with SIMCTL_CHILD_RDMA_TRACE=1; the report is
+    // printed every second, prefixed `RdmaTrace: `).
+    if (getenv("RDMA_TRACE")?.toKString() == "1") RdmaDiagnostics.traceRecompositions(true)
     loadBundles()
     loadDevPolyfills()
     return ComposeUIViewController { Content() }
@@ -103,6 +109,14 @@ private fun Content() {
         // Block-lifetime probe (docs/design/runtime_rework.md §4): once the plugins have
         // run, collect garbage so the holders of dropped plugin lambdas are cleaned, let the
         // release queue drain, then report how many JS blocks the registry still holds.
+        if (RdmaDiagnostics.tracing) {
+            LaunchedEffect(Unit) {
+                while (true) {
+                    delay(1000)
+                    RdmaDiagnostics.logRecompositionReport()
+                }
+            }
+        }
         LaunchedEffect(Unit) {
             delay(3000)
             repeat(3) {

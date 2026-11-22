@@ -30,7 +30,7 @@ A plugin is compiled twice:
 |---|---|---|
 | `RdmaKernelStubs_<package>.kt` | compiler plugin | kernel stubs, one file per kernel package |
 | `<File>_rdma.kt` | compiler plugin | the plugin's files with the few rewrites below |
-| `RdmaRuntimeBridge.kt` | Gradle plugin | the guest bridge: `external object RDMA`, `rdmaRegisterComponent`, state factories, effect helpers, collection classifiers, prototype hooks |
+| `RdmaRuntimeBridge.kt` | Gradle plugin | the guest bridge: `external object RDMA`, `rdmaRegisterComponent`, state factories, effect helpers, collection classifiers, prototype hooks, the recomposition tracer (`RDMA.installTracer`, [threads_and_performance.md](../guide/threads_and_performance.md#recomposition-tracer)) |
 | `plugin.json` | compiler plugin | the plugin contract: id, the kernel symbols it uses, the kernel version it was built against |
 
 ## Kernel stubs

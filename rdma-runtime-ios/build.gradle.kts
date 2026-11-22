@@ -62,6 +62,7 @@ kotlin {
             "ios/RdmaCollectionsCAbi.cpp",
             "common/RdmaProxyCore.cpp",
             "common/RdmaBlocks.cpp",
+            "common/RdmaTrace.cpp",
             "common/RdmaIdentity.cpp",
             "common/RdmaSignature.cpp",
             "common/RdmaMonocypher.cpp",

@@ -84,3 +84,47 @@ The same holds for kernel code calling an `open` method that a plugin overrides.
 | a widget call | one crossing plus a switch to the UI thread |
 
 How the threads work inside: [threading.md](../internals/threading.md).
+
+## Recomposition tracer
+
+Plugin content is composed on the plugin thread, and every Composer operation it does
+(a group, a `changed` check, a widget call) is a round trip to the UI thread, which costs
+far more than a crossing. A plugin composable that runs more often than it needs to is
+therefore the first thing to look for when plugin UI is slow. The recomposition tracer
+counts how often each plugin composable runs and why:
+
+```kotlin
+RdmaDiagnostics.traceRecompositions(true)   // main thread; clears what was collected
+// ... use the screen ...
+RdmaDiagnostics.logRecompositionReport()    // logcat tag `RdmaTrace` (iOS: `RdmaTrace: ` lines)
+val text = RdmaDiagnostics.recompositionReport()
+RdmaDiagnostics.traceRecompositions(false)
+```
+
+```
+com.x.Feed (Feed.kt:12): runs=4 first=1 restarts=3 byParent=0 self=3.1ms total=41.0ms
+  restarted by: state@1a2b3c<Integer>, read in com.x.Feed (Feed.kt:12) x3
+com.x.Banner (Banner.kt:20): runs=4 first=1 restarts=0 byParent=3 self=2.0ms total=9.8ms
+  called again by: com.x.Feed (Feed.kt:12) x3
+  changed params: #0 x2; none x1
+```
+
+Each run of a composable is one of:
+
+- `first`: the first run of its place in the composition.
+- `restarts`: it ran again because something it read changed. `restarted by` names the
+  cause: a state (`state@<id><value type>`, with the composables that read it), a
+  `lambda update` (a content lambda got new captures, so the composables it ran in run it
+  again), or `invalidate()` (a kernel invalidated the scope).
+- `byParent`: its caller ran again and called it. `changed params` lists the argument
+  positions (`#0` is the first) that changed; `none` means it was called with the same
+  arguments and still ran, which is worth a look (an unstable argument, a non-skippable
+  function).
+
+`self` and `total` are wall time on the plugin thread, without and with the composables it
+called; they include the round trips to the UI thread. Tracing itself slows composition
+down, so compare counts and causes, not timings, with an untraced run.
+
+While off, the tracer costs nothing: Compose's own trace hooks in plugin code see no
+tracer, and no kernel composition has an observer. Plugins see the tracer through their
+bridge, so a plugin built before the tracer existed is not counted until it is rebuilt.

@@ -49,7 +49,16 @@ object RdmaLambdaScopes {
             bucket.removeAll { it.value === scope || it.value == null }
             if (bucket.isEmpty()) handedOut.remove(key)
         }
-        scope.invalidate()
+        if (!RdmaDiagnostics.tracing) {
+            scope.invalidate()
+            return
+        }
+        RdmaDiagnostics.lambdaInvalidation = true
+        try {
+            scope.invalidate()
+        } finally {
+            RdmaDiagnostics.lambdaInvalidation = false
+        }
     }
 
     private fun purge() {

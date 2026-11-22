@@ -147,6 +147,8 @@ private fun runtimeBridgeSource(pluginPackage: String, pluginId: String) = """pa
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composer
+import androidx.compose.runtime.CompositionTracer
+import androidx.compose.runtime.InternalComposeTracingApi
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.remember
 import kotlin.js.unsafeCast
@@ -173,6 +175,10 @@ external object RDMA {
     var listMethodNames: (() -> dynamic)?
     var mapMethodNames: (() -> dynamic)?
     var collectionPrototypes: (() -> dynamic)?
+    var installTracer: ((Boolean) -> Unit)?
+    val tracing: Boolean?
+    fun traceStart(key: Int, dirty1: Int, dirty2: Int, info: String)
+    fun traceEnd()
 }
 
 fun rdmaListKind(value: Any?): Int = when {
@@ -264,7 +270,26 @@ val rdmaListKindInstalled = run {
     RDMA.listMethodNames = { -> rdmaListMethodNames() }
     RDMA.mapMethodNames = { -> rdmaMapMethodNames() }
     RDMA.collectionPrototypes = { -> rdmaCollectionPrototypes() }
+    RDMA.installTracer = { on: Boolean -> rdmaInstallTracer(on) }
+    if (RDMA.tracing == true) rdmaInstallTracer(true)
     Unit
+}
+
+// Recomposition tracer (docs/guide/threads_and_performance.md#recomposition-tracer): the
+// Compose compiler emits `traceEventStart`/`traceEventEnd` into every composable, guarded by
+// `isTraceInProgress()`, which is false while no tracer is set. The runtime installs this
+// one (shared by all plugins: the Compose runtime is shared) only while tracing is on.
+@OptIn(InternalComposeTracingApi::class)
+private object RdmaCompositionTracer : CompositionTracer {
+    override fun isTraceInProgress(): Boolean = true
+    override fun traceEventStart(key: Int, dirty1: Int, dirty2: Int, info: String) =
+        RDMA.traceStart(key, dirty1, dirty2, info)
+    override fun traceEventEnd() = RDMA.traceEnd()
+}
+
+@OptIn(InternalComposeTracingApi::class)
+fun rdmaInstallTracer(on: Boolean) {
+    Composer.setTracer(if (on) RdmaCompositionTracer else null)
 }
 
 // State values cross through an erased channel that is typed by the descriptor the

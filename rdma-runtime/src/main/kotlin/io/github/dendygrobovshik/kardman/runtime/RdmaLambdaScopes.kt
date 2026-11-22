@@ -46,6 +46,15 @@ object RdmaLambdaScopes {
     @JvmStatic
     fun invalidate(scope: RecomposeScope) {
         synchronized(handedOut) { handedOut.remove(scope) }
-        scope.invalidate()
+        if (!RdmaDiagnostics.tracing) {
+            scope.invalidate()
+            return
+        }
+        RdmaDiagnostics.lambdaInvalidation = true
+        try {
+            scope.invalidate()
+        } finally {
+            RdmaDiagnostics.lambdaInvalidation = false
+        }
     }
 }

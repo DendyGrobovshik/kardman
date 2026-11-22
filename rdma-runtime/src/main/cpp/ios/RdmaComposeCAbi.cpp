@@ -23,6 +23,7 @@
 #include "RdmaLog.h"
 #include "RdmaBlocks.h"
 #include "RdmaIdentity.h"
+#include "RdmaTrace.h"
 
 #include <jsi/jsi.h>
 #include <string>
@@ -1301,6 +1302,7 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
         g_userBridge(rt, ctx, rdma);
     }
 
+    rdmaTraceInstallJs(rt, rdma);
     rt.global().setProperty(rt, "RDMA", std::move(rdma));
     LOGI("Compose bridge installed (C ABI)");
 }
@@ -1672,6 +1674,20 @@ const char* rdma_takeNativeError(void) {
     g_tlsCaughtErrorBuf = g_tlsCaughtError;
     g_tlsCaughtError.clear();
     return g_tlsCaughtErrorBuf.c_str();
+}
+
+void rdma_trace_set_enabled(int32_t enabled) {
+    facebook::rdma::rdmaTraceSetEnabled(enabled != 0);
+}
+
+void rdma_trace_scope_event(int32_t kind, int64_t scope, int64_t value, const char* desc) {
+    facebook::rdma::rdmaTraceScopeEvent(kind, scope, value, desc);
+}
+
+const char* rdma_trace_report(void) {
+    static thread_local std::string buf;
+    buf = facebook::rdma::rdmaTraceReport();
+    return buf.c_str();
 }
 
 const char* rdma_takeEvalError(void) {

@@ -36,6 +36,7 @@ import androidx.compose.runtime.setValue
 import com.example.kernel.UserBridge
 import io.github.dendygrobovshik.kardman.runtime.RdmaBridge
 import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
+import io.github.dendygrobovshik.kardman.runtime.RdmaDiagnostics
 import io.github.dendygrobovshik.kardman.types.ResyncRequest
 import io.github.dendygrobovshik.kardman.types.ResyncStatus
 import kotlinx.coroutines.delay
@@ -80,6 +81,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val traceReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            RdmaDiagnostics.logRecompositionReport()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -88,6 +95,9 @@ class MainActivity : ComponentActivity() {
 
         // Async init: JNI caches on this thread, then Hermes thread + runtime.
         RdmaBridge.nativeInit(assets)
+
+        // Recomposition tracer (e2e: `am start ... --ez rdmaTrace true`, report on TRACE_ACTION).
+        if (intent.getBooleanExtra(EXTRA_TRACE, false)) RdmaDiagnostics.traceRecompositions(true)
 
         // Global uncaught-exception handler (design §6). Receives every plugin
         // exception together with the owning pluginId.
@@ -103,6 +113,7 @@ class MainActivity : ComponentActivity() {
 
         registerReceiver(resyncReceiver, IntentFilter(RESYNC_ACTION), Context.RECEIVER_EXPORTED)
         registerReceiver(blocksReceiver, IntentFilter(BLOCKS_ACTION), Context.RECEIVER_EXPORTED)
+        registerReceiver(traceReceiver, IntentFilter(TRACE_ACTION), Context.RECEIVER_EXPORTED)
 
         setContent {
             // Start unready so the LaunchedEffect below logs "Runtime ready" before the
@@ -167,6 +178,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         unregisterReceiver(resyncReceiver)
         unregisterReceiver(blocksReceiver)
+        unregisterReceiver(traceReceiver)
         super.onDestroy()
     }
 
@@ -285,6 +297,8 @@ class MainActivity : ComponentActivity() {
         const val STORE_URL = "http://10.0.2.2:8080"
         const val RESYNC_ACTION = "org.example.rdma.RESYNC"
         const val BLOCKS_ACTION = "org.example.rdma.BLOCKS"
+        const val TRACE_ACTION = "org.example.rdma.TRACE"
+        const val EXTRA_TRACE = "rdmaTrace"
         const val EXTRA_PLUGIN_ID = "pluginId"
         const val EXTRA_VERSION = "version"
         const val EXTRA_BUILT_AGAINST = "builtAgainst"

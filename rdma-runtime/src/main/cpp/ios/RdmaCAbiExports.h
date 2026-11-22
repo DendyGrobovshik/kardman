@@ -57,6 +57,11 @@ int32_t rdma_content_version(void);
 void rdma_set_uncaught_handler(void);
 const char* rdma_takeNativeError(void);
 const char* rdma_takeEvalError(void);
+// Recomposition tracer (RdmaDiagnostics): on/off, a kernel-side scope event (identity ids,
+// `desc` may be null), and the report (valid until the next call on this thread).
+void rdma_trace_set_enabled(int32_t enabled);
+void rdma_trace_scope_event(int32_t kind, int64_t scope, int64_t value, const char* desc);
+const char* rdma_trace_report(void);
 
 // Function-pointer registry (see RdmaCAbiRegistry.h). Kotlin/Native registers its
 // C-compatible shim functions here at startup; C++ looks them up by name.

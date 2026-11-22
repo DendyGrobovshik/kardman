@@ -23,6 +23,7 @@
 #include "RdmaBlocks.h"
 #include "RdmaIdentity.h"
 #include "RdmaVtable.h"
+#include "RdmaTrace.h"
 
 #include <jsi/jsi.h>
 #include <jni.h>
@@ -1643,6 +1644,7 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
         g_userBridge(rt, jvm, rdma);
     }
 
+    rdmaTraceInstallJs(rt, rdma);
     rt.global().setProperty(rt, "RDMA", std::move(rdma));
     LOGI("Compose bridge installed");
 }

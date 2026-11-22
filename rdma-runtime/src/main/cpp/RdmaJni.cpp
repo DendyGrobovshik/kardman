@@ -27,6 +27,7 @@
 #include "RdmaRendezvous.h"
 #include "RdmaCompose.h"
 #include "RdmaRuntime.h"
+#include "RdmaTrace.h"
 
 #define LOG_TAG "RdmaJni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -166,4 +167,27 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeEvalBytes(JNIEnv
     code.resize(static_cast<size_t>(length));
     env->GetByteArrayRegion(bytes, 0, length, reinterpret_cast<jbyte*>(&code[0]));
     facebook::rdma::rdmaEvalAsset(code);
+}
+
+// Recomposition tracer (RdmaDiagnostics; docs/guide/threads_and_performance.md#recomposition-tracer).
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaDiagnostics_nativeSetTracing(JNIEnv*, jobject, jboolean enabled) {
+    facebook::rdma::rdmaTraceSetEnabled(enabled == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaDiagnostics_nativeScopeEvent(
+    JNIEnv* env, jobject, jint kind, jlong scope, jlong value, jstring desc) {
+    if (!desc) {
+        facebook::rdma::rdmaTraceScopeEvent(kind, scope, value, nullptr);
+        return;
+    }
+    const char* chars = env->GetStringUTFChars(desc, nullptr);
+    facebook::rdma::rdmaTraceScopeEvent(kind, scope, value, chars);
+    env->ReleaseStringUTFChars(desc, chars);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaDiagnostics_nativeReport(JNIEnv* env, jobject) {
+    return env->NewStringUTF(facebook::rdma::rdmaTraceReport().c_str());
 }
