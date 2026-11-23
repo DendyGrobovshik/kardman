@@ -109,15 +109,41 @@ Available in the plugin:
 - `@Composable` functions and lambdas, `if`/`for`/`when` in composition;
 - `remember { … }` (with keys);
 - `mutableStateOf`, `mutableStateListOf`, `mutableStateMapOf`, `var x by …`;
+- `derivedStateOf { … }` (without a mutation policy), see below;
 - `SideEffect`, `DisposableEffect`, `LaunchedEffect`, `rememberCoroutineScope()`;
 - the kernel's widgets.
 
-Anything else from `androidx.compose.*` (`derivedStateOf`, `snapshotFlow`,
-`movableContentOf`, `produceState`, animations, …) is a compile error:
+Anything else from `androidx.compose.*` (`snapshotFlow`, `movableContentOf`,
+`produceState`, animations, …) is a compile error:
 
 ```
-kernel doesn't support 'derivedStateOf' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
+kernel doesn't support 'snapshotFlow' — the plugin is limited to the base Compose protocol (remember/mutableStateOf/widgets)
 ```
+
+### derivedStateOf
+
+`derivedStateOf` computes a value from other states; whoever reads it recomposes only when
+the **result** changes, not on every change of its inputs:
+
+```kotlin
+var query by remember { mutableStateOf("") }
+val canSearch by remember { derivedStateOf { query.trim().length >= 3 } }
+Text(if (canSearch) "Ready" else "Type 3 letters") // recomposes when the answer flips, not per keystroke
+```
+
+It pays off when the inputs change often, the result rarely, and the reader's UI is more
+than a few widgets: thresholds, "the form is valid", a filtered list of a large state. It
+does not pay off when the result changes as often as its inputs — then it only adds work.
+
+- The result type follows the [state value rules](types.md#state-values) (no plugin
+  classes); the result is compared with `equals`. A mutation policy argument is a compile
+  error.
+- Keep the calculation short and free of writes: each recalculation is a call into the
+  plugin, and the UI thread waits for it
+  ([threads_and_performance.md](threads_and_performance.md)).
+- Remember it (`remember { derivedStateOf { … } }`), as in Compose. A calculation that
+  captures its own state keeps the state alive forever.
+- An exception in the calculation reaches the reader as `RdmaException`.
 
 Modifiers are a kernel class too (if your kernel defines one — the demo's is the reference).
 Start a chain with `Modifier()` and pass it to a widget:

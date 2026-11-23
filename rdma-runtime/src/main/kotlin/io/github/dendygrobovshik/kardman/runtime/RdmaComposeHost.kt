@@ -67,6 +67,7 @@ object RdmaComposeHost {
     external fun nativeInvokeScopeBlock1(blockId: Long, composer: Composer, changed: Int, p1: Int)
     external fun nativeInvokeCallback(blockId: Long, args: Array<Any?>)
     external fun nativeInvokeLambda(id: Long, args: Array<Any?>): Any?
+    external fun nativeInvokeDerived(blockId: Long): Any?
 
     // DisposableEffect bridge. `nativeInvokeEffectBody` runs the single-use effect
     // body on the Hermes thread, stores its returned result object, and returns the

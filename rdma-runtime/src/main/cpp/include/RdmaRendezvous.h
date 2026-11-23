@@ -120,6 +120,13 @@ constexpr int64_t kRdmaJsWaitWarnMs = 1000;
 constexpr int64_t kRdmaJsWaitTimeoutMs = 5000;
 RdmaExceptionInfo rdmaCallJsBlocking(JsTask body, JsTask discard, const std::string& what);
 
+// Whether the calling thread is the UI thread.
+bool rdmaOnUiThread();
+
+// Experimental spin-wait (docs/guide/threads_and_performance.md#spin-wait): a thread waiting
+// for the other side of a rendezvous spins up to `micros` before sleeping. 0 = off (default).
+void rdmaSetSpinWaitMicros(int micros);
+
 // Non-blocking post of a low-priority (async) task to the JS thread. Used for
 // callbacks and service-lambda invocations that must not stall composition.
 void rdmaPostJs(JsTask task);

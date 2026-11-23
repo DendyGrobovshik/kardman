@@ -98,6 +98,8 @@ class MainActivity : ComponentActivity() {
 
         // Recomposition tracer (e2e: `am start ... --ez rdmaTrace true`, report on TRACE_ACTION).
         if (intent.getBooleanExtra(EXTRA_TRACE, false)) RdmaDiagnostics.traceRecompositions(true)
+        // Experimental spin-wait (`am start ... --ei rdmaSpinUs <micros>`).
+        if (intent.hasExtra(EXTRA_SPIN_US)) RdmaBridge.setSpinWaitMicros(intent.getIntExtra(EXTRA_SPIN_US, 0))
 
         // Global uncaught-exception handler (design §6). Receives every plugin
         // exception together with the owning pluginId.
@@ -144,7 +146,11 @@ class MainActivity : ComponentActivity() {
                     delay(16)
                 }
             }
-            if (ready) {
+            val screen = intent.getStringExtra(EXTRA_SCREEN)
+            if (ready && screen != null) {
+                // A single component (e2e: `am start ... --es rdmaScreen alice:counter/lazy`).
+                RdmaComposeHost.Component(screen)
+            } else if (ready) {
                 // Every stand component; a component not registered (plugin not loaded)
                 // composes nothing. A new plugin version replaces every place at the update
                 // point (`RdmaBridge.applyUpdates` at the end of a re-sync).
@@ -299,6 +305,8 @@ class MainActivity : ComponentActivity() {
         const val BLOCKS_ACTION = "org.example.rdma.BLOCKS"
         const val TRACE_ACTION = "org.example.rdma.TRACE"
         const val EXTRA_TRACE = "rdmaTrace"
+        const val EXTRA_SCREEN = "rdmaScreen"
+        const val EXTRA_SPIN_US = "rdmaSpinUs"
         const val EXTRA_PLUGIN_ID = "pluginId"
         const val EXTRA_VERSION = "version"
         const val EXTRA_BUILT_AGAINST = "builtAgainst"

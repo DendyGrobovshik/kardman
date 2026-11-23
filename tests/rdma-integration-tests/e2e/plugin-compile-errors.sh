@@ -91,6 +91,12 @@ main() {
         '@io.github.dendygrobovshik.kardman.RDMA
 class PluginOwn(val n: Int)'
 
+    expect_compile_error "derivedStateOf with a policy" "derivedStateOf without a mutation policy only" \
+        'fun probe() = androidx.compose.runtime.derivedStateOf(androidx.compose.runtime.referentialEqualityPolicy()) { 1 }'
+    expect_compile_error "derivedStateOf of a plugin class" "derivedStateOf requires a concrete allowed result type" \
+        'class Own(val n: Int)
+fun probe() = androidx.compose.runtime.derivedStateOf { Own(1) }'
+
     step "control: the plugin compiles without a probe"
     run_gradle "$PLUGIN:compileAndroidMain" >"$IT_DIR/control.log" 2>&1 || {
         grep -E "^e: " "$IT_DIR/control.log" | head -5 >&2

@@ -270,6 +270,10 @@ object RdmaPluginComposeEntryCallChecker : FirExpressionChecker<FirFunctionCall>
         val path = filePathOf(context) ?: return
         RdmaPluginTransformState.addEdit(path, nameSrc.startOffset, nameSrc.endOffset, RdmaPluginTransformState.bridgeCallFor(fqn))
 
+        if (fqn == DERIVED_STATE_OF) {
+            insertDerivedStateDesc(expression, path, nameSrc.endOffset)
+            return
+        }
         if (fqn !in RdmaPluginTransformState.stateFactoryFqns) return
         // The state factory opens an erased value channel: bake the channel's type
         // descriptor (docs/design/type_descriptors.md) from the call's static type
@@ -293,6 +297,59 @@ object RdmaPluginComposeEntryCallChecker : FirExpressionChecker<FirFunctionCall>
         val insertAt = text.lastIndexOf(')', src.endOffset - 1)
         if (insertAt <= nameSrc.endOffset) return // unexpected call shape; leave the rename only
         RdmaPluginTransformState.addEdit(path, insertAt, insertAt, ", typeDesc = \"$desc\"")
+    }
+}
+
+private const val DERIVED_STATE_OF = "androidx.compose.runtime.derivedStateOf"
+
+/**
+ * `derivedStateOf { … }` → `rdmaDerivedStateOf("<desc>") { … }`: the result crosses an erased
+ * channel, so its descriptor is baked in as the first argument (the trailing-lambda form has
+ * no closing parenthesis to append to). Only the form without a mutation policy is supported.
+ */
+context(context: CheckerContext, reporter: DiagnosticReporter)
+private fun insertDerivedStateDesc(expression: FirFunctionCall, path: String, nameEnd: Int) {
+    val src = expression.source ?: return
+    if (expression.argumentList.arguments.size != 1) {
+        reporter.reportOn(
+            src,
+            FirErrors.UNSUPPORTED,
+            "kardman supports derivedStateOf without a mutation policy only: derivedStateOf { … } " +
+                "(the result is compared with equals)",
+        )
+        return
+    }
+    val result = expression.resolvedType as? ConeClassLikeType
+    val desc = result?.typeArguments?.getOrNull(0)?.type?.let { stateTypeDescOf(it) }
+    if (desc == null) {
+        reporter.reportOn(
+            src,
+            FirErrors.UNSUPPORTED,
+            "derivedStateOf requires a concrete allowed result type — primitives, kernel @RDMA classes/enums, " +
+                "List/Map of those (docs/design/type_descriptors.md). The plugin's own classes cannot be state values",
+        )
+        return
+    }
+    val text = RdmaPluginTransformState.textOf(path)
+    var i = nameEnd
+    if (i < text.length && text[i] == '<') { // explicit type arguments
+        var depth = 0
+        while (i < text.length) {
+            if (text[i] == '<') depth++
+            if (text[i] == '>' && --depth == 0) { i++; break }
+            i++
+        }
+    }
+    var j = i
+    while (j < text.length && text[j].isWhitespace()) j++
+    when {
+        j < text.length && text[j] == '(' -> {
+            var k = j + 1
+            while (k < text.length && text[k].isWhitespace()) k++
+            val sep = if (k < text.length && text[k] == ')') "" else ", "
+            RdmaPluginTransformState.addEdit(path, j + 1, j + 1, "\"$desc\"$sep")
+        }
+        else -> RdmaPluginTransformState.addEdit(path, i, i, "(\"$desc\")")
     }
 }
 

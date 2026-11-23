@@ -70,6 +70,16 @@ therefore correct and cannot deadlock.
   instead of blocking forever. So a coroutine running asynchronously in the plugin must
   stay on direct calls and never rendezvous outside composition — which is why state writes
   are not rendezvous calls ([compose_protocol.md](compose_protocol.md#state)).
+- A plugin state read or write inside a rendezvous goes to the UI thread (it waits at the
+  boundary and its snapshot observers see the access); outside one it runs on the Hermes
+  thread. The calculation of a plugin `derivedStateOf` called from the UI thread counts as
+  inside: its reads must reach the UI thread's read observer
+  ([compose_protocol.md](compose_protocol.md#derived-states)).
+- Experimental spin-wait (`rdmaSetSpinWaitMicros`, [guide](../guide/threads_and_performance.md#spin-wait)):
+  before sleeping on the shared condition variable, a waiter spins until a change counter
+  moves. Every change to the queues or a request is made and counted under the mutex, so an
+  unchanged counter under the re-taken lock means it is safe to sleep; with spin-wait on,
+  the wake-up is skipped when nobody sleeps. Off (0), the waits and wake-ups are as before.
 - Thread ids are captured at start and asserted in debug builds.
 
 ## Background threads → JS

@@ -69,6 +69,9 @@ object ComposeAllowlist {
         // Rewritten to `rdmaRememberCoroutineScope` (a plugin-local coroutine scope
         // tied to composition lifetime, cancelled on leave).
         "androidx.compose.runtime.rememberCoroutineScope",
+        // Rewritten to `rdmaDerivedStateOf`: a kernel derived state whose calculation is
+        // the plugin lambda (docs/internals/compose_protocol.md#derived-states).
+        "androidx.compose.runtime.derivedStateOf",
     )
 
     fun isAllowed(fqn: String): Boolean = when {

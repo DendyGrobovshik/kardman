@@ -66,6 +66,64 @@ struct JsRequest {
 std::mutex g_mutex;
 std::condition_variable g_cv;
 
+// Experimental spin-wait (docs/guide/threads_and_performance.md#spin-wait): before sleeping
+// on `g_cv`, a waiting thread spins up to `g_spinUs` microseconds for a change, so a reply
+// that comes quickly costs no sleep and no wake-up. 0 = off (the default): the waits and
+// notifications behave exactly as without it.
+std::atomic<int> g_spinUs{0};
+std::atomic<uint64_t> g_seq{0};    // bumped under g_mutex by every change a waiter can wait for
+std::atomic<int> g_sleepers{0};    // threads blocked on g_cv (changed under g_mutex)
+
+inline void cpuRelax() {
+#if defined(__aarch64__) || defined(__arm__)
+    asm volatile("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#endif
+}
+
+// Called with g_mutex held after changing a queue or a request: records the change for
+// spinning waiters and wakes the sleeping ones. With spin-wait on, the wake (a futex call)
+// is skipped when nobody sleeps.
+void notifyLocked() {
+    g_seq.fetch_add(1, std::memory_order_release);
+    if (g_spinUs.load(std::memory_order_relaxed) == 0 || g_sleepers.load(std::memory_order_relaxed) > 0) {
+        g_cv.notify_all();
+    }
+}
+
+// With spin-wait on: releases `lk`, spins until something changes, `limit` or the spin
+// budget, and re-locks. True when something changed (the caller re-checks its condition).
+// Every change is made and counted under g_mutex, so an unchanged counter under the re-taken
+// lock means it is safe to sleep: a later change sees the sleeper and wakes it.
+bool spinForChange(std::unique_lock<std::mutex>& lk,
+                   std::chrono::steady_clock::time_point limit = std::chrono::steady_clock::time_point::max()) {
+    const int us = g_spinUs.load(std::memory_order_relaxed);
+    if (us <= 0) return false;
+    const uint64_t seen = g_seq.load(std::memory_order_acquire);
+    const auto end = std::min(std::chrono::steady_clock::now() + std::chrono::microseconds(us), limit);
+    lk.unlock();
+    bool changed = false;
+    for (unsigned i = 0;; i++) {
+        if (g_seq.load(std::memory_order_acquire) != seen) {
+            changed = true;
+            break;
+        }
+        cpuRelax();
+        if ((i & 63) == 63 && std::chrono::steady_clock::now() >= end) break;
+    }
+    lk.lock();
+    return changed || g_seq.load(std::memory_order_relaxed) != seen;
+}
+
+// Waits on g_cv for a change (lk held), spinning first when spin-wait is on.
+void waitLocked(std::unique_lock<std::mutex>& lk) {
+    if (spinForChange(lk)) return;
+    g_sleepers.fetch_add(1, std::memory_order_relaxed);
+    g_cv.wait(lk);
+    g_sleepers.fetch_sub(1, std::memory_order_relaxed);
+}
+
 // JS -> UI (compose ops). No priority needed: every UI-bound op is a synchronous
 // compose call that the UI thread must run in order.
 std::deque<std::shared_ptr<UiRequest>> g_jsToUi;
@@ -211,13 +269,9 @@ RdmaResult rdmaCallUi(UiTask task) {
     auto req = std::make_shared<UiRequest>();
     req->task = std::move(task);
 
-    {
-        std::unique_lock<std::mutex> lk(g_mutex);
-        g_jsToUi.push_back(req);
-    }
-    g_cv.notify_all();
-
     std::unique_lock<std::mutex> lk(g_mutex);
+    g_jsToUi.push_back(req);
+    notifyLocked();
     while (!req->done) {
         std::shared_ptr<JsRequest> jsReq;
         if (popJsRequestHighLocked(jsReq)) {
@@ -227,7 +281,7 @@ RdmaResult rdmaCallUi(UiTask task) {
             RdmaExceptionInfo errInfo = std::move(jsReq->error);
             lk.lock();
             jsReq->done = true;
-            g_cv.notify_all();
+            notifyLocked();
             if (reentrantError) {
                 lk.unlock();
                 jsi::Runtime* rt = getRdmaRuntime();
@@ -235,7 +289,7 @@ RdmaResult rdmaCallUi(UiTask task) {
                 return RdmaResult::undefined();
             }
         } else {
-            g_cv.wait(lk);
+            waitLocked(lk);
         }
     }
     return std::move(req->result);
@@ -250,13 +304,9 @@ RdmaExceptionInfo rdmaCallJs(JsTask task) {
     // zero while the UI thread is about to service it (closes the push/notify
     // race). rdmaCallJs is reentrant (nested scope blocks), hence a counter.
     g_uiInRendezvous.fetch_add(1, std::memory_order_release);
-    {
-        std::unique_lock<std::mutex> lk(g_mutex);
-        g_uiToJsHigh.push_back(req);
-    }
-    g_cv.notify_all();
-
     std::unique_lock<std::mutex> lk(g_mutex);
+    g_uiToJsHigh.push_back(req);
+    notifyLocked();
     while (!req->done) {
         if (!g_jsToUi.empty()) {
             auto uiReq = g_jsToUi.front();
@@ -265,9 +315,9 @@ RdmaExceptionInfo rdmaCallJs(JsTask task) {
             executeUiTask(*uiReq);
             lk.lock();
             uiReq->done = true;
-            g_cv.notify_all();
+            notifyLocked();
         } else {
-            g_cv.wait(lk);
+            waitLocked(lk);
         }
     }
     g_uiInRendezvous.fetch_sub(1, std::memory_order_release);
@@ -284,6 +334,8 @@ struct BlockingJsCall {
     bool abandoned = false;
 };
 } // namespace
+
+bool rdmaOnUiThread() { return rdmaGetTid() == g_uiTid.load(std::memory_order_acquire); }
 
 RdmaExceptionInfo rdmaCallJsBlocking(JsTask body, JsTask discard, const std::string& what) {
     const int64_t tid = rdmaGetTid();
@@ -341,8 +393,8 @@ void rdmaPostJs(JsTask task) {
     {
         std::unique_lock<std::mutex> lk(g_mutex);
         g_uiToJsLow.push_back(req);
+        notifyLocked();
     }
-    g_cv.notify_all();
 }
 
 void rdmaPostJsHigh(JsTask task) {
@@ -351,8 +403,8 @@ void rdmaPostJsHigh(JsTask task) {
     {
         std::unique_lock<std::mutex> lk(g_mutex);
         g_uiToJsHigh.push_back(req);
+        notifyLocked();
     }
-    g_cv.notify_all();
 }
 
 void rdmaPostJsSelf(JsTask task) {
@@ -361,8 +413,8 @@ void rdmaPostJsSelf(JsTask task) {
     {
         std::unique_lock<std::mutex> lk(g_mutex);
         g_uiToJsLow.push_back(req);
+        notifyLocked();
     }
-    g_cv.notify_all();
 }
 
 int64_t rdmaScheduleTimer(int64_t ms, std::shared_ptr<jsi::Function> fn) {
@@ -503,10 +555,17 @@ static void jsThreadMain() {
             auto predicate = [&] {
                 return !g_uiToJsHigh.empty() || !g_uiToJsLow.empty() || g_stopped.load();
             };
-            if (deadline) {
-                g_cv.wait_until(lk, *deadline, predicate);
-            } else {
-                g_cv.wait(lk, predicate);
+            while (!predicate()) {
+                if (spinForChange(lk, deadline ? *deadline : std::chrono::steady_clock::time_point::max())) continue;
+                if (deadline && std::chrono::steady_clock::now() >= *deadline) break;
+                g_sleepers.fetch_add(1, std::memory_order_relaxed);
+                if (deadline) {
+                    g_cv.wait_until(lk, *deadline);
+                } else {
+                    g_cv.wait(lk);
+                }
+                g_sleepers.fetch_sub(1, std::memory_order_relaxed);
+                if (deadline && std::chrono::steady_clock::now() >= *deadline) break;
             }
             if (g_stopped.load() && g_uiToJsHigh.empty() && g_uiToJsLow.empty()) {
                 return;
@@ -538,9 +597,14 @@ static void jsThreadMain() {
         {
             std::lock_guard<std::mutex> lk(g_mutex);
             req->done = true;
+            notifyLocked();
         }
-        g_cv.notify_all();
     }
+}
+
+void rdmaSetSpinWaitMicros(int micros) {
+    g_spinUs.store(micros < 0 ? 0 : micros, std::memory_order_relaxed);
+    LOGI("spin-wait: %d us", micros < 0 ? 0 : micros);
 }
 
 void rdmaStart(HostContext ctx) {

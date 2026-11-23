@@ -453,13 +453,14 @@ jsi::Value rdmaResultToJsiCAbi(jsi::Runtime& rt, RdmaResult& result) {
 // (docs/design/runtime_rework.md §3.8); `get_value`/`set_value` are resolved once per
 // runtime by their compile-mangled names and read the state from `this`.
 struct StateProxyStateCAbi : public RdmaTaggedState {
-    StateProxyStateCAbi(void* state, std::string typeDesc)
-        : RdmaTaggedState(RdmaStateKind::State), state_(state), desc_(TypeDesc::parseOrAny(typeDesc)) {}
+    StateProxyStateCAbi(void* state, std::string typeDesc, bool readOnly = false)
+        : RdmaTaggedState(RdmaStateKind::State), state_(state), desc_(TypeDesc::parseOrAny(typeDesc)), readOnly_(readOnly) {}
     ~StateProxyStateCAbi() override {
         if (state_) rdma_disposeStableRef(state_);
     }
     void* state_;
     TypeDesc desc_;
+    bool readOnly_; // a derived state (`State`, not `MutableState`)
 };
 
 static std::shared_ptr<StateProxyStateCAbi> stateProxyStateOf(jsi::Runtime& r, const jsi::Value& thisVal) {
@@ -492,6 +493,7 @@ static jsi::Value resolveStateMethodCAbi(jsi::Runtime& rt, const std::string& n)
             [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
                 if (count < 1) return jsi::Value::undefined();
                 auto st = stateProxyStateOf(r, thisVal);
+                if (st->readOnly_) throw jsi::JSError(r, "a derived state is read-only");
                 void* state = st->state_;
                 // Descriptor-typed and strict (docs/design/type_descriptors.md):
                 // a foreign-typed value raises instead of being coerced, and `null`
@@ -526,7 +528,7 @@ static jsi::Value resolveStateMethodCAbi(jsi::Runtime& rt, const std::string& n)
     return jsi::Value::undefined();
 }
 
-jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle, const std::string& typeDesc) {
+jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle, const std::string& typeDesc, bool readOnly) {
     // The channel descriptor normally rides along the value transport
     // (`RdmaResult::stateRef(handle, desc)`). A handle without one falls back to
     // the descriptor the state handle itself carries (`RdmaTypedState`), and a
@@ -537,7 +539,7 @@ jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle, const std::s
     static jsi::Object* proto = nullptr; // shared, intentionally leaked (lives as long as the runtime)
     if (!proto) proto = new jsi::Object(rdmaLazyProto(rt, resolveStateMethodCAbi));
     jsi::Object obj = jsi::Object::create(rt, jsi::Value(rt, *proto));
-    obj.setNativeState(rt, std::make_shared<StateProxyStateCAbi>(stateHandle, desc));
+    obj.setNativeState(rt, std::make_shared<StateProxyStateCAbi>(stateHandle, desc, readOnly));
     return obj;
 }
 
@@ -1124,6 +1126,37 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext ctx) {
         });
     rdma.setProperty(rt, "mutableStateOf", std::move(mutableStateOfFn));
 
+    // `derivedStateOf { calc }` (docs/internals/compose_protocol.md#derived-states): a kernel
+    // derived state whose calculation calls the plugin block. In composition it is created on
+    // the UI thread, inside the composition snapshot; outside, on the Hermes thread.
+    auto derivedStateOfFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "derivedStateOf"), 3,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            if (count < 2 || !args[0].isObject() || !args[0].asObject(r).isFunction(r) || !args[1].isString()) {
+                throw jsi::JSError(r, "derivedStateOf(calculation, typeDesc) expected");
+            }
+            const std::string descRaw = args[1].getString(r).utf8(r);
+            const std::string pluginId = count > 2 && args[2].isString() ? args[2].getString(r).utf8(r) : "";
+            const int64_t id = rdmaBlockRegisterPlugin(r, args[0].asObject(r).asFunction(r), pluginId);
+            rdmaBlockSetResultDesc(id, descRaw);
+            void* state = nullptr;
+            if (g_inComposition) {
+                RdmaResult res = rdmaCallUi([&state, id, descRaw]() -> RdmaResult {
+                    state = rdma_derivedStateOf(id, descRaw.c_str());
+                    RdmaResult err;
+                    if (captureCAbiError(err)) return err;
+                    return RdmaResult::undefined();
+                });
+                if (res.kind == RdmaResultKind::Error) return rdmaResultToJsiCAbi(r, res);
+            } else {
+                state = rdma_derivedStateOf(id, descRaw.c_str());
+                checkKotlinError(r);
+            }
+            if (!state) throw jsi::JSError(r, "derivedStateOf: the kernel did not create the state");
+            return makeStateProxyCAbi(r, state, descRaw, /*readOnly=*/true);
+        });
+    rdma.setProperty(rt, "derivedStateOf", std::move(derivedStateOfFn));
+
     // Snapshot collections (docs/design/type_descriptors.md#state-semantics): the
     // guest passes its materialized values; the kernel copies them into a
     // `SnapshotStateList`/`SnapshotStateMap` and returns a state-backed proxy, so
@@ -1491,6 +1524,31 @@ void* rdma_nativeInvokeSlot(int64_t blockId, void* argsHandle, const char* param
                          });
 }
 
+// The calculation of a plugin derived state: its state reads run on the calculating thread,
+// where Compose's read observer for it is installed — from the UI thread they rendezvous to
+// it (the UI thread waits at the boundary), on the Hermes thread they run directly.
+void* rdma_nativeInvokeDerived(int64_t blockId, int32_t* status) {
+    using namespace facebook::rdma;
+    *status = 0;
+    const std::string rd = rdmaBlockResultDesc(blockId);
+    const bool fromUi = rdmaOnUiThread();
+    return callJsForCAbi(nullptr, status, "derived state #" + std::to_string(blockId),
+                         [blockId, rd, fromUi](facebook::jsi::Runtime& rt, void*) -> void* {
+                             auto fn = rdmaBlockGet(blockId);
+                             if (!fn) throw facebook::jsi::JSError(rt, "the derived state calculation is no longer registered");
+                             const bool prev = g_inComposition;
+                             g_inComposition = fromUi;
+                             try {
+                                 void* r = callJsTypedCAbi(rt, fn, nullptr, "", rd);
+                                 g_inComposition = prev;
+                                 return r;
+                             } catch (...) {
+                                 g_inComposition = prev;
+                                 throw;
+                             }
+                         });
+}
+
 void rdma_nativeInvokeLambda(int64_t blockId, void* argsHandle) {
     using namespace facebook::rdma;
     rdmaPostJs([blockId, argsHandle] {
@@ -1674,6 +1732,10 @@ const char* rdma_takeNativeError(void) {
     g_tlsCaughtErrorBuf = g_tlsCaughtError;
     g_tlsCaughtError.clear();
     return g_tlsCaughtErrorBuf.c_str();
+}
+
+void rdma_set_spin_wait_micros(int32_t micros) {
+    facebook::rdma::rdmaSetSpinWaitMicros((int)micros);
 }
 
 void rdma_trace_set_enabled(int32_t enabled) {

@@ -262,10 +262,10 @@ static jsi::Value resolveComposerMethod(jsi::Runtime& rt, const std::string& n) 
                     if (count < 1) return jsi::Value::undefined();
                     void* stored = nullptr;
                     bool disposeStored = false;
-                    void* stateHandle = stateProxyHandle(r, args[0]);
-                    if (stateHandle) {
-                        stored = stateHandle;
-                    } else if (args[0].isObject()) {
+                    // Every JS object, state proxies included, is kept as itself: `remember`
+                    // returns the same object, so a state keeps its identity and its value
+                    // type descriptor across recompositions.
+                    if (args[0].isObject()) {
                         auto obj = std::make_shared<jsi::Object>(args[0].asObject(r));
                         int64_t id = g_nextJsValueId++;
                         g_jsValues[id] = obj;

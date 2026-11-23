@@ -36,10 +36,15 @@ The kernel keeps a block alive through **holders**; each entry counts them.
 | `remember { jsValue }` | `JsValueHolder` | `onForgotten`/`onAbandoned` |
 | effect body / dispose | effect observer | deterministic |
 | callback passed to an `@RDMA` function or method | `RdmaFunctionN` | finalization of the holder |
+| `derivedStateOf` calculation | the kernel derived state (`RdmaDerivedStates`) | finalization of the state |
 | `suspend` continuation | the completion | on completion |
 
 A holder retains its block when created, inside the JS task that registered the block; an
-entry with no holder at the end of that task is freed. Widget lambdas are remembered by
+entry with no holder at the end of that task is freed. Generated widget entries are therefore
+`@NonRestartableComposable`: a restartable entry could be paused by a pausable composition
+(`LazyColumn` prefetch) before creating its holders, its blocks freed at the end of the task,
+and the resumed widget would call blocks that no longer exist — an empty item, a dead
+`onClick` (field report 5). The widget itself stays restartable. Widget lambdas are remembered by
 block id: a stable plugin lambda yields the same Kotlin lambda (the widget can be
 skipped); a replaced one is released at once — so a kernel that keeps a lambda past its
 composition must read it through `rememberUpdatedState`. A call to a released block does

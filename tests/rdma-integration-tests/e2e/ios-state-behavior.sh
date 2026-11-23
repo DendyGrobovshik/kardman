@@ -125,6 +125,10 @@ step_2_run_and_assert() {
     wait_marker "$log" "CAPTURE: body=7"
     wait_marker "$log" "CAPTURE: content=7"
     wait_marker "$log" "STATE_DOUBLE_SET: 20.5"
+    # A state read back from `remember` on a recomposition is the same proxy, typed.
+    wait_marker "$log" "STATE_MAP: ok same=true"
+    # derivedStateOf: the reader runs only when the result changes (1 + 3, not 31).
+    wait_marker "$log" "DERIVED: runs=4 tens=3 label=tick 0 error=RdmaException: calc boom"
     # Long keeps all 64 bits, including beyond the exact JS-integer range.
     wait_marker "$log" "STATE_LONG: 9007199254740993"
     wait_marker "$log" "STATE_LONG_SET: 9007199254740994"

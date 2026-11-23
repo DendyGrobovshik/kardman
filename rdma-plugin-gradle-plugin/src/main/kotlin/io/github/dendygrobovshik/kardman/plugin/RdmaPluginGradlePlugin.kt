@@ -150,6 +150,7 @@ import androidx.compose.runtime.Composer
 import androidx.compose.runtime.CompositionTracer
 import androidx.compose.runtime.InternalComposeTracingApi
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
 import androidx.compose.runtime.remember
 import kotlin.js.unsafeCast
 import kotlinx.coroutines.CoroutineScope
@@ -162,6 +163,7 @@ external object RDMA {
     fun registerComponent(name: String, paramDescs: String, content: dynamic, pluginId: String)
     fun setComposerEmpty(empty: Any)
     fun mutableStateOf(value: dynamic, typeDesc: String): dynamic
+    fun derivedStateOf(calculation: dynamic, typeDesc: String, pluginId: String): dynamic
     fun mutableStateListOf(elements: dynamic, typeDesc: String): dynamic
     fun mutableStateMapOf(entries: dynamic, typeDesc: String): dynamic
     fun registerBlock(block: dynamic, pluginId: String): dynamic
@@ -297,6 +299,11 @@ fun rdmaInstallTracer(on: Boolean) {
 // signature infers `T` from the argument so `var x by ...` keeps its static type.
 fun <T> rdmaMutableStateOf(value: T, typeDesc: String): MutableState<T> =
     RDMA.mutableStateOf(value, typeDesc).unsafeCast<MutableState<T>>()
+
+// A kernel derived state whose calculation is this lambda (docs/internals/compose_protocol.md
+// #derived-states); the compiler bakes the result descriptor in as the first argument.
+fun <T> rdmaDerivedStateOf(typeDesc: String, calculation: () -> T): State<T> =
+    RDMA.derivedStateOf(calculation, typeDesc, "$pluginId").unsafeCast<State<T>>()
 
 fun <T> rdmaMutableIntStateOf(value: T, typeDesc: String): MutableState<T> =
     RDMA.mutableStateOf(value, typeDesc).unsafeCast<MutableState<T>>()

@@ -156,6 +156,7 @@ class RdmaWidgetGenerator(
         out.write("""package $widgetEntriesPackage
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.NonRestartableComposable
 import androidx.compose.runtime.currentComposer
 import io.github.dendygrobovshik.kardman.runtime.RdmaComposeHost
 import io.github.dendygrobovshik.kardman.runtime.rdmaRememberCallback0
@@ -208,6 +209,7 @@ import io.github.dendygrobovshik.kardman.runtime.rdmaRememberContent1
             .joinToString(", ")
         return buildString {
             appendLine("@Composable")
+            appendLine("@NonRestartableComposable")
             appendLine("fun $entryName($sig) {")
             params.forEachIndexed { i, p -> append(resolvedDecl(p, i)) }
             appendLine("    ${fn.name}(")

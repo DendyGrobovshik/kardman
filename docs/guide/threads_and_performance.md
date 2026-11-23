@@ -128,3 +128,37 @@ down, so compare counts and causes, not timings, with an untraced run.
 While off, the tracer costs nothing: Compose's own trace hooks in plugin code see no
 tracer, and no kernel composition has an observer. Plugins see the tracer through their
 bridge, so a plugin built before the tracer existed is not counted until it is rebuilt.
+
+## Spin-wait
+
+**Experimental.** During composition the UI thread and the plugin thread hand work to each
+other many times per composable: every Composer operation of plugin code and every widget
+call is a round trip between them. Each hand-off normally puts the waiting thread to sleep
+and wakes it again, and those wake-ups are most of the cost of a round trip.
+
+```kotlin
+RdmaBridge.setSpinWaitMicros(50) // 0 = off, the default
+```
+
+With spin-wait on, a thread waiting for the other side first spins for up to the given
+number of microseconds, checking whether the answer has arrived, and only then sleeps. An
+answer that comes within that time costs no sleep and no wake-up. It can be switched at any
+time, from any thread.
+
+Measured on the stand's composition benchmark (100 rows of two texts recomposed 20 times,
+median per recomposition; an Android emulator and an iOS simulator, so check on devices):
+
+| Spin | Android | iOS |
+|---|---|---|
+| 0 (off) | 277 ms | 25 ms |
+| 20 µs | 185 ms | — |
+| 50 µs | 31 ms | 8 ms |
+| 100 µs | 25 ms | 8 ms |
+
+The price is CPU: while a rendezvous is in progress, the waiting thread keeps a core busy
+instead of sleeping, which costs battery. Outside composition nothing spins. Measure the
+gain, the battery and the frame times on your own screens before turning it on in a release.
+
+On the stand: `adb shell am start ... --ei rdmaSpinUs 50` (Android),
+`SIMCTL_CHILD_RDMA_SPIN_US=50` (iOS); the benchmark is the `alice:counter/bench` component
+(`--es rdmaScreen alice:counter/bench`, `SIMCTL_CHILD_RDMA_SCREEN`).

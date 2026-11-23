@@ -84,7 +84,6 @@ class ComposeAllowlistTest {
     @Test
     fun `rejects unsupported compose symbols`() {
         val rejected = listOf(
-            "androidx.compose.runtime.derivedStateOf",
             "androidx.compose.runtime.collectAsState",
             "androidx.compose.runtime.compositionLocalOf",
             "androidx.compose.runtime.staticCompositionLocalOf",

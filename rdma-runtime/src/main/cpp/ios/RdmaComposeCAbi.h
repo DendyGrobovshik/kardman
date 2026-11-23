@@ -156,6 +156,12 @@ inline void* rdma_mutableStateOf(void* initialValue, const char* typeDesc) {
     return fn(initialValue, typeDesc);
 }
 inline const char* rdma_stateTypeDesc(void* stateHandle) { static auto fn = (const char* (*)(void*))rdma_lookupFunction("rdma_stateTypeDesc"); if (__builtin_expect(fn == nullptr, 0)) fn = (const char* (*)(void*))rdma_lookupFunction("rdma_stateTypeDesc"); return fn(stateHandle); }
+// A kernel derived state over the plugin block (handle of an `RdmaTypedState`).
+inline void* rdma_derivedStateOf(int64_t blockId, const char* typeDesc) {
+    static auto fn = (void* (*)(int64_t, const char*))rdma_lookupFunction("rdma_derivedStateOf");
+    if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(int64_t, const char*))rdma_lookupFunction("rdma_derivedStateOf");
+    return fn(blockId, typeDesc);
+}
 inline void* rdma_stateGetValue(void* stateHandle) { static auto fn = (void* (*)(void*))rdma_lookupFunction("rdma_stateGetValue"); if (__builtin_expect(fn == nullptr, 0)) fn = (void* (*)(void*))rdma_lookupFunction("rdma_stateGetValue"); return fn(stateHandle); }
 inline void rdma_stateSetValue(void* stateHandle, void* value) { static auto fn = (void (*)(void*, void*))rdma_lookupFunction("rdma_stateSetValue"); if (__builtin_expect(fn == nullptr, 0)) fn = (void (*)(void*, void*))rdma_lookupFunction("rdma_stateSetValue"); fn(stateHandle, value); }
 
@@ -186,7 +192,7 @@ jsi::Value wrapAnyCAbi(jsi::Runtime& rt, HostContext ctx, void* handle);
 
 // Proxy factories (state + scope) — the C-ABI equivalents of makeStateProxy /
 // makeScopeUpdateScopeProxy. Take ownership of the passed handle.
-jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle, const std::string& typeDesc = "kotlin.Any");
+jsi::Object makeStateProxyCAbi(jsi::Runtime& rt, void* stateHandle, const std::string& typeDesc = "kotlin.Any", bool readOnly = false);
 jsi::Object makeScopeUpdateScopeProxyCAbi(jsi::Runtime& rt, void* scopeHandle);
 // `Composer.recomposeScope` for a plugin `ComposableLambdaImpl` (field report #50): the
 // current scope, recorded used, as a proxy whose `invalidate` invalidates it — or `null`

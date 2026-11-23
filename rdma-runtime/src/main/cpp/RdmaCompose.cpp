@@ -407,6 +407,10 @@ static bool initComposeJniCache(JNIEnv* env) {
     g_composeCache.composerClass = cacheClass(env, "androidx/compose/runtime/Composer");
     g_composeCache.scopeUpdateScopeClass = cacheClass(env, "androidx/compose/runtime/ScopeUpdateScope");
     g_composeCache.mutableStateClass = cacheClass(env, "androidx/compose/runtime/MutableState");
+    g_composeCache.stateClass = cacheClass(env, "androidx/compose/runtime/State");
+    g_composeCache.derivedStatesClass = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/RdmaDerivedStates");
+    g_composeCache.derivedStateCreate = env->GetStaticMethodID(g_composeCache.derivedStatesClass, "create",
+        "(J)Landroidx/compose/runtime/State;");
     g_composeCache.snapshotStateKt = cacheClass(env, "androidx/compose/runtime/SnapshotStateKt");
     g_composeCache.composerCompanion = cacheClass(env, "androidx/compose/runtime/Composer$Companion");
     g_composeCache.scopeBlockClass = cacheClass(env, "io/github/dendygrobovshik/kardman/runtime/ComposerScopeBlock");
@@ -426,7 +430,7 @@ static bool initComposeJniCache(JNIEnv* env) {
         return false;
     }
 
-    g_composeCache.stateGetValue = env->GetMethodID(g_composeCache.mutableStateClass, "getValue", "()Ljava/lang/Object;");
+    g_composeCache.stateGetValue = env->GetMethodID(g_composeCache.stateClass, "getValue", "()Ljava/lang/Object;");
     g_composeCache.stateSetValue = env->GetMethodID(g_composeCache.mutableStateClass, "setValue", "(Ljava/lang/Object;)V");
 
     g_composeCache.mutableStateOf = env->GetStaticMethodID(g_composeCache.snapshotStateKt, "mutableStateOf", "(Ljava/lang/Object;Landroidx/compose/runtime/SnapshotMutationPolicy;)Landroidx/compose/runtime/MutableState;");
@@ -858,8 +862,9 @@ bool captureJniError(JNIEnv* e, RdmaResult& out) {
 // (docs/design/runtime_rework.md §3.8). `get_value`/`set_value` are resolved once
 // per runtime by their compile-mangled names and read the state from `this`.
 struct StateProxyState : public RdmaTaggedState {
-    StateProxyState(jobject state, std::string typeDesc)
-        : RdmaTaggedState(RdmaStateKind::State), state_(state), descRaw_(std::move(typeDesc)), desc_(TypeDesc::parseOrAny(descRaw_)) {}
+    StateProxyState(jobject state, std::string typeDesc, bool readOnly = false)
+        : RdmaTaggedState(RdmaStateKind::State), state_(state), descRaw_(std::move(typeDesc)), desc_(TypeDesc::parseOrAny(descRaw_)),
+          readOnly_(readOnly) {}
     ~StateProxyState() override {
         if (state_ && g_composeCache.jvm) {
             JNIEnv* env = getEnv(g_composeCache.jvm);
@@ -869,6 +874,7 @@ struct StateProxyState : public RdmaTaggedState {
     jobject state_;       // global ref
     std::string descRaw_; // type descriptor of the state's value channel
     TypeDesc desc_;       // parsed form, used on writes
+    bool readOnly_;       // a derived state (`State`, not `MutableState`)
 };
 
 static std::shared_ptr<StateProxyState> stateProxyStateOf(jsi::Runtime& r, const jsi::Value& thisVal) {
@@ -915,6 +921,7 @@ static jsi::Value resolveStateMethod(jsi::Runtime& rt, const std::string& n) {
             rt, jsi::PropNameID::forAscii(rt, "set_value"), 1,
             [](jsi::Runtime& r, const jsi::Value& thisVal, const jsi::Value* args, size_t count) -> jsi::Value {
                 auto st = stateProxyStateOf(r, thisVal);
+                if (st->readOnly_) throw jsi::JSError(r, "a derived state is read-only");
                 jobject state = st->state_;
                 JNIEnv* e = getEnv(g_composeCache.jvm);
                 if (!e) return jsi::Value::undefined();
@@ -954,11 +961,11 @@ static jsi::Value resolveStateMethod(jsi::Runtime& rt, const std::string& n) {
     return jsi::Value::undefined();
 }
 
-jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal, const std::string& typeDesc) {
+jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal, const std::string& typeDesc, bool readOnly) {
     static jsi::Object* proto = nullptr; // shared, intentionally leaked (lives as long as the runtime)
     if (!proto) proto = new jsi::Object(rdmaLazyProto(rt, resolveStateMethod));
     jsi::Object obj = jsi::Object::create(rt, jsi::Value(rt, *proto));
-    obj.setNativeState(rt, std::make_shared<StateProxyState>(stateGlobal, typeDesc));
+    obj.setNativeState(rt, std::make_shared<StateProxyState>(stateGlobal, typeDesc, readOnly));
     return obj;
 }
 
@@ -1382,6 +1389,54 @@ void installRdmaComposeBridge(jsi::Runtime& rt, HostContext jvm) {
             return jsi::Value::undefined();
         });
     rdma.setProperty(rt, "setComposerEmpty", std::move(setEmptyFn));
+
+    // `derivedStateOf { calc }` (docs/internals/compose_protocol.md#derived-states): the
+    // kernel holds a real derived state whose calculation calls the plugin block, so Compose
+    // tracks the states the calculation reads and recomposes readers only when the result
+    // changes. Returns a read-only state proxy typed by the result descriptor.
+    auto derivedStateOfFn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, "derivedStateOf"), 3,
+        [](jsi::Runtime& r, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            JNIEnv* e = getEnv(g_composeCache.jvm);
+            if (!e || count < 2 || !args[0].isObject() || !args[0].asObject(r).isFunction(r) || !args[1].isString()) {
+                throw jsi::JSError(r, "derivedStateOf(calculation, typeDesc) expected");
+            }
+            const std::string descRaw = args[1].getString(r).utf8(r);
+            const std::string pluginId = count > 2 && args[2].isString() ? args[2].getString(r).utf8(r) : "";
+            const int64_t id = rdmaBlockRegisterPlugin(r, args[0].asObject(r).asFunction(r), pluginId);
+            rdmaBlockSetResultDesc(id, descRaw);
+            // The holder (retained in `create`) is made in this JS task. In composition the
+            // state is created on the UI thread, inside the composition snapshot (a state made
+            // in the global snapshot could not be read by the open composition snapshot).
+            const auto create = [id](JNIEnv* env, RdmaResult& err) -> jobject {
+                jobject s = env->CallStaticObjectMethod(g_composeCache.derivedStatesClass, g_composeCache.derivedStateCreate, (jlong)id);
+                if (captureJniError(env, err)) {
+                    if (s) env->DeleteLocalRef(s);
+                    return nullptr;
+                }
+                jobject g = s ? env->NewGlobalRef(s) : nullptr;
+                if (s) env->DeleteLocalRef(s);
+                return g;
+            };
+            jobject state = nullptr;
+            RdmaResult err;
+            if (g_inComposition) {
+                RdmaResult res = rdmaCallUi([&state, &create]() -> RdmaResult {
+                    JNIEnv* ue = getEnv(g_composeCache.jvm);
+                    if (!ue) return RdmaResult::undefined();
+                    RdmaResult uerr;
+                    state = create(ue, uerr);
+                    return uerr;
+                });
+                if (res.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, res);
+            } else {
+                state = create(e, err);
+                if (err.kind == RdmaResultKind::Error) return rdmaResultToJsi(r, err);
+            }
+            if (!state) throw jsi::JSError(r, "derivedStateOf: the kernel did not create the state");
+            return makeStateProxy(r, state, descRaw, /*readOnly=*/true);
+        });
+    rdma.setProperty(rt, "derivedStateOf", std::move(derivedStateOfFn));
 
     auto mutableStateOfFn = jsi::Function::createFromHostFunction(
         rt, jsi::PropNameID::forAscii(rt, "mutableStateOf"), 2,
@@ -1986,8 +2041,39 @@ jobject rdmaLambdaCallJni(JNIEnv* env, jlong blockId, jobjectArray args, const s
                         });
 }
 
+// The calculation of a plugin derived state. Its state reads must run on the thread that
+// runs the calculation, where Compose's read observer for it is installed: called from the
+// UI thread (a composition reading the state, or Compose re-checking it before recomposing
+// a reader) the UI thread waits at the boundary, so the reads rendezvous to it; called on
+// the Hermes thread (plugin code outside composition) they run there directly.
+jobject rdmaDerivedCallJni(JNIEnv* env, jlong blockId) {
+    const std::string resultDesc = rdmaBlockResultDesc(blockId);
+    const bool fromUi = rdmaOnUiThread();
+    return callJsForJni(env, nullptr, nullptr, "derived state #" + std::to_string(blockId),
+                        [blockId, resultDesc, fromUi](jsi::Runtime& rt, jobjectArray argsGlobal) {
+                            auto fn = rdmaBlockGet(blockId);
+                            if (!fn) throw jsi::JSError(rt, "the derived state calculation is no longer registered");
+                            const bool prev = g_inComposition;
+                            g_inComposition = fromUi;
+                            try {
+                                jobject r = callJsTyped(rt, fn, argsGlobal, "", resultDesc);
+                                g_inComposition = prev;
+                                return r;
+                            } catch (...) {
+                                g_inComposition = prev;
+                                throw;
+                            }
+                        });
+}
+
 } // namespace rdma
 } // namespace facebook
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaComposeHost_nativeInvokeDerived(
+    JNIEnv* env, jclass, jlong blockId) {
+    return facebook::rdma::rdmaDerivedCallJni(env, blockId);
+}
 
 // ----------------------------------------------------------- DisposableEffect
 

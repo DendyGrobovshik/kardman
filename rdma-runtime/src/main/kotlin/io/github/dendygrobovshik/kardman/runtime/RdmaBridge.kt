@@ -31,6 +31,15 @@ object RdmaBridge {
     external fun nativeIsReady(): Boolean
     external fun nativeContentVersion(): Int
     external fun nativeSetUncaughtExceptionHandler(handler: (String, RdmaException) -> Unit)
+    private external fun nativeSetSpinWaitMicros(micros: Int)
+
+    /**
+     * Experimental (docs/guide/threads_and_performance.md#spin-wait): a thread waiting for the
+     * other side of a UI/plugin rendezvous spins up to [micros] before sleeping, trading CPU
+     * for shorter thread switches in heavy compositions. 0 turns it off (the default). Any
+     * thread, any time.
+     */
+    fun setSpinWaitMicros(micros: Int) = nativeSetSpinWaitMicros(micros)
 
     private val staged = mutableListOf<String>()
 

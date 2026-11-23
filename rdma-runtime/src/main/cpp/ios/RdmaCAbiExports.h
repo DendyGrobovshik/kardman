@@ -33,6 +33,9 @@ void rdma_nativeInvokeCallback(int64_t blockId, void* argsHandle);
 // through to the native implementation (calling thread cannot run JS), 2 = error
 // (taken with rdma_takeNativeError). CONSUMES `argsHandle`.
 void* rdma_nativeInvokeSlot(int64_t blockId, void* argsHandle, const char* paramDescs, const char* resultDesc, int32_t* status);
+// The calculation of a plugin derived state (docs/internals/compose_protocol.md#derived-states):
+// a result handle; `*status` 2 = error (rdma_takeNativeError).
+void* rdma_nativeInvokeDerived(int64_t blockId, int32_t* status);
 void rdma_nativeInvokeLambda(int64_t blockId, void* argsHandle);
 int64_t rdma_nativeInvokeEffectBody(int64_t blockId);
 void rdma_nativeInvokeDispose(int64_t resultId);
@@ -60,6 +63,8 @@ const char* rdma_takeEvalError(void);
 // Recomposition tracer (RdmaDiagnostics): on/off, a kernel-side scope event (identity ids,
 // `desc` may be null), and the report (valid until the next call on this thread).
 void rdma_trace_set_enabled(int32_t enabled);
+// Experimental spin-wait of the rendezvous (0 = off).
+void rdma_set_spin_wait_micros(int32_t micros);
 void rdma_trace_scope_event(int32_t kind, int64_t scope, int64_t value, const char* desc);
 const char* rdma_trace_report(void);
 

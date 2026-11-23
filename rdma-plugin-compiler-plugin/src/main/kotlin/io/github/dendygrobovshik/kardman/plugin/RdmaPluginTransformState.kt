@@ -81,6 +81,7 @@ object RdmaPluginTransformState {
         "androidx.compose.runtime.DisposableEffect",
         "androidx.compose.runtime.LaunchedEffect",
         "androidx.compose.runtime.rememberCoroutineScope",
+        "androidx.compose.runtime.derivedStateOf",
     )
 
     /** State factories: each call opens an erased value channel and therefore must
@@ -172,6 +173,7 @@ object RdmaPluginTransformState {
         "androidx.compose.runtime.DisposableEffect" -> "rdmaDisposableEffect"
         "androidx.compose.runtime.LaunchedEffect" -> "rdmaLaunchedEffect"
         "androidx.compose.runtime.rememberCoroutineScope" -> "rdmaRememberCoroutineScope"
+        "androidx.compose.runtime.derivedStateOf" -> "rdmaDerivedStateOf"
         else -> error("not a compose entry point: $fqn")
     }
 

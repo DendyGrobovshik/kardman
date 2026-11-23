@@ -51,6 +51,11 @@ Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeInit(JNIEnv* env
     LOGI("RDMA runtime starting (async)");
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeSetSpinWaitMicros(JNIEnv*, jclass, jint micros) {
+    facebook::rdma::rdmaSetSpinWaitMicros((int)micros);
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_io_github_dendygrobovshik_kardman_runtime_RdmaBridge_nativeIsReady(JNIEnv* env, jclass) {
     if (!facebook::rdma::rdmaIsReady()) return JNI_FALSE;

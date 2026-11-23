@@ -42,6 +42,8 @@ fun Counter() {
     SubpackageProbe()
     CaptureProbe()
     TraceProbe()
+    StateMapProbe()
+    DerivedProbe()
     // Overrides called by a kernel widget on the UI thread (vtable, runtime_rework §6.4).
     val probe = remember { Cyborg("probe", 1) }
     PersonProbe(probe)
@@ -50,4 +52,7 @@ fun Counter() {
 fun main() {
     runPersonDemo()
     registerComponent("main") { Counter() }
+    registerComponent("lazy") { LazyItemsProbe() }
+    registerComponent("stateMap") { StateMapProbe() }
+    registerComponent("bench") { BenchProbe() }
 }

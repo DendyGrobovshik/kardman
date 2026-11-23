@@ -88,6 +88,8 @@ step_2_scalars() {
     wait_logcat "RdmaRuntime" "CAPTURE: body=7"
     wait_logcat "RdmaRuntime" "CAPTURE: content=7"
     wait_logcat "RdmaRuntime" "STATE_DOUBLE_SET: 20.5"
+    # derivedStateOf: the reader runs only when the result changes (1 + 3, not 31).
+    wait_logcat "RdmaRuntime" "DERIVED: runs=4 tens=3 label=tick 0 error=calc boom"
 }
 
 # 3) Long keeps all 64 bits: 2^53+1 round-trips exactly, plugin-side Long

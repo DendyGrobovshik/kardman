@@ -67,6 +67,8 @@ fun MainViewController(): UIViewController {
     // Recomposition tracer (e2e: launched with SIMCTL_CHILD_RDMA_TRACE=1; the report is
     // printed every second, prefixed `RdmaTrace: `).
     if (getenv("RDMA_TRACE")?.toKString() == "1") RdmaDiagnostics.traceRecompositions(true)
+    // Experimental spin-wait (SIMCTL_CHILD_RDMA_SPIN_US=<micros>).
+    getenv("RDMA_SPIN_US")?.toKString()?.toIntOrNull()?.let { RdmaBridge.setSpinWaitMicros(it) }
     loadBundles()
     loadDevPolyfills()
     return ComposeUIViewController { Content() }
@@ -93,7 +95,11 @@ private fun Content() {
             liveTitle = "s2"
         }
     }
-    if (ready) {
+    // A single component (SIMCTL_CHILD_RDMA_SCREEN=alice:counter/bench).
+    val screen = remember { getenv("RDMA_SCREEN")?.toKString() }
+    if (ready && screen != null) {
+        RdmaComposeHost.Component(screen)
+    } else if (ready) {
         Column {
             RdmaComposeHost.Component("alice:counter/main")
             RdmaComposeHost.Component("itest:newplug/main")

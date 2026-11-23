@@ -260,6 +260,13 @@ class RdmaAppGradlePlugin : Plugin<Project> {
         val copyGeneratedCppCAbi = target.tasks.register("copyGeneratedCppCAbi") { task ->
             kernelIosCompileTasks.forEach { task.dependsOn(it) }
             task.dependsOn(generateBridgeCAbi)
+            // The directory is the task's output: Gradle then re-reads it before a task that
+            // compiles it (an undeclared write can leave Gradle's cached view of the files stale,
+            // and the C++ compile would be skipped as up to date with the old bridge). The kernel
+            // modules write their C ABI files as a side effect of compilation, so the copy runs
+            // on every build instead of tracking them.
+            task.outputs.dir(capiCppDir)
+            task.outputs.upToDateWhen { false }
             task.doLast {
                 capiCppDir.mkdirs()
                 capiCppDir.listFiles { f -> f.isFile && (f.extension == "h" || f.extension == "cpp") }

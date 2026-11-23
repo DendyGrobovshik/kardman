@@ -42,7 +42,10 @@ struct ComposeJniCache {
     jmethodID updateScope = nullptr;
 
     jclass mutableStateClass = nullptr;
+    jclass stateClass = nullptr;     // State: getValue works on mutable and derived states
     jmethodID stateGetValue = nullptr;
+    jclass derivedStatesClass = nullptr; // RdmaDerivedStates
+    jmethodID derivedStateCreate = nullptr;
     jmethodID stateSetValue = nullptr;
 
     jclass snapshotStateKt = nullptr;
@@ -271,7 +274,7 @@ jsi::Value rdmaWrapNativeFunction(jsi::Runtime& rt, JavaVM* jvm, jobject fn,
 // descriptor (docs/design/type_descriptors.md). Pre-descriptor plugin bundles call
 // `RDMA.mutableStateOf` without a descriptor and keep their old Int/Boolean/String
 // contract (`typeDesc` defaults to the runtime-dispatch `kotlin.Any`).
-jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal, const std::string& typeDesc = "kotlin.Any");
+jsi::Object makeStateProxy(jsi::Runtime& rt, jobject stateGlobal, const std::string& typeDesc = "kotlin.Any", bool readOnly = false);
 
 jobject stateProxyJObject(jsi::Runtime& rt, const jsi::Value& v);
 

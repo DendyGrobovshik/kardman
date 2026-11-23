@@ -25,6 +25,7 @@ package io.github.dendygrobovshik.kardman.runtime
 
 import androidx.compose.runtime.Composer
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
 import androidx.compose.runtime.RecomposeScope
 import androidx.compose.runtime.ScopeUpdateScope
 import androidx.compose.runtime.cache
@@ -528,14 +529,14 @@ fun rdma_composer_updateRememberedValue(value: COpaquePointer?) {
  * value transport re-wraps state proxies with their exact channel type and no
  * side registry is needed.
  */
-class RdmaTypedState(val state: MutableState<Any?>, val typeDesc: String)
+class RdmaTypedState(val state: State<Any?>, val typeDesc: String)
 
-// Both a [RdmaTypedState] and a raw remembered `MutableState` are addressable.
+// Both a [RdmaTypedState] and a raw `State` are addressable; a derived state is read-only.
 @Suppress("UNCHECKED_CAST")
-private fun stateOf(stateHandle: COpaquePointer): MutableState<Any?>? =
+private fun stateOf(stateHandle: COpaquePointer): State<Any?>? =
     when (val v = stateHandle.obj<Any>()) {
         is RdmaTypedState -> v.state
-        is MutableState<*> -> v as MutableState<Any?>
+        is State<*> -> v as State<Any?>
         else -> null
     }
 
@@ -550,6 +551,12 @@ fun rdma_mutableStateOf(initialValue: COpaquePointer?, typeDesc: CPointer<ByteVa
         RdmaTypedState(mutableStateOf(initialValue?.obj<Any>()), desc).handle()
     }
 
+/** A derived state over plugin block [blockId] (docs/internals/compose_protocol.md#derived-states). */
+fun rdma_derivedStateOf(blockId: Long, typeDesc: CPointer<ByteVar>?): COpaquePointer? =
+    rdmaCaptureError(null) {
+        RdmaTypedState(RdmaDerivedStates.create(blockId), rdmaToKString(typeDesc)).handle()
+    }
+
 /** The type descriptor of a state handle created by [rdma_mutableStateOf]. */
 fun rdma_stateTypeDesc(stateHandle: COpaquePointer): CPointer<ByteVar>? =
     rdmaStringToCStr((stateHandle.obj<Any>() as? RdmaTypedState)?.typeDesc ?: "")
@@ -559,7 +566,7 @@ fun rdma_stateGetValue(stateHandle: COpaquePointer): COpaquePointer? =
 
 fun rdma_stateSetValue(stateHandle: COpaquePointer, value: COpaquePointer?) {
     rdmaCaptureError(Unit) {
-        stateOf(stateHandle)?.value = value?.obj<Any>()
+        (stateOf(stateHandle) as? MutableState<Any?>)?.value = value?.obj<Any>()
     }
 }
 
@@ -714,6 +721,7 @@ private val _register = run {
     rdmaRegisterFunction("rdma_composer_rememberedValue", staticCFunction(::rdma_composer_rememberedValue))
     rdmaRegisterFunction("rdma_composer_updateRememberedValue", staticCFunction(::rdma_composer_updateRememberedValue))
     rdmaRegisterFunction("rdma_mutableStateOf", staticCFunction(::rdma_mutableStateOf))
+    rdmaRegisterFunction("rdma_derivedStateOf", staticCFunction(::rdma_derivedStateOf))
     rdmaRegisterFunction("rdma_stateTypeDesc", staticCFunction(::rdma_stateTypeDesc))
     rdmaRegisterFunction("rdma_stateGetValue", staticCFunction(::rdma_stateGetValue))
     rdmaRegisterFunction("rdma_stateSetValue", staticCFunction(::rdma_stateSetValue))

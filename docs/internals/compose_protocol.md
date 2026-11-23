@@ -113,6 +113,35 @@ proxy carrying the value's [descriptor](type_descriptors.md).
 - `mutableStateListOf`/`mutableStateMapOf` create `SnapshotStateList`/`SnapshotStateMap`
   and return a state-backed collection proxy ([collections.md](collections.md)); its
   mutations recompose. A plain collection in `mutableStateOf` mutated in place does not.
+- **`remember { mutableStateOf(…) }`** keeps the proxy itself in the slot (a
+  `JsValueHolder`, like any JS object), so a recomposition gets the same proxy back: the
+  same identity and the same descriptor. (Storing the bare native state and wrapping it
+  again on every recomposition lost the descriptor — writes failed with `kotlin.Any` — and
+  the identity; field report 5.)
+
+## Derived states
+
+`derivedStateOf { calc }` is rewritten to `rdmaDerivedStateOf("<desc>") { calc }`; the
+descriptor is the result type's, by the state value rules. `RDMA.derivedStateOf(calc, desc,
+pluginId)` registers `calc` as a block with that result descriptor and has the kernel create
+a real `derivedStateOf { <call the block> }` (`RdmaDerivedStates`): in composition on the UI
+thread, inside the composition snapshot; outside composition on the Hermes thread. The plugin
+gets a read-only state proxy; reads work as for any state.
+
+Compose records a derived state's dependencies with a read observer installed **on the
+thread that runs the calculation**, so the plugin's reads inside `calc` must happen there:
+
+| The value is read by | The calculation runs | Reads inside `calc` |
+|---|---|---|
+| plugin composition (through the rendezvous) | UI thread → `calc` through the rendezvous | rendezvous to the UI thread (it waits) |
+| Compose itself, re-checking the result before recomposing a reader (`RecomposeScopeImpl.isInvalidFor`) | UI thread → `calc` through the rendezvous, often with no plugin code on the stack | rendezvous to the UI thread: the call sets the "UI waits" flag |
+| plugin code outside composition (a callback, a coroutine) | Hermes thread, inline | direct, on the Hermes thread |
+
+The block is held by an `RdmaBlockRef` captured by the calculation and released when the
+derived state is collected (the proxy holds the state). A JS exception in `calc` reaches the
+reader as `RdmaException`. Only the form without a mutation policy is supported (the result
+is compared with `equals`); a policy argument, or a result type that is not a state value,
+is a compile error.
 
 ## Object keys
 

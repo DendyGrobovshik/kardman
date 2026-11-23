@@ -30,6 +30,7 @@ import platform.CoreCrypto.CC_SHA256_DIGEST_LENGTH
 import kotlin.concurrent.AtomicReference
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_is_ready
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_content_version
+import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_set_spin_wait_micros
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_start
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_set_uncaught_handler
 import io.github.dendygrobovshik.kardman.ios.cinterop.rdma_takeEvalError
@@ -56,6 +57,14 @@ object RdmaBridge {
     }
 
     fun nativeContentVersion(): Int = rdma_content_version()
+
+    /**
+     * Experimental (docs/guide/threads_and_performance.md#spin-wait): a thread waiting for the
+     * other side of a UI/plugin rendezvous spins up to [micros] before sleeping, trading CPU
+     * for shorter thread switches in heavy compositions. 0 turns it off (the default). Any
+     * thread, any time.
+     */
+    fun setSpinWaitMicros(micros: Int) = rdma_set_spin_wait_micros(micros)
 
     fun nativeEvalBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return

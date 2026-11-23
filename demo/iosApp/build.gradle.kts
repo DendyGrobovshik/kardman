@@ -62,6 +62,8 @@ kotlin {
         val buildCpp = tasks.register("buildRdmaUserCAbi_$targetName", Exec::class.java) {
             dependsOn("copyGeneratedCppCAbi", "extractNativeSdk")
             inputs.dir(generatedCapiCpp)
+            // The runtime headers the bridge is compiled against (not Hermes' own).
+            inputs.files(includeDirs.subList(1, 5).map { dir -> fileTree(dir) { include("**/*.h") } })
             outputs.file(File(userCppBuild, "librdma_user.a"))
             val objDir = userCppBuild
             val srcGlob = generatedCapiCpp.absolutePath + "/*.cpp"
