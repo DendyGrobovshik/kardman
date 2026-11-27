@@ -182,8 +182,8 @@ jobject rdmaBoxLeafValue(JNIEnv* env, jsi::Runtime& rt, const jsi::Value& v, con
         return env->CallStaticObjectMethod(b.lng, b.longValueOf, (jlong)dv);
     }
     if (fqn == "kotlin.Long") {
-        // The plugin's `Long(low, high)` object (or an integral JS number), exact
-        // in all 64 bits (docs/design/type_descriptors.md#long-policy).
+        // The plugin's `Long(low, high)` object, exact in all 64 bits
+        // (docs/design/type_descriptors.md#long-policy).
         long long lv = rdmaCheckedJLong(rt, v);
         return env->CallStaticObjectMethod(b.lng, b.longValueOf, (jlong)lv);
     }

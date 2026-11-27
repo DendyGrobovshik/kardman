@@ -93,15 +93,14 @@ inline jsi::Value rdmaLongToJs(jsi::Runtime& rt, long long v) {
             return hook.asObject(rt).asFunction(rt).call(rt, loJs, hiJs);
         }
     }
-    // Legacy pre-Long bridge bundles see a JS number: exact or an error
-    // (the old ±2^53 contract — nothing else is safe without the converters).
-    double d = (double)v;
-    if (d != (double)(long long)d) {
-        rdmaThrowTypeError(rt,
-            "Long crossing would round: the plugin bridge predates the Long converters and a JS "
-            "number cannot hold " + std::to_string(v) + " exactly");
-    }
-    return jsi::Value(d);
+    // A `Long` never crosses as a plain JS number: the plugin's `Long(low, high)`
+    // object is the only faithful shape (docs/design/type_descriptors.md#long-policy).
+    // A bridge without the converters is incompatible, not degraded: a silent number
+    // used to round-trip here and only die later on the strict input channel
+    // (`rdmaCheckedJLong`), far away from the cause.
+    rdmaThrowTypeError(rt,
+        "the plugin bridge predates the Long converters (RDMA.longFromParts is missing): "
+        "rebuild the bundle with a current toolchain — a kotlin.Long cannot cross as a plain JS number");
 }
 
 } // namespace rdma
